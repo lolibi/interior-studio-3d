@@ -1,32 +1,22 @@
 export type ModelCategory =
   | 'sofas'
-  | 'armchairs'
   | 'chairs'
   | 'tables'
   | 'beds'
-  | 'wardrobes'
-  | 'kitchen'
+  | 'storage'
   | 'lighting'
-  | 'bathroom';
-
-export const CATEGORY_LABELS: Record<ModelCategory, string> = {
-  sofas: 'Дивани',
-  armchairs: 'Фотьойли',
-  chairs: 'Столове',
-  tables: 'Маси',
-  beds: 'Легла',
-  wardrobes: 'Гардероби',
-  kitchen: 'Кухненски шкафове',
-  lighting: 'Осветление',
-  bathroom: 'Баня',
-};
+  | 'decor';
 
 export type ScaleMode = 'fixed' | 'constrained' | 'free';
 
+export type TransformTool = 'translate' | 'rotate' | 'scale';
+
+export type DisplayUnit = 'cm' | 'm';
+
 export interface DimensionsCm {
-  width: number;  // ос X в сантиметри
-  height: number; // ос Y в сантиметри
-  depth: number;  // ос Z в сантиметри
+  width: number;
+  height: number;
+  depth: number;
 }
 
 export interface ScaleConstraints {
@@ -44,24 +34,35 @@ export interface CatalogModel {
   dimensionsCm: DimensionsCm;
   scaleMode: ScaleMode;
   scaleConstraints: ScaleConstraints;
-  glbStorageKey?: string;
-  previewDataUrl?: string;
+  glbUrl?: string | null;
+  previewUrl?: string | null;
+  glbStorageKey?: string | null;
+  previewDataUrl?: string | null;
   isActive: boolean;
-  isBuiltIn?: boolean;
 }
 
 export interface SceneObject {
   instanceId: string;
   modelId: string;
   name: string;
-  /** Позиция в метри [X, Y, Z] */
   position: [number, number, number];
-  /** Ротация в радиани [X, Y, Z] */
   rotation: [number, number, number];
-  /** Мащаб като множител [1, 1, 1] = 100% от базовия размер */
   scale: [number, number, number];
 }
 
-export type DisplayUnit = 'cm' | 'm';
+export interface SavedSceneSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
 
-export type TransformTool = 'translate' | 'rotate' | 'scale';
+export const CATEGORY_LABELS: Record<ModelCategory, string> = {
+  sofas: 'Дивани и кресла',
+  chairs: 'Столове',
+  tables: 'Маси',
+  beds: 'Легла и спалня',
+  storage: 'Шкафове и гардероби',
+  lighting: 'Осветление',
+  decor: 'Декор и аксесоари',
+};

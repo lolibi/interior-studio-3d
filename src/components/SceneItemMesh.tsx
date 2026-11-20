@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Box3, Group, Mesh, Object3D, Vector3 } from 'three';
+import { useEffect, useState } from 'react';
+import * as THREE from 'three';
 import { TransformControls } from '@react-three/drei';
-import { getGlbFileUrl } from '../utils/modelStorage';
-import { createConfiguredGLTFLoader } from '../utils/gltfLoader';
+import type { ThreeEvent } from '@react-three/fiber';
 import type {
   CatalogModel,
-  ModelCategory,
   SceneObject,
   TransformTool,
 } from '../types/editor';
+import { loadGlbFromUrl } from '../utils/gltfLoader';
 
 interface SceneItemMeshProps {
   item: SceneObject;
@@ -25,24 +24,6 @@ interface SceneItemMeshProps {
   onDraggingChange: (isDragging: boolean) => void;
 }
 
-const CATEGORY_COLORS: Record<ModelCategory, string> = {
-  sofas: '#6366f1',
-  armchairs: '#8b5cf6',
-  chairs: '#ec4899',
-  tables: '#d97706',
-  beds: '#0ea5e9',
-  wardrobes: '#10b981',
-  kitchen: '#14b8a6',
-  lighting: '#eab308',
-  bathroom: '#38bdf8',
-};
-
-interface NormalizedGlbData {
-  scene: Object3D;
-  normScale: [number, number, number];
-  normOffset: [number, number, number];
-}
-
 export function SceneItemMesh({
   item,
   model,
@@ -52,197 +33,185 @@ export function SceneItemMesh({
   onTransformChange,
   onDraggingChange,
 }: SceneItemMeshProps) {
-  const [targetGroup, setTargetGroup] = useState<Group | null>(null);
-  const [glbData, setGlbData] = useState<NormalizedGlbData | null>(null);
+  const [groupObj, setGroupObj] = useState<THREE.Group | null>(null);
+  const [loadedScene, setLoadedScene] = useState<THREE.Group | null>(null);
+  const [loadError, setLoadError] = useState(false);
 
-  const targetWidthM = model.dimensionsCm.width / 100;
-  const targetHeightM = model.dimensionsCm.height / 100;
-  const targetDepthM = model.dimensionsCm.depth / 100;
+  const targetW = Math.max(0.01, model.dimensionsCm.width / 100);
+  const targetH = Math.max(0.01, model.dimensionsCm.height / 100);
+  const targetD = Math.max(0.01, model.dimensionsCm.depth / 100);
 
+  // Зареждане на .glb файла от сървъра и приравняване към базовите размери на кота Y = 0
   useEffect(() => {
     let cancelled = false;
-    let objectUrl: string | null = null;
 
-    async function loadModelGeometry() {
-      if (!model.glbStorageKey) {
-        setGlbData(null);
+    async function loadModel() {
+      if (!model.glbUrl) {
+        setLoadedScene(null);
+        setLoadError(false);
         return;
       }
 
       try {
-        objectUrl = await getGlbFileUrl(model.glbStorageKey);
-        if (!objectUrl || cancelled) return;
-
-        const loader = createConfiguredGLTFLoader();
-        const gltf = await loader.loadAsync(objectUrl);
+        setLoadError(false);
+        const rawScene = await loadGlbFromUrl(model.glbUrl);
         if (cancelled) return;
 
-        gltf.scene.traverse((child) => {
-          if (child instanceof Mesh) {
+        rawScene.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(rawScene);
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+
+        const scaleX = size.x > 0.0001 ? targetW / size.x : 1;
+        const scaleY = size.y > 0.0001 ? targetH / size.y : 1;
+        const scaleZ = size.z > 0.0001 ? targetD / size.z : 1;
+
+        const wrapper = new THREE.Group();
+        rawScene.scale.set(scaleX, scaleY, scaleZ);
+        rawScene.position.set(
+          -center.x * scaleX,
+          -box.min.y * scaleY,
+          -center.z * scaleZ
+        );
+
+        rawScene.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
             child.castShadow = true;
             child.receiveShadow = true;
           }
         });
 
-        gltf.scene.updateMatrixWorld(true);
-        const box = new Box3().setFromObject(gltf.scene);
-        const size = new Vector3();
-        const center = new Vector3();
-        box.getSize(size);
-        box.getCenter(center);
-
-        const safeSizeX = size.x > 0.0001 ? size.x : 1;
-        const safeSizeY = size.y > 0.0001 ? size.y : 1;
-        const safeSizeZ = size.z > 0.0001 ? size.z : 1;
-
-        // Автоматично приравняване към базовите размери в метри (решава 3ds Max Scale Factor 100)
-        const normScale: [number, number, number] = [
-          targetWidthM / safeSizeX,
-          targetHeightM / safeSizeY,
-          targetDepthM / safeSizeZ,
-        ];
-
-        // Центриране по X и Z и поставяне на основата точно на пода (Y = 0)
-        const normOffset: [number, number, number] = [
-          -center.x,
-          -box.min.y,
-          -center.z,
-        ];
-
-        setGlbData({
-          scene: gltf.scene,
-          normScale,
-          normOffset,
-        });
+        wrapper.add(rawScene);
+        setLoadedScene(wrapper);
       } catch {
         if (!cancelled) {
-          setGlbData(null);
-        }
-      } finally {
-        if (objectUrl) {
-          URL.revokeObjectURL(objectUrl);
+          setLoadError(true);
+          setLoadedScene(null);
         }
       }
     }
 
-    loadModelGeometry();
-
+    loadModel();
     return () => {
       cancelled = true;
     };
-  }, [model.glbStorageKey, targetWidthM, targetHeightM, targetDepthM]);
+  }, [model.glbUrl, targetW, targetH, targetD]);
 
-  const axisVisibility = useMemo(() => {
-    if (transformTool !== 'scale') {
-      return { showX: true, showY: true, showZ: true };
+  // Синхронизиране на трансформацията от състоянието към 3D групата
+  useEffect(() => {
+    if (!groupObj) return;
+    groupObj.position.set(item.position[0], item.position[1], item.position[2]);
+    groupObj.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
+    groupObj.scale.set(item.scale[0], item.scale[1], item.scale[2]);
+  }, [groupObj, item.position, item.rotation, item.scale]);
+
+  function clampObjectTransform() {
+    if (!groupObj) return;
+
+    // Не позволяваме обектът да потъва под пода (Y = 0)
+    if (groupObj.position.y < 0) {
+      groupObj.position.y = 0;
     }
+
+    // Прилагане на правилата за мащабиране на модела
     if (model.scaleMode === 'fixed') {
-      return { showX: false, showY: false, showZ: false };
+      groupObj.scale.set(1, 1, 1);
+    } else if (model.scaleMode === 'constrained') {
+      const baseW = Math.max(1, model.dimensionsCm.width);
+      const baseH = Math.max(1, model.dimensionsCm.height);
+      const baseD = Math.max(1, model.dimensionsCm.depth);
+
+      const minSx = Math.max(0.05, model.scaleConstraints.minCm.width / baseW);
+      const maxSx = Math.max(minSx, model.scaleConstraints.maxCm.width / baseW);
+      const minSy = Math.max(0.05, model.scaleConstraints.minCm.height / baseH);
+      const maxSy = Math.max(minSy, model.scaleConstraints.maxCm.height / baseH);
+      const minSz = Math.max(0.05, model.scaleConstraints.minCm.depth / baseD);
+      const maxSz = Math.max(minSz, model.scaleConstraints.maxCm.depth / baseD);
+
+      const sx = model.scaleConstraints.allowX
+        ? Math.min(maxSx, Math.max(minSx, groupObj.scale.x))
+        : 1;
+      const sy = model.scaleConstraints.allowY
+        ? Math.min(maxSy, Math.max(minSy, groupObj.scale.y))
+        : 1;
+      const sz = model.scaleConstraints.allowZ
+        ? Math.min(maxSz, Math.max(minSz, groupObj.scale.z))
+        : 1;
+
+      groupObj.scale.set(sx, sy, sz);
+    } else {
+      groupObj.scale.set(
+        Math.min(20, Math.max(0.05, groupObj.scale.x)),
+        Math.min(20, Math.max(0.05, groupObj.scale.y)),
+        Math.min(20, Math.max(0.05, groupObj.scale.z))
+      );
     }
-    if (model.scaleMode === 'free') {
-      return { showX: true, showY: true, showZ: true };
-    }
-    return {
-      showX: model.scaleConstraints.allowX,
-      showY: model.scaleConstraints.allowY,
-      showZ: model.scaleConstraints.allowZ,
-    };
-  }, [transformTool, model.scaleMode, model.scaleConstraints]);
-
-  function clampAxisScale(rawScale: number, axis: 'width' | 'height' | 'depth'): number {
-    if (model.scaleMode === 'fixed') return 1;
-
-    const isAllowed =
-      model.scaleMode === 'free' ||
-      (axis === 'width' && model.scaleConstraints.allowX) ||
-      (axis === 'height' && model.scaleConstraints.allowY) ||
-      (axis === 'depth' && model.scaleConstraints.allowZ);
-
-    if (!isAllowed) return 1;
-
-    const base = Math.max(1, model.dimensionsCm[axis]);
-    const minRatio = Math.max(0.05, model.scaleConstraints.minCm[axis] / base);
-    const maxRatio = Math.max(minRatio, model.scaleConstraints.maxCm[axis] / base);
-
-    return Math.min(maxRatio, Math.max(minRatio, rawScale));
   }
 
-  function handleGizmoChange() {
-    if (!targetGroup) return;
+  function commitTransform() {
+    if (!groupObj) return;
+    clampObjectTransform();
 
-    const clampedScaleX = clampAxisScale(targetGroup.scale.x, 'width');
-    const clampedScaleY = clampAxisScale(targetGroup.scale.y, 'height');
-    const clampedScaleZ = clampAxisScale(targetGroup.scale.z, 'depth');
+    const nextPos: [number, number, number] = [
+      Number(groupObj.position.x.toFixed(4)),
+      Number(groupObj.position.y.toFixed(4)),
+      Number(groupObj.position.z.toFixed(4)),
+    ];
+    const nextRot: [number, number, number] = [
+      Number(groupObj.rotation.x.toFixed(4)),
+      Number(groupObj.rotation.y.toFixed(4)),
+      Number(groupObj.rotation.z.toFixed(4)),
+    ];
+    const nextScale: [number, number, number] = [
+      Number(groupObj.scale.x.toFixed(4)),
+      Number(groupObj.scale.y.toFixed(4)),
+      Number(groupObj.scale.z.toFixed(4)),
+    ];
 
-    targetGroup.scale.set(clampedScaleX, clampedScaleY, clampedScaleZ);
-
-    // Не позволяваме обектът да потъва под нивото на пода (Y = 0)
-    const safeY = Math.max(0, targetGroup.position.y);
-    targetGroup.position.y = safeY;
-
-    onTransformChange(
-      item.instanceId,
-      [targetGroup.position.x, safeY, targetGroup.position.z],
-      [targetGroup.rotation.x, targetGroup.rotation.y, targetGroup.rotation.z],
-      [clampedScaleX, clampedScaleY, clampedScaleZ]
-    );
+    onTransformChange(item.instanceId, nextPos, nextRot, nextScale);
   }
 
-  const placeholderColor = CATEGORY_COLORS[model.category] ?? '#64748b';
+  function handleClick(e: ThreeEvent<MouseEvent>) {
+    e.stopPropagation();
+    onSelect(item.instanceId);
+  }
 
   return (
     <>
-      <group
-        ref={setTargetGroup}
-        position={item.position}
-        rotation={item.rotation}
-        scale={item.scale}
-        onClick={(e) => {
-          e.stopPropagation();
-          onSelect(item.instanceId);
-        }}
-      >
-        {glbData ? (
-          <group scale={glbData.normScale}>
-            <primitive object={glbData.scene} position={glbData.normOffset} />
-          </group>
+      <group ref={setGroupObj} onClick={handleClick}>
+        {loadedScene ? (
+          <primitive object={loadedScene} />
         ) : (
-          <mesh position={[0, targetHeightM / 2, 0]} castShadow receiveShadow>
-            <boxGeometry args={[targetWidthM, targetHeightM, targetDepthM]} />
+          <mesh position={[0, targetH / 2, 0]} castShadow receiveShadow>
+            <boxGeometry args={[targetW, targetH, targetD]} />
             <meshStandardMaterial
-              color={placeholderColor}
-              roughness={0.6}
-              emissive={isSelected ? '#1d4ed8' : '#000000'}
-              emissiveIntensity={isSelected ? 0.35 : 0}
+              color={loadError ? '#ef4444' : '#3b82f6'}
+              roughness={0.65}
+              metalness={0.1}
             />
           </mesh>
         )}
 
-        {/* Светла рамка около основата при избран обект */}
         {isSelected && (
-          <mesh position={[0, 0.004, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-            <ringGeometry
-              args={[
-                Math.max(targetWidthM, targetDepthM) * 0.52,
-                Math.max(targetWidthM, targetDepthM) * 0.56,
-                32,
-              ]}
-            />
-            <meshBasicMaterial color="#38bdf8" />
+          <mesh position={[0, targetH / 2, 0]}>
+            <boxGeometry args={[targetW + 0.015, targetH + 0.015, targetD + 0.015]} />
+            <meshBasicMaterial color="#38bdf8" wireframe transparent opacity={0.55} />
           </mesh>
         )}
       </group>
 
-      {isSelected && targetGroup && (
+      {isSelected && groupObj && (
         <TransformControls
-          object={targetGroup}
+          object={groupObj}
           mode={transformTool}
-          showX={axisVisibility.showX}
-          showY={axisVisibility.showY}
-          showZ={axisVisibility.showZ}
           onMouseDown={() => onDraggingChange(true)}
-          onMouseUp={() => onDraggingChange(false)}
-          onChange={handleGizmoChange}
+          onMouseUp={() => {
+            onDraggingChange(false);
+            commitTransform();
+          }}
+          onObjectChange={clampObjectTransform}
         />
       )}
     </>
