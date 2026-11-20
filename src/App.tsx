@@ -214,6 +214,7 @@ export function App() {
     const newInstance: SceneObject = {
       instanceId: `obj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       modelId: model.id,
+      name: model.name,
       position: [Number(offsetX.toFixed(2)), 0, Number(offsetZ.toFixed(2))],
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
@@ -332,6 +333,7 @@ export function App() {
     const duplicate: SceneObject = {
       instanceId: `obj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       modelId: selectedObject.modelId,
+      name: selectedObject.name || selectedModel?.name || 'Копие',
       position: [
         Number((selectedObject.position[0] + 0.4).toFixed(3)),
         selectedObject.position[1],
@@ -360,7 +362,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v0.7</span>
+            <span className="brand-badge">v1.0</span>
           </div>
         </div>
 
@@ -652,7 +654,7 @@ export function App() {
                                   whiteSpace: 'nowrap',
                                 }}
                               >
-                                {idx + 1}. {m?.name ?? 'Обект'}
+                                {idx + 1}. {m?.name ?? obj.name}
                               </span>
                               <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
                             </button>

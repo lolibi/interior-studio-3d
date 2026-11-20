@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { useRef, useState } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import { TestApartment } from './TestApartment';
 import { SceneItemMesh } from './SceneItemMesh';
@@ -23,6 +23,33 @@ interface Viewport3DProps {
   ) => void;
 }
 
+interface RenderStats {
+  triangles: number;
+  calls: number;
+}
+
+function ScenePerformanceTracker({
+  onUpdate,
+}: {
+  onUpdate: (stats: RenderStats) => void;
+}) {
+  const gl = useThree((state) => state.gl);
+  const lastTimeRef = useRef(0);
+
+  useFrame(({ clock }) => {
+    const now = clock.getElapsedTime();
+    if (now - lastTimeRef.current >= 0.5) {
+      lastTimeRef.current = now;
+      onUpdate({
+        triangles: gl.info.render.triangles,
+        calls: gl.info.render.calls,
+      });
+    }
+  });
+
+  return null;
+}
+
 export function Viewport3D({
   sceneObjects,
   models,
@@ -32,9 +59,20 @@ export function Viewport3D({
   onTransformChange,
 }: Viewport3DProps) {
   const [isDraggingGizmo, setIsDraggingGizmo] = useState(false);
+  const [renderStats, setRenderStats] = useState<RenderStats>({
+    triangles: 0,
+    calls: 0,
+  });
 
   return (
-    <div style={{ width: '100%', height: '100%', background: '#111827' }}>
+    <div
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        background: '#111827',
+      }}
+    >
       <Canvas
         shadows
         camera={{ position: [6.5, 6.0, 7.5], fov: 45, near: 0.05, far: 100 }}
@@ -104,7 +142,30 @@ export function Viewport3D({
           maxPolarAngle={Math.PI / 2 - 0.02}
           target={[0, 0.5, 0]}
         />
+
+        {/* Брояч на полигони и Draw Calls в реално време */}
+        <ScenePerformanceTracker onUpdate={setRenderStats} />
       </Canvas>
+
+      {/* Индикатор за производителност горе вляво */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '12px',
+          left: '12px',
+          backgroundColor: 'rgba(15, 23, 42, 0.82)',
+          border: '1px solid #334155',
+          color: '#cbd5e1',
+          padding: '5px 10px',
+          borderRadius: '6px',
+          fontSize: '11px',
+          fontFamily: 'monospace',
+          pointerEvents: 'none',
+        }}
+      >
+        Обекти: {sceneObjects.length} • Полигони (Tris):{' '}
+        {renderStats.triangles.toLocaleString('bg-BG')} • Draw Calls: {renderStats.calls}
+      </div>
     </div>
   );
 }
