@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Viewport3D } from './components/Viewport3D';
 import { AdminPanel } from './components/AdminPanel';
 import { CATEGORY_LABELS } from './types/editor';
@@ -18,6 +18,11 @@ import {
   saveCatalog,
   saveGlbFile,
 } from './utils/modelStorage';
+import {
+  clearSavedScene,
+  loadSavedScene,
+  saveScene,
+} from './utils/sceneStorage';
 
 const SCALE_MODE_SHORT: Record<ScaleMode, string> = {
   fixed: 'Фиксиран',
@@ -49,15 +54,33 @@ function degToRad(deg: number): number {
 
 export function App() {
   const [models, setModels] = useState<CatalogModel[]>(() => loadCatalog());
-  const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
+  const [sceneObjects, setSceneObjects] = useState<SceneObject[]>(() => loadSavedScene());
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
   const [activeTool, setActiveTool] = useState<TransformTool>('translate');
   const [unit, setUnit] = useState<DisplayUnit>('cm');
   const [selectedCategory, setSelectedCategory] = useState<'all' | ModelCategory>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const unitLabel = unit === 'cm' ? 'см' : 'м';
+
+  function showTemporaryNotice(message: string) {
+    setSaveNotice(message);
+    if (noticeTimerRef.current) {
+      clearTimeout(noticeTimerRef.current);
+    }
+    noticeTimerRef.current = setTimeout(() => {
+      setSaveNotice(null);
+    }, 2500);
+  }
+
+  // Автоматично запазване на сцената при всяка промяна на обектите
+  useEffect(() => {
+    saveScene(sceneObjects);
+  }, [sceneObjects]);
 
   const selectedObject =
     sceneObjects.find((obj) => obj.instanceId === selectedInstanceId) ?? null;
@@ -65,10 +88,17 @@ export function App() {
     ? models.find((m) => m.id === selectedObject.modelId) ?? null
     : null;
 
-  // Клавишни комбинации W / E / R / Delete / Escape (само когато не се пише в текстово поле)
+  // Клавишни комбинации W / E / R / Delete / Escape и Cmd+S / Ctrl+S за запис
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (isAdminOpen) return;
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        saveScene(sceneObjects);
+        showTemporaryNotice('Сцената е запазена ✓');
+        return;
+      }
 
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
@@ -95,7 +125,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAdminOpen, selectedInstanceId]);
+  }, [isAdminOpen, selectedInstanceId, sceneObjects]);
 
   const activeModels = models.filter((model) => {
     if (!model.isActive) return false;
@@ -156,6 +186,24 @@ export function App() {
   function handleResetDefaults() {
     const defaults = resetCatalogToDefaults();
     setModels(defaults);
+  }
+
+  function handleManualSaveScene() {
+    saveScene(sceneObjects);
+    showTemporaryNotice('Сцената е запазена ✓');
+  }
+
+  function handleNewScene() {
+    if (sceneObjects.length === 0) return;
+    const confirmed = window.confirm(
+      'Сигурни ли сте, че искате да изчистите всички мебели от текущата сцена?'
+    );
+    if (!confirmed) return;
+
+    setSceneObjects([]);
+    setSelectedInstanceId(null);
+    clearSavedScene();
+    showTemporaryNotice('Създадена е нова празна сцена');
   }
 
   function handleAddToScene(model: CatalogModel) {
@@ -312,7 +360,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v0.5</span>
+            <span className="brand-badge">v0.7</span>
           </div>
         </div>
 
@@ -360,7 +408,22 @@ export function App() {
             м
           </button>
 
-          <button type="button" className="btn" disabled title="Ще бъде активирано в Етап 7">
+          <button
+            type="button"
+            className="btn"
+            onClick={handleNewScene}
+            disabled={sceneObjects.length === 0}
+            title="Изчисти всички мебели от сцената"
+          >
+            Нова сцена
+          </button>
+
+          <button
+            type="button"
+            className="btn"
+            onClick={handleManualSaveScene}
+            title="Запази текущата подредба на сцената (Cmd+S)"
+          >
             Запази сцена
           </button>
 
@@ -519,9 +582,30 @@ export function App() {
               onSelectObject={setSelectedInstanceId}
               onTransformChange={handleTransformChange}
             />
+
+            {saveNotice && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '12px',
+                  right: '12px',
+                  backgroundColor: 'rgba(6, 95, 70, 0.92)',
+                  border: '1px solid #10b981',
+                  color: '#ecfdf5',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  pointerEvents: 'none',
+                }}
+              >
+                {saveNotice}
+              </div>
+            )}
+
             <div className="viewport-hint">
-              Клик върху обект: Избор • W: Преместване • E: Въртене • R: Мащаб • Del: Изтриване |
-              Клетка = 10 см / Квадрат = 1 м
+              Клик върху обект: Избор • W: Преместване • E: Въртене • R: Мащаб • Del: Изтриване •
+              Cmd+S: Запис | Автозапис: Вкл.
             </div>
           </section>
 
