@@ -1,9 +1,38 @@
 import { useState } from 'react';
 import { Viewport3D } from './components/Viewport3D';
+import { AdminPanel } from './components/AdminPanel';
 import { CATEGORY_LABELS } from './types/editor';
-import type { DisplayUnit, ModelCategory, TransformTool } from './types/editor';
+import type {
+  CatalogModel,
+  DimensionsCm,
+  DisplayUnit,
+  ModelCategory,
+  ScaleMode,
+  TransformTool,
+} from './types/editor';
+import {
+  deleteGlbFile,
+  loadCatalog,
+  resetCatalogToDefaults,
+  saveCatalog,
+  saveGlbFile,
+} from './utils/modelStorage';
+
+const SCALE_MODE_SHORT: Record<ScaleMode, string> = {
+  fixed: 'Фиксиран',
+  constrained: 'Ограничен',
+  free: 'Свободен',
+};
+
+function formatDimensions(dims: DimensionsCm, unit: DisplayUnit): string {
+  if (unit === 'cm') {
+    return `${dims.width} × ${dims.height} × ${dims.depth} см`;
+  }
+  return `${(dims.width / 100).toFixed(2)} × ${(dims.height / 100).toFixed(2)} × ${(dims.depth / 100).toFixed(2)} м`;
+}
 
 export function App() {
+  const [models, setModels] = useState<CatalogModel[]>(() => loadCatalog());
   const [activeTool, setActiveTool] = useState<TransformTool>('translate');
   const [unit, setUnit] = useState<DisplayUnit>('cm');
   const [selectedCategory, setSelectedCategory] = useState<'all' | ModelCategory>('all');
@@ -12,6 +41,63 @@ export function App() {
 
   const unitLabel = unit === 'cm' ? 'см' : 'м';
 
+  const activeModels = models.filter((model) => {
+    if (!model.isActive) return false;
+    if (selectedCategory !== 'all' && model.category !== selectedCategory) return false;
+    if (
+      searchQuery.trim() &&
+      !model.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  async function handleSaveModel(model: CatalogModel, glbFile?: File | null) {
+    if (glbFile && model.glbStorageKey) {
+      const previous = models.find((m) => m.id === model.id);
+      if (previous?.glbStorageKey && previous.glbStorageKey !== model.glbStorageKey) {
+        await deleteGlbFile(previous.glbStorageKey);
+      }
+      await saveGlbFile(model.glbStorageKey, glbFile);
+    }
+
+    setModels((prev) => {
+      const exists = prev.some((m) => m.id === model.id);
+      const updated = exists
+        ? prev.map((m) => (m.id === model.id ? model : m))
+        : [model, ...prev];
+      saveCatalog(updated);
+      return updated;
+    });
+  }
+
+  function handleToggleActive(id: string) {
+    setModels((prev) => {
+      const updated = prev.map((m) =>
+        m.id === id ? { ...m, isActive: !m.isActive } : m
+      );
+      saveCatalog(updated);
+      return updated;
+    });
+  }
+
+  async function handleDeleteModel(model: CatalogModel) {
+    if (model.glbStorageKey) {
+      await deleteGlbFile(model.glbStorageKey);
+    }
+    setModels((prev) => {
+      const updated = prev.filter((m) => m.id !== model.id);
+      saveCatalog(updated);
+      return updated;
+    });
+  }
+
+  function handleResetDefaults() {
+    const defaults = resetCatalogToDefaults();
+    setModels(defaults);
+  }
+
   return (
     <div className="app-shell">
       {/* Горна лента с инструменти */}
@@ -19,7 +105,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v0.1</span>
+            <span className="brand-badge">v0.2</span>
           </div>
         </div>
 
@@ -83,31 +169,23 @@ export function App() {
 
       {/* Основна работна зона */}
       {isAdminOpen ? (
-        <main className="workspace" style={{ padding: '24px', justifyContent: 'center' }}>
-          <div className="empty-state-box" style={{ maxWidth: '560px', margin: 'auto' }}>
-            <h2 style={{ margin: '0 0 8px 0', color: '#f8fafc', fontSize: '16px' }}>
-              Администраторски панел (Подготовка)
-            </h2>
-            <p style={{ margin: '0 0 16px 0' }}>
-              Тук ще качвате своите GLB модели, Preview изображения, реални размери в сантиметри
-              и правила за мащабиране без промяна на кода. Ще го изградим в Етап 8.
-            </p>
-            <button
-              type="button"
-              className="btn btn-active"
-              onClick={() => setIsAdminOpen(false)}
-            >
-              Обратно към 3D сцената
-            </button>
-          </div>
-        </main>
+        <AdminPanel
+          models={models}
+          onSaveModel={handleSaveModel}
+          onToggleActive={handleToggleActive}
+          onDeleteModel={handleDeleteModel}
+          onResetDefaults={handleResetDefaults}
+          onClose={() => setIsAdminOpen(false)}
+        />
       ) : (
         <main className="workspace">
           {/* Ляв панел: Библиотека */}
           <aside className="sidebar-left">
             <div className="panel-header">
               <span>Библиотека мебели</span>
-              <span style={{ fontSize: '11px', color: '#94a3b8' }}>0 модела</span>
+              <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                {activeModels.length} модела
+              </span>
             </div>
 
             <div className="panel-body">
@@ -132,10 +210,96 @@ export function App() {
                 ))}
               </select>
 
-              <div className="empty-state-box">
-                Библиотеката все още е празна. В следващите етапи тук ще се зареждат 3D моделите
-                по категории и с Preview изображения.
-              </div>
+              {activeModels.length === 0 ? (
+                <div className="empty-state-box">
+                  Няма намерени активни модели по зададения филтър.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {activeModels.map((model) => (
+                    <div
+                      key={model.id}
+                      style={{
+                        backgroundColor: '#0f172a',
+                        border: '1px solid #334155',
+                        borderRadius: '6px',
+                        padding: '8px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        {model.previewDataUrl ? (
+                          <img
+                            src={model.previewDataUrl}
+                            alt={model.name}
+                            style={{
+                              width: '48px',
+                              height: '48px',
+                              objectFit: 'cover',
+                              borderRadius: '5px',
+                              border: '1px solid #334155',
+                              flexShrink: 0,
+                            }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: '48px',
+                              height: '48px',
+                              borderRadius: '5px',
+                              backgroundColor: '#1e293b',
+                              border: '1px dashed #475569',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '10px',
+                              fontWeight: 600,
+                              color: model.glbStorageKey ? '#34d399' : '#94a3b8',
+                              flexShrink: 0,
+                            }}
+                          >
+                            {model.glbStorageKey ? 'GLB' : '3D'}
+                          </div>
+                        )}
+
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div
+                            style={{
+                              fontWeight: 600,
+                              fontSize: '12px',
+                              color: '#f8fafc',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                            title={model.name}
+                          >
+                            {model.name}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                            {formatDimensions(model.dimensionsCm, unit)}
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#64748b', marginTop: '1px' }}>
+                            {CATEGORY_LABELS[model.category]} • {SCALE_MODE_SHORT[model.scaleMode]}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ width: '100%', fontSize: '11px' }}
+                        disabled
+                        title="Поставянето в 3D сцената ще бъде активирано в Етап 5"
+                      >
+                        + Добави в сцената (Етап 5)
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </aside>
 
@@ -157,8 +321,8 @@ export function App() {
 
             <div className="panel-body">
               <div className="empty-state-box">
-                Няма избран обект. Когато добавим мебели в сцената, тук ще виждате и задавате
-                точни координати, ротация и размери в {unitLabel}.
+                Няма избран обект. В Етап 5 ще активираме поставянето на мебели в апартамента и
+                управлението на координатите им тук.
               </div>
 
               <div>
