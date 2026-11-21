@@ -9,7 +9,20 @@ export interface WallOpening {
   heightM: number;          // височина на отвора (м)
   sillHeightM: number;      // височина от пода до долния ръб (0 за врати, напр. 0.90 за прозорци)
   swing?: DoorSwing;        // посока на отваряне за врати
-  modelId?: string | null;  // опционален .glb модел от каталога (за врата или прозорец)
+  modelId?: string | null;  // опционален .glb модел от каталога
+}
+
+export interface StandaloneOpening {
+  id: string;
+  type: OpeningType;
+  position: [number, number]; // център [x, z] в метри на плана
+  rotationDeg: number;        // завъртане в градуси (0° = хоризонтално по X)
+  widthM: number;             // ширина на отвора (м)
+  heightM: number;            // височина на отвора (м)
+  sillHeightM: number;        // отстояние от земята / пода (0 за врати, напр. 0.90 за прозорци)
+  thicknessM: number;         // дълбочина / дебелина на касата (м)
+  swing?: DoorSwing;          // посока на отваряне за врати
+  modelId?: string | null;    // опционален .glb модел от каталога
 }
 
 export interface WallSegment {
@@ -38,6 +51,7 @@ export interface RoomConfig {
   ceilingHeightM: number;
   defaultThicknessM: number;
   walls: WallSegment[];
+  openings?: StandaloneOpening[];
   floorplan: FloorplanUnderlay | null;
 }
 
@@ -48,6 +62,7 @@ export interface ApartmentTemplate {
   ceilingHeightM: number;
   defaultThicknessM: number;
   walls: WallSegment[];
+  openings?: StandaloneOpening[];
   updatedAt?: string;
 }
 
@@ -63,6 +78,29 @@ export function getWallAngleDeg(wall: WallSegment): number {
   let deg = (Math.atan2(dz, dx) * 180) / Math.PI;
   if (deg < 0) deg += 360;
   return Number(deg.toFixed(1));
+}
+
+/**
+ * Връща точните координати [x, z] на левия и десния край (каса) на самостоятелна врата/прозорец,
+ * за да могат стените да се прихващат (snap) директно към тях.
+ */
+export function getOpeningJambPoints(
+  op: StandaloneOpening
+): [[number, number], [number, number]] {
+  const rad = (op.rotationDeg * Math.PI) / 180;
+  const halfW = Math.max(0.1, op.widthM) / 2;
+  const dx = Math.cos(rad) * halfW;
+  const dz = Math.sin(rad) * halfW;
+
+  const left: [number, number] = [
+    Number((op.position[0] - dx).toFixed(3)),
+    Number((op.position[1] - dz).toFixed(3)),
+  ];
+  const right: [number, number] = [
+    Number((op.position[0] + dx).toFixed(3)),
+    Number((op.position[1] + dz).toFixed(3)),
+  ];
+  return [left, right];
 }
 
 export function computeEndpointFromAngleAndLength(
@@ -117,7 +155,8 @@ export function calibrateFloorplanByTwoPoints(
 }
 
 /**
- * Изчислява удълженията в началото и края на стената, за да се сглобяват ъглите плътно без срязване.
+ * Изчислява челни ъглови сглобки без припокриване (Z-fighting):
+ * водещата стена минава до външния ръб (+halfT), а прилежащата спира плътно в лицето ѝ (-halfT).
  */
 export function getWallJointExtensions(
   wall: WallSegment,
@@ -127,17 +166,36 @@ export function getWallJointExtensions(
   let startExt = 0;
   let endExt = 0;
 
-  for (const other of allWalls) {
+  const wallIndex = allWalls.findIndex((w) => w.id === wall.id);
+  const wDx = wall.end[0] - wall.start[0];
+  const wDz = wall.end[1] - wall.start[1];
+  const wLen = Math.hypot(wDx, wDz) || 1;
+  const wUx = wDx / wLen;
+  const wUz = wDz / wLen;
+
+  for (let i = 0; i < allWalls.length; i++) {
+    const other = allWalls[i];
     if (other.id === wall.id) continue;
 
+    const oDx = other.end[0] - other.start[0];
+    const oDz = other.end[1] - other.start[1];
+    const oLen = Math.hypot(oDx, oDz) || 1;
+    const oUx = oDx / oLen;
+    const oUz = oDz / oLen;
+
+    // Ако са колинеарни (продължение една на друга), не добавяме ъглово удължение
+    const cross = Math.abs(wUx * oUz - wUz * oUx);
+    if (cross < 0.15) continue;
+
     const otherHalfT = Math.max(0.05, other.thicknessM) / 2;
+    const isDominant = wallIndex < i;
 
     const touchesStart =
       Math.hypot(wall.start[0] - other.start[0], wall.start[1] - other.start[1]) < eps ||
       Math.hypot(wall.start[0] - other.end[0], wall.start[1] - other.end[1]) < eps;
 
     if (touchesStart) {
-      startExt = Math.max(startExt, otherHalfT);
+      startExt = isDominant ? otherHalfT : -otherHalfT;
     }
 
     const touchesEnd =
@@ -145,7 +203,7 @@ export function getWallJointExtensions(
       Math.hypot(wall.end[0] - other.end[0], wall.end[1] - other.end[1]) < eps;
 
     if (touchesEnd) {
-      endExt = Math.max(endExt, otherHalfT);
+      endExt = isDominant ? otherHalfT : -otherHalfT;
     }
   }
 
@@ -272,7 +330,7 @@ export function snapDrawingPoint(
   disableAngleSnap = false
 ): [number, number] {
   for (const target of snapTargets) {
-    if (Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]) <= 0.2) {
+    if (Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]) <= 0.22) {
       return [Number(target[0].toFixed(3)), Number(target[1].toFixed(3))];
     }
   }
@@ -338,6 +396,7 @@ export function createDefaultRoomConfig(): RoomConfig {
     ceilingHeightM: 2.65,
     defaultThicknessM: 0.15,
     walls: createStarterWalls(0.15),
+    openings: [],
     floorplan: null,
   };
 }

@@ -22,8 +22,10 @@ interface Viewport3DProps {
   viewMode?: ViewportCameraMode;
   selectedWallId?: string | null;
   selectedOpeningId?: string | null;
+  selectedStandaloneOpeningId?: string | null;
   onSelectWall?: (wallId: string | null) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
+  onSelectStandaloneOpening?: (openingId: string | null) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -51,8 +53,10 @@ export function Viewport3D({
   viewMode = '3d',
   selectedWallId = null,
   selectedOpeningId = null,
+  selectedStandaloneOpeningId = null,
   onSelectWall,
   onSelectOpening,
+  onSelectStandaloneOpening,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -82,6 +86,7 @@ export function Viewport3D({
         if (!isBusyDrawingOrCalib) {
           onSelectObject(null);
           onSelectWall?.(null);
+          onSelectStandaloneOpening?.(null);
         }
       }}
     >
@@ -164,8 +169,10 @@ export function Viewport3D({
         models={models}
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
+        selectedStandaloneOpeningId={selectedStandaloneOpeningId}
         onSelectWall={onSelectWall}
         onSelectOpening={onSelectOpening}
+        onSelectStandaloneOpening={onSelectStandaloneOpening}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
         hoverPoint={hoverPoint}
@@ -191,6 +198,7 @@ export function Viewport3D({
               if (!isBusyDrawingOrCalib) {
                 onSelectObject(id);
                 onSelectWall?.(null);
+                onSelectStandaloneOpening?.(null);
               }
             }}
             onTransformChange={onTransformChange}

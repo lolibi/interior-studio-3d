@@ -5,14 +5,18 @@ import type { ThreeEvent } from '@react-three/fiber';
 import type { CatalogModel } from '../types/editor';
 import {
   findClosedRoomPolygons,
+  getOpeningJambPoints,
   getWallAngleDeg,
   getWallJointExtensions,
   getWallLengthM,
   snapDrawingPoint,
 } from '../types/room';
 import type {
+  DoorSwing,
   FloorplanUnderlay,
+  OpeningType,
   RoomConfig,
+  StandaloneOpening,
   WallOpening,
   WallSegment,
 } from '../types/room';
@@ -23,8 +27,10 @@ interface RoomMeshProps {
   models?: CatalogModel[];
   selectedWallId?: string | null;
   selectedOpeningId?: string | null;
+  selectedStandaloneOpeningId?: string | null;
   onSelectWall?: (wallId: string | null) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
+  onSelectStandaloneOpening?: (openingId: string | null) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -155,29 +161,31 @@ function ClosedFloorsMesh({ polygons }: ClosedFloorsMeshProps) {
 
 interface GlbOpeningAssetProps {
   glbUrl: string;
-  opening: WallOpening;
-  wallThicknessM: number;
+  type: OpeningType;
+  widthM: number;
+  heightM: number;
+  depthM: number;
 }
 
 function GlbOpeningAsset({
   glbUrl,
-  opening,
-  wallThicknessM,
+  type,
+  widthM,
+  heightM,
+  depthM,
 }: GlbOpeningAssetProps) {
   const gltf = useGLTF(glbUrl);
 
   const preparedScene = useMemo(() => {
-    if (opening.type === 'window') {
-      // Интелигентно разтягане по вертекси — касата и профилът остават недеформирани
+    if (type === 'window') {
       return cloneAndStretchGlbByVertices(gltf.scene, {
-        targetWidthM: opening.widthM,
-        targetHeightM: opening.heightM,
-        targetDepthM: wallThicknessM,
+        targetWidthM: widthM,
+        targetHeightM: heightM,
+        targetDepthM: depthM,
         frameMarginM: 0.07,
       });
     }
 
-    // За врати: пропорционално пасване по габаритен размер
     const cloned = gltf.scene.clone(true);
     const box = new THREE.Box3().setFromObject(cloned);
     const size = new THREE.Vector3();
@@ -185,9 +193,9 @@ function GlbOpeningAsset({
     box.getSize(size);
     box.getCenter(center);
 
-    const sx = size.x > 0.01 ? opening.widthM / size.x : 1;
-    const sy = size.y > 0.01 ? opening.heightM / size.y : 1;
-    const sz = size.z > 0.01 ? wallThicknessM / size.z : 1;
+    const sx = size.x > 0.01 ? widthM / size.x : 1;
+    const sy = size.y > 0.01 ? heightM / size.y : 1;
+    const sz = size.z > 0.01 ? depthM / size.z : 1;
 
     cloned.scale.set(sx, sy, sz);
     cloned.position.set(
@@ -196,43 +204,51 @@ function GlbOpeningAsset({
       -center.z * sz
     );
     return cloned;
-  }, [gltf.scene, opening.type, opening.widthM, opening.heightM, wallThicknessM]);
+  }, [gltf.scene, type, widthM, heightM, depthM]);
 
   return (
-    <group position={[0, -opening.heightM / 2, 0]}>
+    <group position={[0, -heightM / 2, 0]}>
       <primitive object={preparedScene} />
     </group>
   );
 }
 
-interface OpeningFixtureProps {
-  opening: WallOpening;
-  wallThicknessM: number;
+interface OpeningVisualProps {
+  type: OpeningType;
+  widthM: number;
+  heightM: number;
+  depthM: number;
+  swing?: DoorSwing;
+  modelId?: string | null;
   models: CatalogModel[];
   isSelected: boolean;
   onClick: (e: ThreeEvent<MouseEvent>) => void;
 }
 
-function OpeningFixture({
-  opening,
-  wallThicknessM,
+function OpeningVisual({
+  type,
+  widthM,
+  heightM,
+  depthM,
+  swing = 'left-in',
+  modelId,
   models,
   isSelected,
   onClick,
-}: OpeningFixtureProps) {
+}: OpeningVisualProps) {
   const assignedModel = useMemo(
     () =>
-      opening.modelId
-        ? models.find((m) => m.id === opening.modelId && Boolean(m.glbUrl)) ?? null
+      modelId
+        ? models.find((m) => m.id === modelId && Boolean(m.glbUrl)) ?? null
         : null,
-    [opening.modelId, models]
+    [modelId, models]
   );
 
-  const w = opening.widthM;
-  const h = opening.heightM;
-  const d = wallThicknessM;
+  const w = widthM;
+  const h = heightM;
+  const d = depthM;
   const frameT = 0.055;
-  const frameColor = isSelected ? '#38bdf8' : opening.type === 'door' ? '#92400e' : '#f8fafc';
+  const frameColor = isSelected ? '#38bdf8' : type === 'door' ? '#92400e' : '#f8fafc';
 
   if (assignedModel?.glbUrl) {
     return (
@@ -240,30 +256,30 @@ function OpeningFixture({
         <Suspense fallback={null}>
           <GlbOpeningAsset
             glbUrl={assignedModel.glbUrl}
-            opening={opening}
-            wallThicknessM={d}
+            type={type}
+            widthM={w}
+            heightM={h}
+            depthM={d}
           />
         </Suspense>
         {isSelected && (
           <mesh>
             <boxGeometry args={[w + 0.02, h + 0.02, d + 0.03]} />
-            <meshBasicMaterial color="#38bdf8" wireframe transparent opacity={0.8} />
+            <meshBasicMaterial color="#38bdf8" wireframe transparent opacity={0.85} />
           </mesh>
         )}
       </group>
     );
   }
 
-  if (opening.type === 'door') {
-    const swing = opening.swing ?? 'left-in';
+  if (type === 'door') {
     const isRight = swing.startsWith('right');
     const isOut = swing.endsWith('out');
     const leafW = Math.max(0.2, w - frameT * 2);
     const leafH = Math.max(0.5, h - frameT);
     const hingeX = isRight ? leafW / 2 : -leafW / 2;
     const hingeZ = isOut ? d / 2 : -d / 2;
-    const openAngle =
-      (isRight ? -1 : 1) * (isOut ? -0.55 : 0.55);
+    const openAngle = (isRight ? -1 : 1) * (isOut ? -0.55 : 0.55);
 
     return (
       <group onClick={onClick}>
@@ -283,7 +299,7 @@ function OpeningFixture({
           <meshStandardMaterial color={frameColor} roughness={0.6} />
         </mesh>
 
-        {/* Крило на вратата (леко отворено в 3D за яснота) */}
+        {/* Крило на вратата */}
         <group position={[hingeX, -frameT / 2, hingeZ]} rotation={[0, openAngle, 0]}>
           <mesh
             position={[isRight ? -leafW / 2 : leafW / 2, 0, 0]}
@@ -297,52 +313,136 @@ function OpeningFixture({
             />
           </mesh>
         </group>
+
+        {isSelected && (
+          <mesh>
+            <boxGeometry args={[w + 0.02, h + 0.02, d + 0.03]} />
+            <meshBasicMaterial color="#38bdf8" wireframe transparent opacity={0.85} />
+          </mesh>
+        )}
       </group>
     );
   }
 
-  // Прозорец (вграден 3D стъклопакет с рамка)
+  // Прозорец
   return (
     <group onClick={onClick}>
-      {/* Ляв профил */}
       <mesh position={[-w / 2 + frameT / 2, 0, 0]} castShadow receiveShadow>
         <boxGeometry args={[frameT, h, d * 0.65]} />
         <meshStandardMaterial color={frameColor} roughness={0.4} />
       </mesh>
-      {/* Десен профил */}
       <mesh position={[w / 2 - frameT / 2, 0, 0]} castShadow receiveShadow>
         <boxGeometry args={[frameT, h, d * 0.65]} />
         <meshStandardMaterial color={frameColor} roughness={0.4} />
       </mesh>
-      {/* Горен профил */}
       <mesh position={[0, h / 2 - frameT / 2, 0]} castShadow receiveShadow>
         <boxGeometry args={[w, frameT, d * 0.65]} />
         <meshStandardMaterial color={frameColor} roughness={0.4} />
       </mesh>
-      {/* Долен профил / перваз */}
       <mesh position={[0, -h / 2 + frameT / 2, 0]} castShadow receiveShadow>
         <boxGeometry args={[w + 0.03, frameT, d + 0.04]} />
         <meshStandardMaterial color={frameColor} roughness={0.4} />
       </mesh>
-      {/* Стъклопакет */}
       <mesh>
-        <boxGeometry args={[Math.max(0.1, w - frameT * 2), Math.max(0.1, h - frameT * 2), 0.025]} />
+        <boxGeometry
+          args={[Math.max(0.1, w - frameT * 2), Math.max(0.1, h - frameT * 2), 0.025]}
+        />
         <meshStandardMaterial
           color="#38bdf8"
           transparent
-          opacity={0.32}
+          opacity={0.35}
           roughness={0.1}
           metalness={0.1}
         />
       </mesh>
+
+      {isSelected && (
+        <mesh>
+          <boxGeometry args={[w + 0.03, h + 0.03, d + 0.05]} />
+          <meshBasicMaterial color="#38bdf8" wireframe transparent opacity={0.85} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+interface StandaloneOpeningMeshProps {
+  opening: StandaloneOpening;
+  ceilingHeightM: number;
+  models: CatalogModel[];
+  isSelected: boolean;
+  isInteractiveDisabled: boolean;
+  onSelect?: (openingId: string) => void;
+}
+
+function StandaloneOpeningMesh({
+  opening,
+  ceilingHeightM,
+  models,
+  isSelected,
+  isInteractiveDisabled,
+  onSelect,
+}: StandaloneOpeningMeshProps) {
+  const sill = opening.type === 'door' ? 0 : Math.max(0, opening.sillHeightM);
+  const clampedH = Math.min(
+    Math.max(0.3, ceilingHeightM - sill),
+    Math.max(0.3, opening.heightM)
+  );
+  const centerY = sill + clampedH / 2;
+  const angleY = -(opening.rotationDeg * Math.PI) / 180;
+
+  return (
+    <group
+      position={[opening.position[0], centerY, opening.position[1]]}
+      rotation={[0, angleY, 0]}
+    >
+      <OpeningVisual
+        type={opening.type}
+        widthM={Math.max(0.3, opening.widthM)}
+        heightM={clampedH}
+        depthM={Math.max(0.06, opening.thicknessM)}
+        swing={opening.swing}
+        modelId={opening.modelId}
+        models={models}
+        isSelected={isSelected}
+        onClick={(e) => {
+          if (isInteractiveDisabled) return;
+          e.stopPropagation();
+          onSelect?.(opening.id);
+        }}
+      />
+
+      {isSelected && (
+        <Html
+          position={[0, clampedH / 2 + 0.24, 0]}
+          center
+          style={{ pointerEvents: 'none' }}
+        >
+          <div
+            style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.94)',
+              border: '1px solid #38bdf8',
+              color: '#f8fafc',
+              padding: '2px 7px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {opening.type === 'door' ? 'Врата' : 'Прозорец'} • {opening.widthM}×{clampedH} м
+            {opening.type === 'window' ? ` (от пода: ${sill} м)` : ''}
+          </div>
+        </Html>
+      )}
     </group>
   );
 }
 
 interface WallSolidBox {
   key: string;
-  centerX: number; // локално спрямо центъра на стената [-baseLength/2 .. +baseLength/2]
-  centerY: number; // спрямо пода [0 .. ceilingHeightM]
+  centerX: number;
+  centerY: number;
   width: number;
   height: number;
 }
@@ -363,25 +463,24 @@ function buildWallSolidBoxes(
         key: 'solid-full',
         centerX: (minX + maxX) / 2,
         centerY: ceilingHeightM / 2,
-        width: maxX - minX,
+        width: Math.max(0.02, maxX - minX),
         height: ceilingHeightM,
       },
     ];
   }
 
-  // Нормализираме и сортираме отворите по оста на стената
   const normalized = openings
     .map((op) => {
       const clampedStart = Math.max(
-        0.05,
-        Math.min(baseLength - 0.15, op.offsetFromStartM)
+        0.0,
+        Math.min(baseLength - 0.1, op.offsetFromStartM)
       );
       const clampedEnd = Math.min(
-        baseLength - 0.05,
+        baseLength,
         clampedStart + Math.max(0.2, op.widthM)
       );
       const sill = op.type === 'door' ? 0 : Math.max(0, op.sillHeightM);
-      const top = Math.min(ceilingHeightM - 0.05, sill + Math.max(0.3, op.heightM));
+      const top = Math.min(ceilingHeightM, sill + Math.max(0.3, op.heightM));
 
       return {
         op,
@@ -398,7 +497,6 @@ function buildWallSolidBoxes(
   let cursorX = minX;
 
   normalized.forEach((item, idx) => {
-    // 1. Плътен стълб преди отвора
     if (item.localStart > cursorX + 0.01) {
       const w = item.localStart - cursorX;
       boxes.push({
@@ -413,7 +511,6 @@ function buildWallSolidBoxes(
     const opWidth = item.localEnd - item.localStart;
     const opCenterX = (item.localStart + item.localEnd) / 2;
 
-    // 2. Подпрозоречен зид (ако sill > 0)
     if (item.sill > 0.01) {
       boxes.push({
         key: `sill-${item.op.id}`,
@@ -424,7 +521,6 @@ function buildWallSolidBoxes(
       });
     }
 
-    // 3. Трегер над вратата/прозореца до тавана
     const lintelH = ceilingHeightM - item.top;
     if (lintelH > 0.01) {
       boxes.push({
@@ -439,7 +535,6 @@ function buildWallSolidBoxes(
     cursorX = Math.max(cursorX, item.localEnd);
   });
 
-  // 4. Финален плътен стълб до края на стената
   if (maxX > cursorX + 0.01) {
     const w = maxX - cursorX;
     boxes.push({
@@ -457,6 +552,7 @@ function buildWallSolidBoxes(
 interface SingleWallProps {
   wall: WallSegment;
   allWalls: WallSegment[];
+  standaloneOpenings: StandaloneOpening[];
   models: CatalogModel[];
   ceilingHeightM: number;
   isSelected: boolean;
@@ -469,6 +565,7 @@ interface SingleWallProps {
 function SingleWall({
   wall,
   allWalls,
+  standaloneOpenings,
   models,
   ceilingHeightM,
   isSelected,
@@ -480,7 +577,8 @@ function SingleWall({
   const dx = wall.end[0] - wall.start[0];
   const dz = wall.end[1] - wall.start[1];
   const baseLength = Math.max(0.05, Math.hypot(dx, dz));
-  const angleY = -Math.atan2(dz, dx);
+  const wallRad = Math.atan2(dz, dx);
+  const angleY = -wallRad;
 
   const midX = (wall.start[0] + wall.end[0]) / 2;
   const midZ = (wall.start[1] + wall.end[1]) / 2;
@@ -492,11 +590,62 @@ function SingleWall({
 
   const height = Math.max(0.2, ceilingHeightM);
   const thickness = Math.max(0.05, wall.thicknessM);
-  const openings = wall.openings ?? [];
+  const embeddedOpenings = wall.openings ?? [];
+
+  // Обединяваме вградените отвори на стената + самостоятелните врати/прозорци, които лежат по нея
+  const effectiveCutoutOpenings = useMemo(() => {
+    const combined: WallOpening[] = [...embeddedOpenings];
+    const ux = dx / baseLength;
+    const uz = dz / baseLength;
+
+    for (const sop of standaloneOpenings) {
+      const sopRad = (sop.rotationDeg * Math.PI) / 180;
+      const isParallel = Math.abs(Math.cos(wallRad - sopRad)) > 0.85;
+      if (!isParallel) continue;
+
+      const vx = sop.position[0] - wall.start[0];
+      const vz = sop.position[1] - wall.start[1];
+      const along = vx * ux + vz * uz;
+      const perp = Math.abs(vx * -uz + vz * ux);
+
+      if (perp > (thickness + sop.thicknessM) * 0.65) continue;
+
+      const startOffset = along - sop.widthM / 2;
+      const endOffset = along + sop.widthM / 2;
+      if (endOffset <= 0.02 || startOffset >= baseLength - 0.02) continue;
+
+      combined.push({
+        id: `auto-cut-${sop.id}`,
+        type: sop.type,
+        offsetFromStartM: Math.max(0, startOffset),
+        widthM: Math.min(baseLength, endOffset) - Math.max(0, startOffset),
+        heightM: sop.heightM,
+        sillHeightM: sop.sillHeightM,
+      });
+    }
+
+    return combined;
+  }, [
+    embeddedOpenings,
+    standaloneOpenings,
+    dx,
+    dz,
+    baseLength,
+    wallRad,
+    wall.start,
+    thickness,
+  ]);
 
   const solidBoxes = useMemo(
-    () => buildWallSolidBoxes(baseLength, startExt, endExt, height, openings),
-    [baseLength, startExt, endExt, height, openings]
+    () =>
+      buildWallSolidBoxes(
+        baseLength,
+        startExt,
+        endExt,
+        height,
+        effectiveCutoutOpenings
+      ),
+    [baseLength, startExt, endExt, height, effectiveCutoutOpenings]
   );
 
   function handleWallClick(e: ThreeEvent<MouseEvent>) {
@@ -505,12 +654,11 @@ function SingleWall({
     onSelectWall?.(wall.id);
   }
 
-  const totalRenderLength = baseLength + startExt + endExt;
+  const totalRenderLength = Math.max(0.05, baseLength + startExt + endExt);
   const totalShiftX = (endExt - startExt) / 2;
 
   return (
     <group position={[midX, 0, midZ]} rotation={[0, angleY, 0]}>
-      {/* Плътни части на стената около вратите и прозорците */}
       {solidBoxes.map((box) => (
         <mesh
           key={box.key}
@@ -528,8 +676,7 @@ function SingleWall({
         </mesh>
       ))}
 
-      {/* Врати и прозорци в стената */}
-      {openings.map((op) => {
+      {embeddedOpenings.map((op) => {
         const clampedStart = Math.max(
           0.05,
           Math.min(baseLength - 0.15, op.offsetFromStartM)
@@ -549,14 +696,13 @@ function SingleWall({
 
         return (
           <group key={op.id} position={[localX, localY, 0]}>
-            <OpeningFixture
-              opening={{
-                ...op,
-                widthM: clampedWidth,
-                heightM: clampedHeight,
-                sillHeightM: sill,
-              }}
-              wallThicknessM={thickness}
+            <OpeningVisual
+              type={op.type}
+              widthM={clampedWidth}
+              heightM={clampedHeight}
+              depthM={thickness}
+              swing={op.swing}
+              modelId={op.modelId}
               models={models}
               isSelected={selectedOpeningId === op.id}
               onClick={(e) => {
@@ -569,18 +715,17 @@ function SingleWall({
         );
       })}
 
-      {/* Контур и етикет при избрана стена */}
       {isSelected && (
         <>
           <mesh position={[totalShiftX, height / 2, 0]}>
             <boxGeometry
-              args={[totalRenderLength + 0.015, height + 0.015, thickness + 0.015]}
+              args={[totalRenderLength + 0.008, height + 0.008, thickness + 0.008]}
             />
             <meshBasicMaterial
               color="#0284c7"
               wireframe
               transparent
-              opacity={0.65}
+              opacity={0.7}
             />
           </mesh>
           <Html
@@ -614,8 +759,10 @@ export function RoomMesh({
   models = [],
   selectedWallId = null,
   selectedOpeningId = null,
+  selectedStandaloneOpeningId = null,
   onSelectWall,
   onSelectOpening,
+  onSelectStandaloneOpening,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -626,21 +773,28 @@ export function RoomMesh({
   calibPoints = [],
   onCalibFloorClick,
 }: RoomMeshProps) {
+  const standaloneOpenings = room.openings ?? [];
+
   const closedPolygons = useMemo(
     () => findClosedRoomPolygons(room.walls),
     [room.walls]
   );
 
+  // Точки за прихващане (snap): краища на стени + краища (каси) на врати и прозорци + текущи точки
   const snapTargets = useMemo(() => {
     const pts: [number, number][] = [];
     for (const w of room.walls) {
       pts.push(w.start, w.end);
     }
+    for (const op of standaloneOpenings) {
+      const [leftJamb, rightJamb] = getOpeningJambPoints(op);
+      pts.push(leftJamb, rightJamb);
+    }
     for (const p of draftPoints) {
       pts.push(p);
     }
     return pts;
-  }, [room.walls, draftPoints]);
+  }, [room.walls, standaloneOpenings, draftPoints]);
 
   function resolveSnappedFromEvent(
     e: ThreeEvent<MouseEvent | PointerEvent>
@@ -759,12 +913,13 @@ export function RoomMesh({
       {/* Автоматични подове под затворените стаи */}
       <ClosedFloorsMesh polygons={closedPolygons} />
 
-      {/* Всички стени с плътни ъглови сглобки, врати и прозорци */}
+      {/* Всички стени без overlapping по ъглите */}
       {room.walls.map((wall) => (
         <SingleWall
           key={wall.id}
           wall={wall}
           allWalls={room.walls}
+          standaloneOpenings={standaloneOpenings}
           models={models}
           ceilingHeightM={room.ceilingHeightM}
           isSelected={wall.id === selectedWallId}
@@ -775,7 +930,20 @@ export function RoomMesh({
         />
       ))}
 
-      {/* Възли в краищата на съществуващи стени за лесно прихващане */}
+      {/* Самостоятелни врати и прозорци (могат да се слагат преди/независимо от стените) */}
+      {standaloneOpenings.map((op) => (
+        <StandaloneOpeningMesh
+          key={op.id}
+          opening={op}
+          ceilingHeightM={room.ceilingHeightM}
+          models={models}
+          isSelected={op.id === selectedStandaloneOpeningId}
+          isInteractiveDisabled={isDrawingWalls || isCalibratingPlan}
+          onSelect={(id) => onSelectStandaloneOpening?.(id)}
+        />
+      ))}
+
+      {/* Възли за прихващане (стени + каси на врати/прозорци) */}
       {isDrawingWalls &&
         snapTargets.map((pt, idx) => (
           <mesh key={`snap-node-${idx}`} position={[pt[0], 0.03, pt[1]]}>
