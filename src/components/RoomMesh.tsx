@@ -104,7 +104,6 @@ function ClosedFloorsMesh({ polygons }: ClosedFloorsMeshProps) {
   const geometries = useMemo(() => {
     return polygons.map((poly) => {
       const shape = new THREE.Shape();
-      // Shape в XY се завърта по X на +90° (Math.PI / 2), за да съвпадне с [x, z] на пода
       shape.moveTo(poly[0][0], poly[0][1]);
       for (let i = 1; i < poly.length; i++) {
         shape.lineTo(poly[i][0], poly[i][1]);
@@ -172,7 +171,6 @@ function SingleWall({
   );
 
   const renderLength = baseLength + startExt + endExt;
-  // Изместваме центъра по оста на стената според удълженията в началото и края
   const shiftAlongWall = (endExt - startExt) / 2;
   const dirX = dx / baseLength;
   const dirZ = dz / baseLength;

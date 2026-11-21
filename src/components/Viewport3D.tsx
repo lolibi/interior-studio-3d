@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { useRef, useState } from 'react';
+import * as THREE from 'three';
+import { Canvas } from '@react-three/fiber';
 import {
   Environment,
   Grid,
   Lightformer,
   OrbitControls,
+  OrthographicCamera,
+  PerspectiveCamera,
 } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
@@ -24,6 +27,10 @@ interface Viewport3DProps {
   hoverPoint?: [number, number] | null;
   onHoverPointChange?: (pt: [number, number] | null) => void;
   onFloorDrawClick?: (point: [number, number]) => void;
+  onBreakDrawChain?: () => void;
+  isCalibratingPlan?: boolean;
+  calibPoints?: [number, number][];
+  onCalibFloorClick?: (point: [number, number]) => void;
   sceneObjects: SceneObject[];
   models: CatalogModel[];
   selectedInstanceId: string | null;
@@ -37,38 +44,6 @@ interface Viewport3DProps {
   ) => void;
 }
 
-interface CameraModeControllerProps {
-  viewMode: ViewportCameraMode;
-  orbitRef: React.RefObject<OrbitControlsImpl | null>;
-}
-
-function CameraModeController({ viewMode, orbitRef }: CameraModeControllerProps) {
-  const { camera } = useThree();
-  const prevModeRef = useRef<ViewportCameraMode>(viewMode);
-
-  useEffect(() => {
-    if (prevModeRef.current === viewMode) return;
-    prevModeRef.current = viewMode;
-
-    const controls = orbitRef.current;
-    if (viewMode === 'top') {
-      camera.position.set(0, 12, 0.01);
-      if (controls) {
-        controls.target.set(0, 0, 0);
-        controls.update();
-      }
-    } else {
-      camera.position.set(5.5, 5.5, 6.5);
-      if (controls) {
-        controls.target.set(0, 0, 0);
-        controls.update();
-      }
-    }
-  }, [viewMode, camera, orbitRef]);
-
-  return null;
-}
-
 export function Viewport3D({
   room,
   viewMode = '3d',
@@ -79,6 +54,10 @@ export function Viewport3D({
   hoverPoint = null,
   onHoverPointChange,
   onFloorDrawClick,
+  onBreakDrawChain,
+  isCalibratingPlan = false,
+  calibPoints = [],
+  onCalibFloorClick,
   sceneObjects,
   models,
   selectedInstanceId,
@@ -89,13 +68,15 @@ export function Viewport3D({
   const orbitRef = useRef<OrbitControlsImpl | null>(null);
   const [isDraggingObject, setIsDraggingObject] = useState(false);
 
+  const isTopOrtho = viewMode === 'top';
+  const isBusyDrawingOrCalib = isDrawingWalls || isCalibratingPlan;
+
   return (
     <Canvas
       shadows
       dpr={[1, 2]}
-      camera={{ position: [5.5, 5.5, 6.5], fov: 45, near: 0.1, far: 150 }}
       onPointerMissed={() => {
-        if (!isDrawingWalls) {
+        if (!isBusyDrawingOrCalib) {
           onSelectObject(null);
           onSelectWall?.(null);
         }
@@ -103,7 +84,24 @@ export function Viewport3D({
     >
       <color attach="background" args={['#0b1120']} />
 
-      <CameraModeController viewMode={viewMode} orbitRef={orbitRef} />
+      {isTopOrtho ? (
+        <OrthographicCamera
+          makeDefault
+          position={[0, 20, 0]}
+          rotation={[-Math.PI / 2, 0, 0]}
+          zoom={55}
+          near={0.1}
+          far={100}
+        />
+      ) : (
+        <PerspectiveCamera
+          makeDefault
+          position={[5.5, 5.5, 6.5]}
+          fov={45}
+          near={0.1}
+          far={150}
+        />
+      )}
 
       <ambientLight intensity={0.65} />
       <directionalLight
@@ -113,10 +111,10 @@ export function Viewport3D({
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={0.5}
         shadow-camera-far={35}
-        shadow-camera-left={-12}
-        shadow-camera-right={12}
-        shadow-camera-top={12}
-        shadow-camera-bottom={-12}
+        shadow-camera-left={-15}
+        shadow-camera-right={15}
+        shadow-camera-top={15}
+        shadow-camera-bottom={-15}
         shadow-bias={-0.0004}
       />
 
@@ -146,14 +144,14 @@ export function Viewport3D({
       </Environment>
 
       <Grid
-        args={[30, 30]}
+        args={[40, 40]}
         cellSize={0.5}
         cellThickness={0.6}
         cellColor="#1e293b"
         sectionSize={1}
         sectionThickness={1.2}
         sectionColor="#334155"
-        fadeDistance={28}
+        fadeDistance={36}
         fadeStrength={1.5}
         position={[0, 0, 0]}
       />
@@ -167,6 +165,10 @@ export function Viewport3D({
         hoverPoint={hoverPoint}
         onHoverPointChange={onHoverPointChange}
         onFloorDrawClick={onFloorDrawClick}
+        onBreakDrawChain={onBreakDrawChain}
+        isCalibratingPlan={isCalibratingPlan}
+        calibPoints={calibPoints}
+        onCalibFloorClick={onCalibFloorClick}
       />
 
       {sceneObjects.map((obj) => {
@@ -178,10 +180,10 @@ export function Viewport3D({
             key={obj.instanceId}
             item={obj}
             model={model}
-            isSelected={!isDrawingWalls && obj.instanceId === selectedInstanceId}
+            isSelected={!isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId}
             transformTool={transformTool}
             onSelect={(id) => {
-              if (!isDrawingWalls) {
+              if (!isBusyDrawingOrCalib) {
                 onSelectObject(id);
                 onSelectWall?.(null);
               }
@@ -193,15 +195,31 @@ export function Viewport3D({
       })}
 
       <OrbitControls
+        key={viewMode}
         ref={orbitRef}
         makeDefault
         enabled={!isDraggingObject}
         enableDamping
         dampingFactor={0.08}
-        enableRotate={viewMode !== 'top'}
+        enableRotate={!isTopOrtho}
+        mouseButtons={
+          isTopOrtho
+            ? {
+                LEFT: isBusyDrawingOrCalib ? undefined : THREE.MOUSE.PAN,
+                MIDDLE: THREE.MOUSE.PAN,
+                RIGHT: isDrawingWalls ? undefined : THREE.MOUSE.PAN,
+              }
+            : {
+                LEFT: THREE.MOUSE.ROTATE,
+                MIDDLE: THREE.MOUSE.DOLLY,
+                RIGHT: THREE.MOUSE.PAN,
+              }
+        }
         maxPolarAngle={Math.PI / 2 - 0.03}
         minDistance={1.2}
-        maxDistance={32}
+        maxDistance={40}
+        minZoom={12}
+        maxZoom={220}
       />
     </Canvas>
   );

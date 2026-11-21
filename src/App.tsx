@@ -14,6 +14,7 @@ import type {
   TransformTool,
 } from './types/editor';
 import {
+  calibrateFloorplanByTwoPoints,
   computeEndpointFromAngleAndLength,
   createDefaultRoomConfig,
   createStarterWalls,
@@ -76,15 +77,20 @@ function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
 
   let floorplan: FloorplanUnderlay | null = null;
   if (obj.floorplan && typeof obj.floorplan === 'object' && obj.floorplan.imageUrl) {
+    const wM = Number(obj.floorplan.widthM) || 10;
+    const dM = Number(obj.floorplan.depthM) || 8;
+    const ar =
+      Number(obj.floorplan.aspectRatio) || (dM > 0 ? wM / dM : 1);
     floorplan = {
       imageUrl: String(obj.floorplan.imageUrl),
-      widthM: Number(obj.floorplan.widthM) || 10,
-      depthM: Number(obj.floorplan.depthM) || 8,
+      widthM: wM,
+      depthM: dM,
+      aspectRatio: ar,
       offsetX: Number(obj.floorplan.offsetX) || 0,
       offsetZ: Number(obj.floorplan.offsetZ) || 0,
       rotationDeg: Number(obj.floorplan.rotationDeg) || 0,
       opacity:
-        typeof obj.floorplan.opacity === 'number' ? obj.floorplan.opacity : 0.65,
+        typeof obj.floorplan.opacity === 'number' ? obj.floorplan.opacity : 0.7,
       visible: obj.floorplan.visible !== false,
     };
   }
@@ -97,6 +103,26 @@ function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
     walls: walls.length > 0 ? walls : createStarterWalls(defaultThicknessM),
     floorplan,
   };
+}
+
+function measureLocalFileAspectRatio(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const ar =
+        img.naturalWidth > 0 && img.naturalHeight > 0
+          ? img.naturalWidth / img.naturalHeight
+          : 1;
+      URL.revokeObjectURL(objectUrl);
+      resolve(ar);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(1);
+    };
+    img.src = objectUrl;
+  });
 }
 
 function formatDimensions(dims: DimensionsCm, unit: DisplayUnit): string {
@@ -142,8 +168,11 @@ export function App() {
   const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
   const [exactDrawLengthInput, setExactDrawLengthInput] = useState('');
 
-  // Подложка план от строителя
+  // Подложка план от строителя + 2-точкова калибрация
   const [isUploadingPlan, setIsUploadingPlan] = useState(false);
+  const [isCalibratingPlan, setIsCalibratingPlan] = useState(false);
+  const [calibPoints, setCalibPoints] = useState<[number, number][]>([]);
+  const [calibRealMetersInput, setCalibRealMetersInput] = useState('');
 
   const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
   const [currentSceneId, setCurrentSceneId] = useState<string | null>(null);
@@ -173,7 +202,7 @@ export function App() {
       }
       noticeTimerRef.current = setTimeout(() => {
         setNotice(null);
-      }, 3200);
+      }, 4000);
     },
     []
   );
@@ -193,7 +222,6 @@ export function App() {
         const serverTemplates = await fetchApartmentTemplates();
         setTemplates(serverTemplates);
       } catch {
-        // Шаблоните в api.php ще се активират при следващата стъпка
         setTemplates([]);
       }
     } catch (err) {
@@ -293,29 +321,6 @@ export function App() {
     showTemporaryNotice(`Зареден шаблон: „${tpl.name}“`, 'success');
   }
 
-  function handleAddChainedWall() {
-    const lastWall = room.walls[room.walls.length - 1];
-    const startPt: [number, number] = lastWall ? lastWall.end : [0, 0];
-    const nextDeg = lastWall ? (getWallAngleDeg(lastWall) + 90) % 360 : 0;
-    const endPt = computeEndpointFromAngleAndLength(startPt, 3.0, nextDeg);
-
-    const newWall: WallSegment = {
-      id: `wall-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      start: startPt,
-      end: endPt,
-      thicknessM: lastWall?.thicknessM ?? room.defaultThicknessM,
-    };
-
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: [...prev.walls, newWall],
-    }));
-    setSelectedWallId(newWall.id);
-    setSelectedInstanceId(null);
-  }
-
   function handleStartCustomEmptyPlan() {
     setRoom((prev) => ({
       ...prev,
@@ -324,18 +329,22 @@ export function App() {
       walls: [],
     }));
     setSelectedWallId(null);
+    setIsCalibratingPlan(false);
+    setCalibPoints([]);
     setDraftPoints([]);
     setHoverPoint(null);
     setExactDrawLengthInput('');
     setIsDrawingWalls(true);
     setViewMode('top');
     showTemporaryNotice(
-      'Празен чертеж (2D отгоре): кликни начална точка, движи по 45°/90° или въведи точен размер в метри',
+      'Празен 2D чертеж (Ortho): кликай стени по 45°/90°, десен бутон за нова верига стени',
       'success'
     );
   }
 
   function toggleDrawMode() {
+    setIsCalibratingPlan(false);
+    setCalibPoints([]);
     setIsDrawingWalls((prev) => {
       const next = !prev;
       setDraftPoints([]);
@@ -346,7 +355,7 @@ export function App() {
         setSelectedWallId(null);
         setViewMode('top');
         showTemporaryNotice(
-          'Режим чертане (45°/90°): кликни точки върху плана или въведи точна дължина в метри',
+          'CAD Чертане: кликай точки (45°/90°), десен бутон прекъсва веригата за нова стена',
           'success'
         );
       }
@@ -354,54 +363,70 @@ export function App() {
     });
   }
 
-  const finalizeDrawnWalls = useCallback(
-    (pointsToCommit: [number, number][], closeLoop: boolean) => {
-      if (pointsToCommit.length < 2) {
-        setIsDrawingWalls(false);
-        setDraftPoints([]);
-        setHoverPoint(null);
-        return;
-      }
+  const commitCurrentChain = useCallback(
+    (
+      pointsToCommit: [number, number][],
+      closeLoop: boolean,
+      keepDrawingActive: boolean
+    ) => {
+      if (pointsToCommit.length >= 2) {
+        const newSegments: WallSegment[] = [];
+        const count =
+          closeLoop && pointsToCommit.length >= 3
+            ? pointsToCommit.length
+            : pointsToCommit.length - 1;
 
-      const newSegments: WallSegment[] = [];
-      const count =
-        closeLoop && pointsToCommit.length >= 3
-          ? pointsToCommit.length
-          : pointsToCommit.length - 1;
+        for (let i = 0; i < count; i++) {
+          const p1 = pointsToCommit[i];
+          const p2 = pointsToCommit[(i + 1) % pointsToCommit.length];
+          if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 0.05) continue;
+          newSegments.push({
+            id: `wall-draw-${Date.now()}-${Math.random().toString(36).slice(2, 5)}-${i}`,
+            start: p1,
+            end: p2,
+            thicknessM: room.defaultThicknessM,
+          });
+        }
 
-      for (let i = 0; i < count; i++) {
-        const p1 = pointsToCommit[i];
-        const p2 = pointsToCommit[(i + 1) % pointsToCommit.length];
-        if (Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 0.05) continue;
-        newSegments.push({
-          id: `wall-draw-${Date.now()}-${i}`,
-          start: p1,
-          end: p2,
-          thicknessM: room.defaultThicknessM,
-        });
-      }
-
-      if (newSegments.length > 0) {
-        setRoom((prev) => ({
-          ...prev,
-          templateId: null,
-          templateName: null,
-          walls: [...prev.walls, ...newSegments],
-        }));
-        setSelectedWallId(newSegments[0].id);
-        showTemporaryNotice(
-          `Добавени ${newSegments.length} прецизни стени ✓`,
-          'success'
-        );
+        if (newSegments.length > 0) {
+          setRoom((prev) => ({
+            ...prev,
+            templateId: null,
+            templateName: null,
+            walls: [...prev.walls, ...newSegments],
+          }));
+          if (!keepDrawingActive) {
+            setSelectedWallId(newSegments[0].id);
+          }
+          showTemporaryNotice(
+            keepDrawingActive
+              ? `Добавени ${newSegments.length} стени — кликни начална точка за нова верига`
+              : `Добавени ${newSegments.length} прецизни стени ✓`,
+            'success'
+          );
+        }
       }
 
       setDraftPoints([]);
-      setHoverPoint(null);
       setExactDrawLengthInput('');
-      setIsDrawingWalls(false);
+      if (!keepDrawingActive) {
+        setHoverPoint(null);
+        setIsDrawingWalls(false);
+      }
     },
     [room.defaultThicknessM, showTemporaryNotice]
   );
+
+  function handleBreakDrawChain() {
+    if (!isDrawingWalls) return;
+    if (draftPoints.length >= 2) {
+      commitCurrentChain(draftPoints, false, true);
+    } else {
+      setDraftPoints([]);
+      setExactDrawLengthInput('');
+      showTemporaryNotice('Нова верига: кликни начална точка за следващата стена', 'success');
+    }
+  }
 
   function handleFloorDrawClick(pt: [number, number]) {
     if (!isDrawingWalls) return;
@@ -410,7 +435,7 @@ export function App() {
       if (prev.length >= 3) {
         const first = prev[0];
         if (Math.hypot(pt[0] - first[0], pt[1] - first[1]) < 0.01) {
-          setTimeout(() => finalizeDrawnWalls(prev, true), 0);
+          setTimeout(() => commitCurrentChain(prev, true, true), 0);
           return prev;
         }
       }
@@ -444,12 +469,11 @@ export function App() {
     const nextPt = computeEndpointFromAngleAndLength(anchor, len, angleDeg);
     setExactDrawLengthInput('');
 
-    // Проверяваме дали затваряме контура към началната точка
     if (
       draftPoints.length >= 3 &&
       Math.hypot(nextPt[0] - draftPoints[0][0], nextPt[1] - draftPoints[0][1]) < 0.05
     ) {
-      finalizeDrawnWalls(draftPoints, true);
+      commitCurrentChain(draftPoints, true, true);
       return;
     }
 
@@ -457,27 +481,40 @@ export function App() {
     setHoverPoint(nextPt);
   }
 
+  // --- Подложка план от строителя + 2-точкова калибрация ---
   async function handleFloorplanFileSelected(file: File | null) {
     if (!file) return;
     setIsUploadingPlan(true);
     try {
-      const uploaded = await uploadFloorplanImage(file);
+      const [aspectRatio, uploaded] = await Promise.all([
+        measureLocalFileAspectRatio(file),
+        uploadFloorplanImage(file),
+      ]);
+
+      const initialWidthM = 12;
+      const initialDepthM = Number((initialWidthM / aspectRatio).toFixed(3));
+
       setRoom((prev) => ({
         ...prev,
         floorplan: {
           imageUrl: uploaded.url,
-          widthM: prev.floorplan?.widthM ?? 10,
-          depthM: prev.floorplan?.depthM ?? 8,
-          offsetX: prev.floorplan?.offsetX ?? 0,
-          offsetZ: prev.floorplan?.offsetZ ?? 0,
-          rotationDeg: prev.floorplan?.rotationDeg ?? 0,
-          opacity: prev.floorplan?.opacity ?? 0.65,
+          widthM: initialWidthM,
+          depthM: initialDepthM,
+          aspectRatio,
+          offsetX: 0,
+          offsetZ: 0,
+          rotationDeg: 0,
+          opacity: 0.7,
           visible: true,
         },
       }));
       setViewMode('top');
+      setIsDrawingWalls(false);
+      setIsCalibratingPlan(true);
+      setCalibPoints([]);
+      setCalibRealMetersInput('');
       showTemporaryNotice(
-        'Планът от строителя е зареден. Въведи общата му ширина и дължина в метри и очертай стените.',
+        'Планът е зареден пропорционално! Кликни 2 точки по известна стена от чертежа, за да го оразмериш.',
         'success'
       );
     } catch (err) {
@@ -490,9 +527,102 @@ export function App() {
     }
   }
 
-  function updateFloorplanField(
-    patch: Partial<FloorplanUnderlay>
+  function startPlanCalibration() {
+    if (!room.floorplan) return;
+    setIsDrawingWalls(false);
+    setDraftPoints([]);
+    setSelectedWallId(null);
+    setSelectedInstanceId(null);
+    setViewMode('top');
+    setIsCalibratingPlan(true);
+    setCalibPoints([]);
+    setCalibRealMetersInput('');
+    setHoverPoint(null);
+    showTemporaryNotice(
+      'Калибрация: кликни началото и края на стена с известен размер върху плана',
+      'success'
+    );
+  }
+
+  function handleCalibFloorClick(pt: [number, number]) {
+    if (!isCalibratingPlan || !room.floorplan) return;
+
+    if (calibPoints.length === 0) {
+      setCalibPoints([pt]);
+      showTemporaryNotice('Кликни втория край на същата стена върху плана', 'success');
+      return;
+    }
+
+    if (calibPoints.length === 1) {
+      setCalibPoints([calibPoints[0], pt]);
+      showTemporaryNotice(
+        'Въведи реалната дължина на тази стена в метри горе в лентата и натисни „Мащабирай“',
+        'success'
+      );
+    }
+  }
+
+  function handleApplyPlanCalibration(e: React.FormEvent) {
+    e.preventDefault();
+    if (!room.floorplan || calibPoints.length < 2) return;
+
+    const realMeters = parseFloat(calibRealMetersInput.replace(',', '.'));
+    if (Number.isNaN(realMeters) || realMeters <= 0.05) {
+      showTemporaryNotice('Въведи валидна дължина в метри (напр. 6.04).', 'error');
+      return;
+    }
+
+    const [p1, p2] = calibPoints;
+    setRoom((prev) => {
+      if (!prev.floorplan) return prev;
+      return {
+        ...prev,
+        floorplan: calibrateFloorplanByTwoPoints(prev.floorplan, p1, p2, realMeters),
+      };
+    });
+
+    setIsCalibratingPlan(false);
+    setCalibPoints([]);
+    setCalibRealMetersInput('');
+    setHoverPoint(null);
+    showTemporaryNotice(
+      `Планът е оразмерен пропорционално по ${realMeters} м ✓ Вече можеш да натиснеш „Чертай стени“.`,
+      'success'
+    );
+  }
+
+  function updateFloorplanProportionalSize(
+    axis: 'widthM' | 'depthM',
+    rawValue: string
   ) {
+    const val = parseFloat(rawValue.replace(',', '.'));
+    if (Number.isNaN(val) || val < 0.5) return;
+
+    setRoom((prev) => {
+      if (!prev.floorplan) return prev;
+      const ar = prev.floorplan.aspectRatio || 1;
+      if (axis === 'widthM') {
+        return {
+          ...prev,
+          floorplan: {
+            ...prev.floorplan,
+            widthM: val,
+            depthM: Number((val / ar).toFixed(3)),
+          },
+        };
+      }
+      return {
+        ...prev,
+        floorplan: {
+          ...prev.floorplan,
+          depthM: val,
+          widthM: Number((val * ar).toFixed(3)),
+        },
+      };
+    });
+  }
+
+  function updateFloorplanField(patch: Partial<FloorplanUnderlay>) {
     setRoom((prev) => {
       if (!prev.floorplan) return prev;
       return {
@@ -564,11 +694,20 @@ export function App() {
       }
 
       if (e.key === 'Escape') {
-        if (isDrawingWalls) {
-          setIsDrawingWalls(false);
-          setDraftPoints([]);
+        if (isCalibratingPlan) {
+          setIsCalibratingPlan(false);
+          setCalibPoints([]);
+          setCalibRealMetersInput('');
           setHoverPoint(null);
-          setExactDrawLengthInput('');
+        } else if (isDrawingWalls) {
+          if (draftPoints.length >= 2) {
+            commitCurrentChain(draftPoints, false, false);
+          } else {
+            setIsDrawingWalls(false);
+            setDraftPoints([]);
+            setHoverPoint(null);
+            setExactDrawLengthInput('');
+          }
         } else {
           setSelectedInstanceId(null);
           setSelectedWallId(null);
@@ -576,7 +715,7 @@ export function App() {
         return;
       }
 
-      if (isDrawingWalls) return;
+      if (isDrawingWalls || isCalibratingPlan) return;
 
       const key = e.key.toLowerCase();
       if (key === 'w') {
@@ -596,7 +735,15 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAdminOpen, isDrawingWalls, selectedInstanceId, handleSaveSceneToCloud]);
+  }, [
+    isAdminOpen,
+    isCalibratingPlan,
+    isDrawingWalls,
+    draftPoints,
+    selectedInstanceId,
+    commitCurrentChain,
+    handleSaveSceneToCloud,
+  ]);
 
   const activeModels = models.filter((model) => {
     if (!model.isActive) return false;
@@ -802,7 +949,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.1 CAD</span>
+            <span className="brand-badge">v2.3 CAD</span>
           </div>
         </div>
 
@@ -811,7 +958,7 @@ export function App() {
             type="button"
             className={`btn ${viewMode === '3d' ? 'btn-active' : ''}`}
             onClick={() => setViewMode('3d')}
-            title="Свободен 3D изглед"
+            title="Свободен 3D перспектива изглед"
           >
             3D Изглед
           </button>
@@ -819,9 +966,9 @@ export function App() {
             type="button"
             className={`btn ${viewMode === 'top' ? 'btn-active' : ''}`}
             onClick={() => setViewMode('top')}
-            title="Изглед право отгоре за точно чертане по план"
+            title="Ортогонален 2D изглед отгоре (без перспектива)"
           >
-            2D План (отгоре)
+            2D План (Ortho)
           </button>
 
           <span style={{ width: '1px', height: '18px', backgroundColor: '#334155', margin: '0 2px' }} />
@@ -860,7 +1007,7 @@ export function App() {
             type="button"
             className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
             onClick={toggleDrawMode}
-            title="Чертай стени с прихващане по 45°/90° и точно въвеждане на дължина в метри"
+            title="Чертай стени по 45°/90° с прекъсване на веригата (десен бутон)"
           >
             {isDrawingWalls ? 'Чертаеш стени...' : 'Чертай стени'}
           </button>
@@ -871,7 +1018,6 @@ export function App() {
             type="button"
             className={`btn ${unit === 'cm' ? 'btn-active' : ''}`}
             onClick={() => setUnit('cm')}
-            title="Показвай стойностите на мебелите в сантиметри"
           >
             см
           </button>
@@ -879,7 +1025,6 @@ export function App() {
             type="button"
             className={`btn ${unit === 'm' ? 'btn-active' : ''}`}
             onClick={() => setUnit('m')}
-            title="Показвай стойностите на мебелите в метри"
           >
             м
           </button>
@@ -890,7 +1035,6 @@ export function App() {
               style={{ width: '165px', padding: '5px 8px', fontSize: '12px' }}
               value={currentSceneId ?? ''}
               onChange={(e) => handleLoadCloudScene(e.target.value)}
-              title="Зареди запазен проект от базата данни"
             >
               <option value="">Зареди проект...</option>
               {savedScenes.map((scn) => (
@@ -901,12 +1045,7 @@ export function App() {
             </select>
           )}
 
-          <button
-            type="button"
-            className="btn"
-            onClick={handleNewScene}
-            title="Започни нов празен проект"
-          >
+          <button type="button" className="btn" onClick={handleNewScene}>
             Нов
           </button>
 
@@ -915,7 +1054,6 @@ export function App() {
             className="btn"
             onClick={handleSaveSceneToCloud}
             disabled={isSavingCloud}
-            title="Запази проекта в базата данни (Ctrl+S)"
           >
             {isSavingCloud ? 'Запис...' : 'Запази в базата'}
           </button>
@@ -973,7 +1111,6 @@ export function App() {
             <div className="panel-body">
               {leftTab === 'templates' ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                  {/* Общи параметри на апартамента */}
                   <div
                     style={{
                       backgroundColor: '#0f172a',
@@ -1005,11 +1142,11 @@ export function App() {
                     <div style={{ display: 'flex', gap: '6px' }}>
                       <button
                         type="button"
-                        className="btn"
+                        className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
                         style={{ flex: 1, fontSize: '11px' }}
-                        onClick={handleAddChainedWall}
+                        onClick={toggleDrawMode}
                       >
-                        + Добави стена
+                        {isDrawingWalls ? 'Чертаеш...' : '+ Чертай стени'}
                       </button>
                       <button
                         type="button"
@@ -1017,7 +1154,7 @@ export function App() {
                         style={{ flex: 1, fontSize: '11px' }}
                         onClick={handleStartCustomEmptyPlan}
                       >
-                        Празен чертеж
+                        Изчисти и почни наново
                       </button>
                     </div>
                   </div>
@@ -1064,9 +1201,20 @@ export function App() {
 
                     {room.floorplan && (
                       <>
+                        <button
+                          type="button"
+                          className={`btn ${isCalibratingPlan ? 'btn-active' : ''}`}
+                          style={{ fontSize: '11px' }}
+                          onClick={startPlanCalibration}
+                        >
+                          {isCalibratingPlan
+                            ? `Калибрация (${calibPoints.length}/2 точки)...`
+                            : '📏 Калибрирай размер по стена (2 точки)'}
+                        </button>
+
                         <div className="axis-grid">
                           <div className="axis-field">
-                            <span>Ширина план (м)</span>
+                            <span>Ширина (м)</span>
                             <input
                               type="number"
                               step={0.1}
@@ -1074,14 +1222,12 @@ export function App() {
                               className="input-control"
                               value={room.floorplan.widthM}
                               onChange={(e) =>
-                                updateFloorplanField({
-                                  widthM: Math.max(0.5, parseFloat(e.target.value) || 1),
-                                })
+                                updateFloorplanProportionalSize('widthM', e.target.value)
                               }
                             />
                           </div>
                           <div className="axis-field">
-                            <span>Дълбочина план (м)</span>
+                            <span>Дълбочина (м)</span>
                             <input
                               type="number"
                               step={0.1}
@@ -1089,9 +1235,7 @@ export function App() {
                               className="input-control"
                               value={room.floorplan.depthM}
                               onChange={(e) =>
-                                updateFloorplanField({
-                                  depthM: Math.max(0.5, parseFloat(e.target.value) || 1),
-                                })
+                                updateFloorplanProportionalSize('depthM', e.target.value)
                               }
                             />
                           </div>
@@ -1113,7 +1257,7 @@ export function App() {
 
                         <div className="axis-grid">
                           <div className="axis-field">
-                            <span>Изместване X (м)</span>
+                            <span>Позиция X (м)</span>
                             <input
                               type="number"
                               step={0.1}
@@ -1127,7 +1271,7 @@ export function App() {
                             />
                           </div>
                           <div className="axis-field">
-                            <span>Изместване Z (м)</span>
+                            <span>Позиция Z (м)</span>
                             <input
                               type="number"
                               step={0.1}
@@ -1178,9 +1322,11 @@ export function App() {
                             type="button"
                             className="btn btn-danger"
                             style={{ fontSize: '10px' }}
-                            onClick={() =>
-                              setRoom((prev) => ({ ...prev, floorplan: null }))
-                            }
+                            onClick={() => {
+                              setIsCalibratingPlan(false);
+                              setCalibPoints([]);
+                              setRoom((prev) => ({ ...prev, floorplan: null }));
+                            }}
                           >
                             Премахни
                           </button>
@@ -1396,7 +1542,7 @@ export function App() {
               viewMode={viewMode}
               selectedWallId={selectedWallId}
               onSelectWall={(wallId) => {
-                if (isDrawingWalls) return;
+                if (isDrawingWalls || isCalibratingPlan) return;
                 setSelectedWallId(wallId);
                 if (wallId) setSelectedInstanceId(null);
               }}
@@ -1405,6 +1551,10 @@ export function App() {
               hoverPoint={hoverPoint}
               onHoverPointChange={setHoverPoint}
               onFloorDrawClick={handleFloorDrawClick}
+              onBreakDrawChain={handleBreakDrawChain}
+              isCalibratingPlan={isCalibratingPlan}
+              calibPoints={calibPoints}
+              onCalibFloorClick={handleCalibFloorClick}
               sceneObjects={sceneObjects}
               models={models}
               selectedInstanceId={selectedInstanceId}
@@ -1413,7 +1563,75 @@ export function App() {
               onTransformChange={handleTransformChange}
             />
 
-            {/* Плаваща CAD лента при чертане на стени за точна дължина в метри */}
+            {/* Видима лента за калибрация на плана по 2 точки */}
+            {isCalibratingPlan && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '12px',
+                  left: '12px',
+                  backgroundColor: 'rgba(15, 23, 42, 0.96)',
+                  border: '1px solid #f59e0b',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
+                }}
+              >
+                <span style={{ fontSize: '12px', fontWeight: 600, color: '#fbbf24' }}>
+                  📏 Калибрация ({calibPoints.length}/2 точки):
+                </span>
+
+                {calibPoints.length < 2 ? (
+                  <span style={{ fontSize: '12px', color: '#fef3c7' }}>
+                    {calibPoints.length === 0
+                      ? 'Кликни началото на котирана стена'
+                      : 'Кликни края на същата стена'}
+                  </span>
+                ) : (
+                  <form
+                    onSubmit={handleApplyPlanCalibration}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    <input
+                      type="text"
+                      className="input-control"
+                      style={{ width: '110px', padding: '4px 8px', fontSize: '12px' }}
+                      placeholder="Размер (м)..."
+                      value={calibRealMetersInput}
+                      onChange={(e) => setCalibRealMetersInput(e.target.value)}
+                      autoFocus
+                    />
+                    <button
+                      type="submit"
+                      className="btn btn-active"
+                      style={{ padding: '4px 10px', fontSize: '11px' }}
+                    >
+                      Мащабирай
+                    </button>
+                  </form>
+                )}
+
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  style={{ padding: '4px 8px', fontSize: '11px' }}
+                  onClick={() => {
+                    setIsCalibratingPlan(false);
+                    setCalibPoints([]);
+                    setCalibRealMetersInput('');
+                    setHoverPoint(null);
+                  }}
+                >
+                  Отказ (Esc)
+                </button>
+              </div>
+            )}
+
+            {/* Плаваща CAD лента при чертане на стени */}
             {isDrawingWalls && (
               <div
                 style={{
@@ -1454,41 +1672,38 @@ export function App() {
                       className="btn btn-active"
                       style={{ padding: '4px 8px', fontSize: '11px' }}
                     >
-                      Въведи (Enter)
+                      Въведи
                     </button>
                   </form>
                 )}
 
                 <button
                   type="button"
+                  className="btn"
+                  style={{ padding: '4px 8px', fontSize: '11px' }}
+                  disabled={draftPoints.length === 0}
+                  onClick={handleBreakDrawChain}
+                >
+                  Нова верига (Десен бутон)
+                </button>
+
+                <button
+                  type="button"
                   className="btn btn-active"
                   style={{ padding: '4px 8px', fontSize: '11px' }}
                   disabled={draftPoints.length < 3}
-                  onClick={() => finalizeDrawnWalls(draftPoints, true)}
+                  onClick={() => commitCurrentChain(draftPoints, true, true)}
                 >
-                  Затвори контур
+                  Затвори стая
                 </button>
+
                 <button
                   type="button"
                   className="btn"
                   style={{ padding: '4px 8px', fontSize: '11px' }}
-                  disabled={draftPoints.length < 2}
-                  onClick={() => finalizeDrawnWalls(draftPoints, false)}
+                  onClick={() => commitCurrentChain(draftPoints, false, false)}
                 >
-                  Готово
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  style={{ padding: '4px 8px', fontSize: '11px' }}
-                  onClick={() => {
-                    setIsDrawingWalls(false);
-                    setDraftPoints([]);
-                    setHoverPoint(null);
-                    setExactDrawLengthInput('');
-                  }}
-                >
-                  Отказ (Esc)
+                  Приключи чертането
                 </button>
               </div>
             )}
@@ -1518,9 +1733,11 @@ export function App() {
             )}
 
             <div className="viewport-hint">
-              {isDrawingWalls
-                ? 'Прихващане: 45° / 90° и краища на стени • Насочи с мишката и въведи точна дължина (м) или кликни'
-                : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Височина: ${room.ceilingHeightM} м${room.templateName ? ` • Шаблон: ${room.templateName}` : ''}`}
+              {isCalibratingPlan
+                ? 'Кликни началото и края на котирана стена върху плана, след това въведи размера в метри'
+                : isDrawingWalls
+                  ? '45°/90° прихващане • Десен бутон: прекъсни и започни нова стена • Esc: изход'
+                  : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Височина: ${room.ceilingHeightM} м`}
             </div>
           </section>
 
@@ -1748,7 +1965,6 @@ export function App() {
                           className="btn"
                           style={{ padding: '2px 6px', fontSize: '10px' }}
                           onClick={() => handleRotateYBy(-90)}
-                          title="Завърти наляво с 90°"
                         >
                           -90°
                         </button>
@@ -1757,7 +1973,6 @@ export function App() {
                           className="btn"
                           style={{ padding: '2px 6px', fontSize: '10px' }}
                           onClick={() => handleRotateYBy(90)}
-                          title="Завърти надясно с 90°"
                         >
                           +90°
                         </button>
