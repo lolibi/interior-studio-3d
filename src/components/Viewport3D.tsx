@@ -54,7 +54,6 @@ export function Viewport3D({
   hoverPoint = null,
   onHoverPointChange,
   onFloorDrawClick,
-  onBreakDrawChain,
   isCalibratingPlan = false,
   calibPoints = [],
   onCalibFloorClick,
@@ -165,7 +164,6 @@ export function Viewport3D({
         hoverPoint={hoverPoint}
         onHoverPointChange={onHoverPointChange}
         onFloorDrawClick={onFloorDrawClick}
-        onBreakDrawChain={onBreakDrawChain}
         isCalibratingPlan={isCalibratingPlan}
         calibPoints={calibPoints}
         onCalibFloorClick={onCalibFloorClick}
@@ -207,7 +205,7 @@ export function Viewport3D({
             ? {
                 LEFT: isBusyDrawingOrCalib ? undefined : THREE.MOUSE.PAN,
                 MIDDLE: THREE.MOUSE.PAN,
-                RIGHT: isDrawingWalls ? undefined : THREE.MOUSE.PAN,
+                RIGHT: THREE.MOUSE.PAN,
               }
             : {
                 LEFT: THREE.MOUSE.ROTATE,

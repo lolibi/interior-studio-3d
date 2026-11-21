@@ -168,9 +168,10 @@ export function App() {
   const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
   const [exactDrawLengthInput, setExactDrawLengthInput] = useState('');
 
-  // Подложка план от строителя + 2-точкова калибрация
+  // Подложка план от строителя + задължителна 2-точкова калибрация при качване
   const [isUploadingPlan, setIsUploadingPlan] = useState(false);
   const [isCalibratingPlan, setIsCalibratingPlan] = useState(false);
+  const [isCalibrationMandatory, setIsCalibrationMandatory] = useState(false);
   const [calibPoints, setCalibPoints] = useState<[number, number][]>([]);
   const [calibRealMetersInput, setCalibRealMetersInput] = useState('');
 
@@ -202,7 +203,7 @@ export function App() {
       }
       noticeTimerRef.current = setTimeout(() => {
         setNotice(null);
-      }, 4000);
+      }, 4200);
     },
     []
   );
@@ -299,6 +300,10 @@ export function App() {
   }
 
   function handleApplyTemplate(tpl: ApartmentTemplate) {
+    if (isCalibrationMandatory) {
+      showTemporaryNotice('Първо завърши задължителното скалиране на качения план!', 'error');
+      return;
+    }
     const clonedWalls: WallSegment[] = tpl.walls.map((w, idx) => ({
       id: `wall-tpl-${Date.now()}-${idx}`,
       start: [w.start[0], w.start[1]],
@@ -322,6 +327,10 @@ export function App() {
   }
 
   function handleStartCustomEmptyPlan() {
+    if (isCalibrationMandatory) {
+      showTemporaryNotice('Първо завърши задължителното скалиране на качения план!', 'error');
+      return;
+    }
     setRoom((prev) => ({
       ...prev,
       templateId: null,
@@ -337,12 +346,19 @@ export function App() {
     setIsDrawingWalls(true);
     setViewMode('top');
     showTemporaryNotice(
-      'Празен 2D чертеж (Ortho): кликай стени по 45°/90°, десен бутон за нова верига стени',
+      'Празен 2D чертеж (Ortho): кликай стени по 45°/90°, десен бутон мести плана, Space = нова верига',
       'success'
     );
   }
 
   function toggleDrawMode() {
+    if (isCalibrationMandatory) {
+      showTemporaryNotice(
+        'Първо скалирай качения план по 2 точки, след което ще можеш да чертаеш стените!',
+        'error'
+      );
+      return;
+    }
     setIsCalibratingPlan(false);
     setCalibPoints([]);
     setIsDrawingWalls((prev) => {
@@ -355,7 +371,7 @@ export function App() {
         setSelectedWallId(null);
         setViewMode('top');
         showTemporaryNotice(
-          'CAD Чертане: кликай точки (45°/90°), десен бутон прекъсва веригата за нова стена',
+          'CAD Чертане: десен бутон мести плана • Space = нова верига • Esc = край',
           'success'
         );
       }
@@ -400,8 +416,8 @@ export function App() {
           }
           showTemporaryNotice(
             keepDrawingActive
-              ? `Добавени ${newSegments.length} стени — кликни начална точка за нова верига`
-              : `Добавени ${newSegments.length} прецизни стени ✓`,
+              ? `Записани ${newSegments.length} стени — кликни начална точка за нова верига (или Esc за изход)`
+              : `Записани ${newSegments.length} стени ✓`,
             'success'
           );
         }
@@ -417,7 +433,7 @@ export function App() {
     [room.defaultThicknessM, showTemporaryNotice]
   );
 
-  function handleBreakDrawChain() {
+  const handleBreakDrawChain = useCallback(() => {
     if (!isDrawingWalls) return;
     if (draftPoints.length >= 2) {
       commitCurrentChain(draftPoints, false, true);
@@ -426,10 +442,10 @@ export function App() {
       setExactDrawLengthInput('');
       showTemporaryNotice('Нова верига: кликни начална точка за следващата стена', 'success');
     }
-  }
+  }, [isDrawingWalls, draftPoints, commitCurrentChain, showTemporaryNotice]);
 
   function handleFloorDrawClick(pt: [number, number]) {
-    if (!isDrawingWalls) return;
+    if (!isDrawingWalls || isCalibrationMandatory) return;
 
     setDraftPoints((prev) => {
       if (prev.length >= 3) {
@@ -481,7 +497,7 @@ export function App() {
     setHoverPoint(nextPt);
   }
 
-  // --- Подложка план от строителя + 2-точкова калибрация ---
+  // --- Подложка план от строителя + ЗАДЪЛЖИТЕЛНА 2-точкова калибрация при качване ---
   async function handleFloorplanFileSelected(file: File | null) {
     if (!file) return;
     setIsUploadingPlan(true);
@@ -504,17 +520,22 @@ export function App() {
           offsetX: 0,
           offsetZ: 0,
           rotationDeg: 0,
-          opacity: 0.7,
+          opacity: 0.72,
           visible: true,
         },
       }));
       setViewMode('top');
       setIsDrawingWalls(false);
+      setDraftPoints([]);
+      setSelectedWallId(null);
+      setSelectedInstanceId(null);
       setIsCalibratingPlan(true);
+      setIsCalibrationMandatory(true);
       setCalibPoints([]);
       setCalibRealMetersInput('');
+      setHoverPoint(null);
       showTemporaryNotice(
-        'Планът е зареден пропорционално! Кликни 2 точки по известна стена от чертежа, за да го оразмериш.',
+        'Задължителна стъпка: кликни двата края на стена с известен размер върху плана, за да го мащабираш!',
         'success'
       );
     } catch (err) {
@@ -527,7 +548,7 @@ export function App() {
     }
   }
 
-  function startPlanCalibration() {
+  function startPlanCalibration(mandatory = false) {
     if (!room.floorplan) return;
     setIsDrawingWalls(false);
     setDraftPoints([]);
@@ -535,11 +556,12 @@ export function App() {
     setSelectedInstanceId(null);
     setViewMode('top');
     setIsCalibratingPlan(true);
+    setIsCalibrationMandatory(mandatory);
     setCalibPoints([]);
     setCalibRealMetersInput('');
     setHoverPoint(null);
     showTemporaryNotice(
-      'Калибрация: кликни началото и края на стена с известен размер върху плана',
+      'Калибрация: кликни началото и края на стена с известен размер върху плана (десен бутон мести плана)',
       'success'
     );
   }
@@ -556,7 +578,7 @@ export function App() {
     if (calibPoints.length === 1) {
       setCalibPoints([calibPoints[0], pt]);
       showTemporaryNotice(
-        'Въведи реалната дължина на тази стена в метри горе в лентата и натисни „Мащабирай“',
+        'Въведи реалната дължина в метри горе (напр. 6.04) и натисни „Мащабирай“',
         'success'
       );
     }
@@ -582,11 +604,12 @@ export function App() {
     });
 
     setIsCalibratingPlan(false);
+    setIsCalibrationMandatory(false);
     setCalibPoints([]);
     setCalibRealMetersInput('');
     setHoverPoint(null);
     showTemporaryNotice(
-      `Планът е оразмерен пропорционално по ${realMeters} м ✓ Вече можеш да натиснеш „Чертай стени“.`,
+      `Планът е скалиран пропорционално по ${realMeters} м ✓ Вече можеш да чертаеш стените!`,
       'success'
     );
   }
@@ -678,9 +701,52 @@ export function App() {
     }
   }, [currentSceneId, currentSceneTitle, sceneObjects, room, showTemporaryNotice]);
 
+  // Клавишни комбинации (Esc работи ВИНАГИ, дори при фокус в input поле!)
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (isAdminOpen) return;
+
+      if (e.key === 'Escape') {
+        if (isCalibratingPlan) {
+          if (isCalibrationMandatory) {
+            e.preventDefault();
+            showTemporaryNotice(
+              'Калибрацията след качване на план е задължителна — кликни 2 точки по стена или премахни плана.',
+              'error'
+            );
+            return;
+          }
+          e.preventDefault();
+          setIsCalibratingPlan(false);
+          setCalibPoints([]);
+          setCalibRealMetersInput('');
+          setHoverPoint(null);
+          return;
+        }
+
+        if (isDrawingWalls) {
+          e.preventDefault();
+          if (draftPoints.length >= 2) {
+            // Първи Esc: записва текущата верига и оставя готовност за нова или втори Esc за изход
+            commitCurrentChain(draftPoints, false, true);
+          } else if (draftPoints.length === 1) {
+            setDraftPoints([]);
+            setExactDrawLengthInput('');
+            showTemporaryNotice('Текущата точка е отменена (натисни Esc пак за изход от чертане)', 'success');
+          } else {
+            setIsDrawingWalls(false);
+            setDraftPoints([]);
+            setHoverPoint(null);
+            setExactDrawLengthInput('');
+            showTemporaryNotice('Изход от режим чертане на стени', 'success');
+          }
+          return;
+        }
+
+        setSelectedInstanceId(null);
+        setSelectedWallId(null);
+        return;
+      }
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -693,25 +759,9 @@ export function App() {
         return;
       }
 
-      if (e.key === 'Escape') {
-        if (isCalibratingPlan) {
-          setIsCalibratingPlan(false);
-          setCalibPoints([]);
-          setCalibRealMetersInput('');
-          setHoverPoint(null);
-        } else if (isDrawingWalls) {
-          if (draftPoints.length >= 2) {
-            commitCurrentChain(draftPoints, false, false);
-          } else {
-            setIsDrawingWalls(false);
-            setDraftPoints([]);
-            setHoverPoint(null);
-            setExactDrawLengthInput('');
-          }
-        } else {
-          setSelectedInstanceId(null);
-          setSelectedWallId(null);
-        }
+      if (isDrawingWalls && e.code === 'Space') {
+        e.preventDefault();
+        handleBreakDrawChain();
         return;
       }
 
@@ -733,16 +783,19 @@ export function App() {
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [
     isAdminOpen,
     isCalibratingPlan,
+    isCalibrationMandatory,
     isDrawingWalls,
     draftPoints,
     selectedInstanceId,
     commitCurrentChain,
+    handleBreakDrawChain,
     handleSaveSceneToCloud,
+    showTemporaryNotice,
   ]);
 
   const activeModels = models.filter((model) => {
@@ -768,6 +821,8 @@ export function App() {
       setCurrentSceneId(scene.id);
       setCurrentSceneTitle(scene.title);
       setSelectedInstanceId(null);
+      setIsCalibratingPlan(false);
+      setIsCalibrationMandatory(false);
       showTemporaryNotice(`Зареден проект: „${scene.title}“`, 'success');
     } catch (err) {
       showTemporaryNotice(
@@ -949,7 +1004,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.3 CAD</span>
+            <span className="brand-badge">v2.4 CAD</span>
           </div>
         </div>
 
@@ -957,6 +1012,7 @@ export function App() {
           <button
             type="button"
             className={`btn ${viewMode === '3d' ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
             onClick={() => setViewMode('3d')}
             title="Свободен 3D перспектива изглед"
           >
@@ -975,7 +1031,8 @@ export function App() {
 
           <button
             type="button"
-            className={`btn ${activeTool === 'translate' && !isDrawingWalls ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'translate' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
               setActiveTool('translate');
@@ -985,7 +1042,8 @@ export function App() {
           </button>
           <button
             type="button"
-            className={`btn ${activeTool === 'rotate' && !isDrawingWalls ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'rotate' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
               setActiveTool('rotate');
@@ -995,7 +1053,8 @@ export function App() {
           </button>
           <button
             type="button"
-            className={`btn ${activeTool === 'scale' && !isDrawingWalls ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'scale' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
               setActiveTool('scale');
@@ -1006,8 +1065,9 @@ export function App() {
           <button
             type="button"
             className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
             onClick={toggleDrawMode}
-            title="Чертай стени по 45°/90° с прекъсване на веригата (десен бутон)"
+            title="Чертай стени по 45°/90° • Десен бутон: мести плана • Space: нова верига"
           >
             {isDrawingWalls ? 'Чертаеш стени...' : 'Чертай стени'}
           </button>
@@ -1144,6 +1204,7 @@ export function App() {
                         type="button"
                         className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
                         style={{ flex: 1, fontSize: '11px' }}
+                        disabled={isCalibrationMandatory}
                         onClick={toggleDrawMode}
                       >
                         {isDrawingWalls ? 'Чертаеш...' : '+ Чертай стени'}
@@ -1152,6 +1213,7 @@ export function App() {
                         type="button"
                         className="btn"
                         style={{ flex: 1, fontSize: '11px' }}
+                        disabled={isCalibrationMandatory}
                         onClick={handleStartCustomEmptyPlan}
                       >
                         Изчисти и почни наново
@@ -1163,7 +1225,7 @@ export function App() {
                   <div
                     style={{
                       backgroundColor: '#0f172a',
-                      border: '1px solid #334155',
+                      border: `1px solid ${isCalibrationMandatory ? '#f59e0b' : '#334155'}`,
                       borderRadius: '6px',
                       padding: '10px',
                       display: 'flex',
@@ -1205,7 +1267,7 @@ export function App() {
                           type="button"
                           className={`btn ${isCalibratingPlan ? 'btn-active' : ''}`}
                           style={{ fontSize: '11px' }}
-                          onClick={startPlanCalibration}
+                          onClick={() => startPlanCalibration(isCalibrationMandatory)}
                         >
                           {isCalibratingPlan
                             ? `Калибрация (${calibPoints.length}/2 точки)...`
@@ -1324,7 +1386,9 @@ export function App() {
                             style={{ fontSize: '10px' }}
                             onClick={() => {
                               setIsCalibratingPlan(false);
+                              setIsCalibrationMandatory(false);
                               setCalibPoints([]);
+                              setCalibRealMetersInput('');
                               setRoom((prev) => ({ ...prev, floorplan: null }));
                             }}
                           >
@@ -1551,7 +1615,6 @@ export function App() {
               hoverPoint={hoverPoint}
               onHoverPointChange={setHoverPoint}
               onFloorDrawClick={handleFloorDrawClick}
-              onBreakDrawChain={handleBreakDrawChain}
               isCalibratingPlan={isCalibratingPlan}
               calibPoints={calibPoints}
               onCalibFloorClick={handleCalibFloorClick}
@@ -1571,24 +1634,24 @@ export function App() {
                   top: '12px',
                   left: '12px',
                   backgroundColor: 'rgba(15, 23, 42, 0.96)',
-                  border: '1px solid #f59e0b',
+                  border: '2px solid #f59e0b',
                   borderRadius: '8px',
                   padding: '10px 12px',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
                   flexWrap: 'wrap',
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.55)',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
                 }}
               >
-                <span style={{ fontSize: '12px', fontWeight: 600, color: '#fbbf24' }}>
-                  📏 Калибрация ({calibPoints.length}/2 точки):
+                <span style={{ fontSize: '12px', fontWeight: 700, color: '#fbbf24' }}>
+                  📏 {isCalibrationMandatory ? 'Задължително скалиране' : 'Калибрация'} ({calibPoints.length}/2 точки):
                 </span>
 
                 {calibPoints.length < 2 ? (
                   <span style={{ fontSize: '12px', color: '#fef3c7' }}>
                     {calibPoints.length === 0
-                      ? 'Кликни началото на котирана стена'
+                      ? 'Кликни началото на котирана стена (десен бутон мести плана)'
                       : 'Кликни края на същата стена'}
                   </span>
                 ) : (
@@ -1599,7 +1662,7 @@ export function App() {
                     <input
                       type="text"
                       className="input-control"
-                      style={{ width: '110px', padding: '4px 8px', fontSize: '12px' }}
+                      style={{ width: '115px', padding: '4px 8px', fontSize: '12px' }}
                       placeholder="Размер (м)..."
                       value={calibRealMetersInput}
                       onChange={(e) => setCalibRealMetersInput(e.target.value)}
@@ -1615,19 +1678,35 @@ export function App() {
                   </form>
                 )}
 
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  style={{ padding: '4px 8px', fontSize: '11px' }}
-                  onClick={() => {
-                    setIsCalibratingPlan(false);
-                    setCalibPoints([]);
-                    setCalibRealMetersInput('');
-                    setHoverPoint(null);
-                  }}
-                >
-                  Отказ (Esc)
-                </button>
+                {calibPoints.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ padding: '4px 8px', fontSize: '11px' }}
+                    onClick={() => {
+                      setCalibPoints([]);
+                      setCalibRealMetersInput('');
+                    }}
+                  >
+                    Избери други 2 точки
+                  </button>
+                )}
+
+                {!isCalibrationMandatory && (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    style={{ padding: '4px 8px', fontSize: '11px' }}
+                    onClick={() => {
+                      setIsCalibratingPlan(false);
+                      setCalibPoints([]);
+                      setCalibRealMetersInput('');
+                      setHoverPoint(null);
+                    }}
+                  >
+                    Отказ (Esc)
+                  </button>
+                )}
               </div>
             )}
 
@@ -1684,7 +1763,7 @@ export function App() {
                   disabled={draftPoints.length === 0}
                   onClick={handleBreakDrawChain}
                 >
-                  Нова верига (Десен бутон)
+                  Нова верига (Space)
                 </button>
 
                 <button
@@ -1699,11 +1778,11 @@ export function App() {
 
                 <button
                   type="button"
-                  className="btn"
+                  className="btn btn-danger"
                   style={{ padding: '4px 8px', fontSize: '11px' }}
                   onClick={() => commitCurrentChain(draftPoints, false, false)}
                 >
-                  Приключи чертането
+                  Изход (Esc)
                 </button>
               </div>
             )}
@@ -1734,9 +1813,9 @@ export function App() {
 
             <div className="viewport-hint">
               {isCalibratingPlan
-                ? 'Кликни началото и края на котирана стена върху плана, след това въведи размера в метри'
+                ? 'Кликни 2 точки по стена с известен размер (Десен бутон: мести плана • Скрол: приближи)'
                 : isDrawingWalls
-                  ? '45°/90° прихващане • Десен бутон: прекъсни и започни нова стена • Esc: изход'
+                  ? 'Ляв клик: точка (45°/90°) • Десен бутон: мести плана • Space: нова верига • Esc: край'
                   : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Височина: ${room.ceilingHeightM} м`}
             </div>
           </section>
