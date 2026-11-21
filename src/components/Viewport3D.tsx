@@ -21,7 +21,9 @@ interface Viewport3DProps {
   room: RoomConfig;
   viewMode?: ViewportCameraMode;
   selectedWallId?: string | null;
+  selectedOpeningId?: string | null;
   onSelectWall?: (wallId: string | null) => void;
+  onSelectOpening?: (wallId: string, openingId: string) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -48,7 +50,9 @@ export function Viewport3D({
   room,
   viewMode = '3d',
   selectedWallId = null,
+  selectedOpeningId = null,
   onSelectWall,
+  onSelectOpening,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -157,8 +161,11 @@ export function Viewport3D({
 
       <RoomMesh
         room={room}
+        models={models}
         selectedWallId={selectedWallId}
+        selectedOpeningId={selectedOpeningId}
         onSelectWall={onSelectWall}
+        onSelectOpening={onSelectOpening}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
         hoverPoint={hoverPoint}

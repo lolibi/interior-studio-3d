@@ -1,8 +1,23 @@
+export type OpeningType = 'door' | 'window';
+export type DoorSwing = 'left-in' | 'right-in' | 'left-out' | 'right-out';
+
+export interface WallOpening {
+  id: string;
+  type: OpeningType;
+  offsetFromStartM: number; // разстояние от началото на стената до левия ръб на отвора (м)
+  widthM: number;           // ширина на отвора (м)
+  heightM: number;          // височина на отвора (м)
+  sillHeightM: number;      // височина от пода до долния ръб (0 за врати, напр. 0.90 за прозорци)
+  swing?: DoorSwing;        // посока на отваряне за врати
+  modelId?: string | null;  // опционален .glb модел от каталога (за врата или прозорец)
+}
+
 export interface WallSegment {
   id: string;
   start: [number, number]; // [x, z] в метри
   end: [number, number];   // [x, z] в метри
   thicknessM: number;      // дебелина в метри (напр. 0.12 или 0.25)
+  openings?: WallOpening[];
 }
 
 export interface FloorplanUnderlay {
@@ -92,7 +107,6 @@ export function calibrateFloorplanByTwoPoints(
   const nextWidth = Number((floorplan.widthM * scaleFactor).toFixed(3));
   const nextDepth = Number((floorplan.depthM * scaleFactor).toFixed(3));
 
-  // Мащабираме около центъра на координатната система, за да остане чертежът подравнен
   return {
     ...floorplan,
     widthM: Math.max(0.5, nextWidth),
@@ -170,7 +184,6 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
     if (!n2.neighbors.includes(k1)) n2.neighbors.push(k1);
   }
 
-  // Търсим минимални елементарни цикли чрез обхождане по най-малък десен завой (planar face traversal)
   const visitedDirected = new Set<string>();
   const polygons: [number, number][][] = [];
 
@@ -233,7 +246,6 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
           .map((k) => adj.get(k)?.point)
           .filter((p): p is [number, number] => Boolean(p));
 
-        // Изчисляваме ориентираната площ (shoelace), за да отсеем външния безкраен контур
         let signedArea = 0;
         for (let i = 0; i < polyPoints.length; i++) {
           const a = polyPoints[i];
@@ -259,14 +271,12 @@ export function snapDrawingPoint(
   angleStepDeg = 45,
   disableAngleSnap = false
 ): [number, number] {
-  // 1. Прихващане към съществуващ ъгъл/точка (в радиус 20 см)
   for (const target of snapTargets) {
     if (Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]) <= 0.2) {
       return [Number(target[0].toFixed(3)), Number(target[1].toFixed(3))];
     }
   }
 
-  // 2. Ако няма начална точка или е изключено ъгловото прихващане (напр. при калибрация)
   if (!anchorPoint || disableAngleSnap) {
     return [
       Number((Math.round(rawPoint[0] * 20) / 20).toFixed(2)),
@@ -274,7 +284,6 @@ export function snapDrawingPoint(
     ];
   }
 
-  // 3. Прихващане по ъгъл (през 45°: 0°, 45°, 90°, 135°, 180°...) и стъпка 0.05 м
   const dx = rawPoint[0] - anchorPoint[0];
   const dz = rawPoint[1] - anchorPoint[1];
   const rawDist = Math.hypot(dx, dz);
@@ -296,24 +305,28 @@ export function createStarterWalls(defaultThicknessM = 0.15): WallSegment[] {
       start: [-2.5, -2.0],
       end: [2.5, -2.0],
       thicknessM: defaultThicknessM,
+      openings: [],
     },
     {
       id: 'wall-init-2',
       start: [2.5, -2.0],
       end: [2.5, 2.0],
       thicknessM: defaultThicknessM,
+      openings: [],
     },
     {
       id: 'wall-init-3',
       start: [2.5, 2.0],
       end: [-2.5, 2.0],
       thicknessM: defaultThicknessM,
+      openings: [],
     },
     {
       id: 'wall-init-4',
       start: [-2.5, 2.0],
       end: [-2.5, -2.0],
       thicknessM: defaultThicknessM,
+      openings: [],
     },
   ];
 }

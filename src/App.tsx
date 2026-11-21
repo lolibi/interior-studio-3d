@@ -24,8 +24,11 @@ import {
 } from './types/room';
 import type {
   ApartmentTemplate,
+  DoorSwing,
   FloorplanUnderlay,
+  OpeningType,
   RoomConfig,
+  WallOpening,
   WallSegment,
 } from './types/room';
 import {
@@ -72,6 +75,19 @@ function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
           start: [Number(w.start[0]) || 0, Number(w.start[1]) || 0],
           end: [Number(w.end[0]) || 0, Number(w.end[1]) || 0],
           thicknessM: Number(w.thicknessM) || defaultThicknessM,
+          openings: Array.isArray(w.openings)
+            ? w.openings.map((op) => ({
+                id: op.id || `op-${Math.random().toString(36).slice(2, 7)}`,
+                type: op.type === 'window' ? 'window' : 'door',
+                offsetFromStartM: Number(op.offsetFromStartM) || 0.3,
+                widthM: Number(op.widthM) || (op.type === 'window' ? 1.4 : 0.9),
+                heightM: Number(op.heightM) || (op.type === 'window' ? 1.4 : 2.1),
+                sillHeightM:
+                  op.type === 'window' ? Number(op.sillHeightM ?? 0.9) : 0,
+                swing: op.swing || 'left-in',
+                modelId: op.modelId ?? null,
+              }))
+            : [],
         }))
     : [];
 
@@ -158,6 +174,7 @@ export function App() {
   const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
 
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
+  const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(null);
   const [wallLengthInput, setWallLengthInput] = useState('');
   const [wallAngleInput, setWallAngleInput] = useState('');
   const [wallThicknessInput, setWallThicknessInput] = useState('');
@@ -299,6 +316,84 @@ export function App() {
     );
   }
 
+  // --- Врати и прозорци към избрана стена ---
+  function handleAddOpeningToSelectedWall(type: OpeningType) {
+    if (!selectedWall) return;
+    const wallLen = getWallLengthM(selectedWall);
+    const defaultW = type === 'door' ? Math.min(0.9, Math.max(0.6, wallLen - 0.2)) : Math.min(1.4, Math.max(0.6, wallLen - 0.2));
+    const defaultH = type === 'door' ? Math.min(2.1, room.ceilingHeightM - 0.1) : Math.min(1.4, room.ceilingHeightM - 1.0);
+    const defaultSill = type === 'door' ? 0 : 0.9;
+    const defaultOffset = Number(Math.max(0.1, (wallLen - defaultW) / 2).toFixed(2));
+
+    const newOpening: WallOpening = {
+      id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type,
+      offsetFromStartM: defaultOffset,
+      widthM: Number(defaultW.toFixed(2)),
+      heightM: Number(defaultH.toFixed(2)),
+      sillHeightM: defaultSill,
+      swing: 'left-in',
+      modelId: null,
+    };
+
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      walls: prev.walls.map((w) =>
+        w.id === selectedWall.id
+          ? { ...w, openings: [...(w.openings ?? []), newOpening] }
+          : w
+      ),
+    }));
+    setSelectedOpeningId(newOpening.id);
+    showTemporaryNotice(
+      type === 'door' ? 'Добавена врата в стената ✓' : 'Добавен прозорец в стената ✓',
+      'success'
+    );
+  }
+
+  function handleUpdateOpening(
+    wallId: string,
+    openingId: string,
+    patch: Partial<WallOpening>
+  ) {
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      walls: prev.walls.map((w) => {
+        if (w.id !== wallId) return w;
+        return {
+          ...w,
+          openings: (w.openings ?? []).map((op) =>
+            op.id === openingId ? { ...op, ...patch } : op
+          ),
+        };
+      }),
+    }));
+  }
+
+  function handleDeleteOpening(wallId: string, openingId: string) {
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      walls: prev.walls.map((w) =>
+        w.id === wallId
+          ? {
+              ...w,
+              openings: (w.openings ?? []).filter((op) => op.id !== openingId),
+            }
+          : w
+      ),
+    }));
+    if (selectedOpeningId === openingId) {
+      setSelectedOpeningId(null);
+    }
+    showTemporaryNotice('Отворът е премахнат от стената', 'success');
+  }
+
   function handleApplyTemplate(tpl: ApartmentTemplate) {
     if (isCalibrationMandatory) {
       showTemporaryNotice('Първо завърши задължителното скалиране на качения план!', 'error');
@@ -309,6 +404,10 @@ export function App() {
       start: [w.start[0], w.start[1]],
       end: [w.end[0], w.end[1]],
       thicknessM: w.thicknessM || tpl.defaultThicknessM || room.defaultThicknessM,
+      openings: (w.openings ?? []).map((op, opIdx) => ({
+        ...op,
+        id: `op-tpl-${Date.now()}-${idx}-${opIdx}`,
+      })),
     }));
 
     setRoom((prev) => ({
@@ -320,6 +419,7 @@ export function App() {
       walls: clonedWalls,
     }));
     setSelectedWallId(clonedWalls[0]?.id ?? null);
+    setSelectedOpeningId(null);
     setIsDrawingWalls(false);
     setDraftPoints([]);
     setHoverPoint(null);
@@ -338,6 +438,7 @@ export function App() {
       walls: [],
     }));
     setSelectedWallId(null);
+    setSelectedOpeningId(null);
     setIsCalibratingPlan(false);
     setCalibPoints([]);
     setDraftPoints([]);
@@ -369,6 +470,7 @@ export function App() {
       if (next) {
         setSelectedInstanceId(null);
         setSelectedWallId(null);
+        setSelectedOpeningId(null);
         setViewMode('top');
         showTemporaryNotice(
           'CAD Чертане: десен бутон мести плана • Space = нова верига • Esc = край',
@@ -401,6 +503,7 @@ export function App() {
             start: p1,
             end: p2,
             thicknessM: room.defaultThicknessM,
+            openings: [],
           });
         }
 
@@ -528,6 +631,7 @@ export function App() {
       setIsDrawingWalls(false);
       setDraftPoints([]);
       setSelectedWallId(null);
+      setSelectedOpeningId(null);
       setSelectedInstanceId(null);
       setIsCalibratingPlan(true);
       setIsCalibrationMandatory(true);
@@ -553,6 +657,7 @@ export function App() {
     setIsDrawingWalls(false);
     setDraftPoints([]);
     setSelectedWallId(null);
+    setSelectedOpeningId(null);
     setSelectedInstanceId(null);
     setViewMode('top');
     setIsCalibratingPlan(true);
@@ -667,6 +772,7 @@ export function App() {
       walls: prev.walls.filter((w) => w.id !== selectedWallId),
     }));
     setSelectedWallId(null);
+    setSelectedOpeningId(null);
     showTemporaryNotice('Стената е премахната', 'success');
   }
 
@@ -701,7 +807,6 @@ export function App() {
     }
   }, [currentSceneId, currentSceneTitle, sceneObjects, room, showTemporaryNotice]);
 
-  // Клавишни комбинации (Esc работи ВИНАГИ, дори при фокус в input поле!)
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (isAdminOpen) return;
@@ -727,7 +832,6 @@ export function App() {
         if (isDrawingWalls) {
           e.preventDefault();
           if (draftPoints.length >= 2) {
-            // Първи Esc: записва текущата верига и оставя готовност за нова или втори Esc за изход
             commitCurrentChain(draftPoints, false, true);
           } else if (draftPoints.length === 1) {
             setDraftPoints([]);
@@ -745,6 +849,7 @@ export function App() {
 
         setSelectedInstanceId(null);
         setSelectedWallId(null);
+        setSelectedOpeningId(null);
         return;
       }
 
@@ -818,6 +923,7 @@ export function App() {
       const loadedRoom = normalizeLoadedRoomConfig(scene.room);
       setRoom(loadedRoom);
       setSelectedWallId(loadedRoom.walls[0]?.id ?? null);
+      setSelectedOpeningId(null);
       setCurrentSceneId(scene.id);
       setCurrentSceneTitle(scene.title);
       setSelectedInstanceId(null);
@@ -833,19 +939,34 @@ export function App() {
   }
 
   function handleNewScene() {
-    if (sceneObjects.length > 0) {
+    if (sceneObjects.length > 0 || room.walls.length > 0 || room.floorplan) {
       const confirmed = window.confirm(
-        'Сигурни ли сте, че искате да изчистите текущата сцена и да започнете нов проект?'
+        'Сигурни ли сте, че искате да изчистите напълно сцената (стени, подложка и мебели) и да започнете на чисто?'
       );
       if (!confirmed) return;
     }
 
     setSceneObjects([]);
+    setRoom({
+      templateId: null,
+      templateName: null,
+      ceilingHeightM: 2.65,
+      defaultThicknessM: 0.15,
+      walls: [],
+      floorplan: null,
+    });
     setSelectedInstanceId(null);
     setSelectedWallId(null);
+    setSelectedOpeningId(null);
+    setIsCalibratingPlan(false);
+    setIsCalibrationMandatory(false);
+    setCalibPoints([]);
+    setIsDrawingWalls(false);
+    setDraftPoints([]);
     setCurrentSceneId(null);
     setCurrentSceneTitle('Нов проект');
-    showTemporaryNotice('Създадена е нова празна сцена', 'success');
+    setLeftTab('templates');
+    showTemporaryNotice('Създадена е напълно празна сцена', 'success');
   }
 
   function handleAddToScene(model: CatalogModel) {
@@ -865,6 +986,7 @@ export function App() {
     setSceneObjects((prev) => [...prev, newInstance]);
     setSelectedInstanceId(newInstance.instanceId);
     setSelectedWallId(null);
+    setSelectedOpeningId(null);
   }
 
   function handleTransformChange(
@@ -998,13 +1120,18 @@ export function App() {
     setSelectedInstanceId(null);
   }
 
+  const glbCatalogModels = useMemo(
+    () => models.filter((m) => m.isActive && Boolean(m.glbUrl)),
+    [models]
+  );
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.4 CAD</span>
+            <span className="brand-badge">v2.5 CAD</span>
           </div>
         </div>
 
@@ -1216,7 +1343,7 @@ export function App() {
                         disabled={isCalibrationMandatory}
                         onClick={handleStartCustomEmptyPlan}
                       >
-                        Изчисти и почни наново
+                        Изчисти стените
                       </button>
                     </div>
                   </div>
@@ -1603,12 +1730,21 @@ export function App() {
           <section className="viewport-container">
             <Viewport3D
               room={room}
+              models={models}
               viewMode={viewMode}
               selectedWallId={selectedWallId}
+              selectedOpeningId={selectedOpeningId}
               onSelectWall={(wallId) => {
                 if (isDrawingWalls || isCalibratingPlan) return;
                 setSelectedWallId(wallId);
+                setSelectedOpeningId(null);
                 if (wallId) setSelectedInstanceId(null);
+              }}
+              onSelectOpening={(wallId, openingId) => {
+                if (isDrawingWalls || isCalibratingPlan) return;
+                setSelectedWallId(wallId);
+                setSelectedOpeningId(openingId);
+                setSelectedInstanceId(null);
               }}
               isDrawingWalls={isDrawingWalls}
               draftPoints={draftPoints}
@@ -1619,7 +1755,6 @@ export function App() {
               calibPoints={calibPoints}
               onCalibFloorClick={handleCalibFloorClick}
               sceneObjects={sceneObjects}
-              models={models}
               selectedInstanceId={selectedInstanceId}
               transformTool={activeTool}
               onSelectObject={setSelectedInstanceId}
@@ -1822,7 +1957,7 @@ export function App() {
 
           <aside className="sidebar-right">
             <div className="panel-header">
-              <span>{selectedWall ? 'Настройки на стена' : 'Настройки на обект'}</span>
+              <span>{selectedWall ? 'Стена, врати и прозорци' : 'Настройки на обект'}</span>
               <span style={{ fontSize: '11px', color: '#94a3b8' }}>
                 {selectedWall ? 'м / °' : `Единици: ${unitLabel}`}
               </span>
@@ -1831,6 +1966,7 @@ export function App() {
             <div className="panel-body">
               {selectedWall ? (
                 <>
+                  {/* Геометрия на стената */}
                   <div
                     style={{
                       backgroundColor: '#0f172a',
@@ -1876,10 +2012,6 @@ export function App() {
                       </div>
                     </div>
 
-                    <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-                      Височината на всички стени е обща за апартамента ({room.ceilingHeightM} м).
-                    </div>
-
                     <button
                       type="button"
                       className="btn btn-active"
@@ -1887,6 +2019,208 @@ export function App() {
                     >
                       Приложи промените по стената
                     </button>
+                  </div>
+
+                  {/* Врати и прозорци в тази стена */}
+                  <div
+                    style={{
+                      backgroundColor: '#0f172a',
+                      border: '1px solid #334155',
+                      borderRadius: '6px',
+                      padding: '10px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px',
+                    }}
+                  >
+                    <div className="section-label" style={{ marginBottom: 0 }}>
+                      Врати и прозорци ({(selectedWall.openings ?? []).length})
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        type="button"
+                        className="btn btn-active"
+                        style={{ flex: 1, fontSize: '11px' }}
+                        onClick={() => handleAddOpeningToSelectedWall('door')}
+                      >
+                        + Добави врата
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-active"
+                        style={{ flex: 1, fontSize: '11px' }}
+                        onClick={() => handleAddOpeningToSelectedWall('window')}
+                      >
+                        + Добави прозорец
+                      </button>
+                    </div>
+
+                    {(selectedWall.openings ?? []).length === 0 ? (
+                      <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                        Няма добавени врати или прозорци в тази стена.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {(selectedWall.openings ?? []).map((op, idx) => {
+                          const isOpSelected = selectedOpeningId === op.id;
+                          return (
+                            <div
+                              key={op.id}
+                              onClick={() => setSelectedOpeningId(op.id)}
+                              style={{
+                                backgroundColor: '#1e293b',
+                                border: `1px solid ${isOpSelected ? '#38bdf8' : '#334155'}`,
+                                borderRadius: '6px',
+                                padding: '8px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '8px',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  alignItems: 'center',
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    fontWeight: 600,
+                                    fontSize: '12px',
+                                    color: '#f8fafc',
+                                  }}
+                                >
+                                  {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn btn-danger"
+                                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteOpening(selectedWall.id, op.id);
+                                  }}
+                                >
+                                  Изтрий
+                                </button>
+                              </div>
+
+                              <div className="axis-grid">
+                                <div className="axis-field">
+                                  <span>Отстъп (м)</span>
+                                  <input
+                                    type="number"
+                                    step={0.05}
+                                    min={0.05}
+                                    className="input-control"
+                                    value={op.offsetFromStartM}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        offsetFromStartM:
+                                          parseFloat(e.target.value) || 0.05,
+                                      })
+                                    }
+                                  />
+                                </div>
+                                <div className="axis-field">
+                                  <span>Ширина (м)</span>
+                                  <input
+                                    type="number"
+                                    step={0.05}
+                                    min={0.3}
+                                    className="input-control"
+                                    value={op.widthM}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        widthM: parseFloat(e.target.value) || 0.6,
+                                      })
+                                    }
+                                  />
+                                </div>
+                                <div className="axis-field">
+                                  <span>Височина (м)</span>
+                                  <input
+                                    type="number"
+                                    step={0.05}
+                                    min={0.3}
+                                    className="input-control"
+                                    value={op.heightM}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        heightM: parseFloat(e.target.value) || 1.2,
+                                      })
+                                    }
+                                  />
+                                </div>
+                              </div>
+
+                              {op.type === 'window' ? (
+                                <div className="axis-field">
+                                  <span>Подпрозоречен парапет от пода (м)</span>
+                                  <input
+                                    type="number"
+                                    step={0.05}
+                                    min={0}
+                                    className="input-control"
+                                    value={op.sillHeightM}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        sillHeightM: Math.max(
+                                          0,
+                                          parseFloat(e.target.value) || 0
+                                        ),
+                                      })
+                                    }
+                                  />
+                                </div>
+                              ) : (
+                                <div className="axis-field">
+                                  <span>Отваряне на крилото</span>
+                                  <select
+                                    className="select-control"
+                                    value={op.swing ?? 'left-in'}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        swing: e.target.value as DoorSwing,
+                                      })
+                                    }
+                                  >
+                                    <option value="left-in">Ляво навътре</option>
+                                    <option value="right-in">Дясно навътре</option>
+                                    <option value="left-out">Ляво навън</option>
+                                    <option value="right-out">Дясно навън</option>
+                                  </select>
+                                </div>
+                              )}
+
+                              {glbCatalogModels.length > 0 && (
+                                <div className="axis-field">
+                                  <span>3D .glb модел (по избор)</span>
+                                  <select
+                                    className="select-control"
+                                    value={op.modelId ?? ''}
+                                    onChange={(e) =>
+                                      handleUpdateOpening(selectedWall.id, op.id, {
+                                        modelId: e.target.value || null,
+                                      })
+                                    }
+                                  >
+                                    <option value="">Стандартен 3D модул</option>
+                                    {glbCatalogModels.map((m) => (
+                                      <option key={m.id} value={m.id}>
+                                        {m.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   <button
@@ -1900,8 +2234,8 @@ export function App() {
               ) : !selectedObject || !selectedModel ? (
                 <>
                   <div className="empty-state-box">
-                    Няма избран обект или стена. Кликнете върху стена за промяна на дължина и
-                    ъгъл, или отворете таб „План / Шаблони“.
+                    Няма избран обект или стена. Кликнете върху стена за промяна на размери,
+                    врати и прозорци, или отворете таб „План / Шаблони“.
                   </div>
 
                   {sceneObjects.length > 0 && (
