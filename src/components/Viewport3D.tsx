@@ -1,19 +1,30 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { Canvas } from '@react-three/fiber';
-import { Environment, Grid, Lightformer, OrbitControls, TransformControls } from '@react-three/drei';
+import { Canvas, useThree } from '@react-three/fiber';
+import {
+  Environment,
+  Grid,
+  Lightformer,
+  OrbitControls,
+  TransformControls,
+} from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
 import type { RoomConfig } from '../types/room';
 import { RoomMesh } from './RoomMesh';
 import { SceneItemMesh } from './SceneItemMesh';
 
+export type ViewportCameraMode = '3d' | 'top';
+
 interface Viewport3DProps {
   room: RoomConfig;
+  viewMode?: ViewportCameraMode;
   selectedWallId?: string | null;
   onSelectWall?: (wallId: string | null) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
+  hoverPoint?: [number, number] | null;
+  onHoverPointChange?: (pt: [number, number] | null) => void;
   onFloorDrawClick?: (point: [number, number]) => void;
   sceneObjects: SceneObject[];
   models: CatalogModel[];
@@ -26,6 +37,38 @@ interface Viewport3DProps {
     rotation: [number, number, number],
     scale: [number, number, number]
   ) => void;
+}
+
+interface CameraModeControllerProps {
+  viewMode: ViewportCameraMode;
+  orbitRef: React.RefObject<OrbitControlsImpl | null>;
+}
+
+function CameraModeController({ viewMode, orbitRef }: CameraModeControllerProps) {
+  const { camera } = useThree();
+  const prevModeRef = useRef<ViewportCameraMode>(viewMode);
+
+  useEffect(() => {
+    if (prevModeRef.current === viewMode) return;
+    prevModeRef.current = viewMode;
+
+    const controls = orbitRef.current;
+    if (viewMode === 'top') {
+      camera.position.set(0, 12, 0.01);
+      if (controls) {
+        controls.target.set(0, 0, 0);
+        controls.update();
+      }
+    } else {
+      camera.position.set(5.5, 5.5, 6.5);
+      if (controls) {
+        controls.target.set(0, 0, 0);
+        controls.update();
+      }
+    }
+  }, [viewMode, camera, orbitRef]);
+
+  return null;
 }
 
 interface SelectedObjectGizmoProps {
@@ -188,10 +231,13 @@ function SelectedObjectGizmo({
 
 export function Viewport3D({
   room,
+  viewMode = '3d',
   selectedWallId = null,
   onSelectWall,
   isDrawingWalls = false,
   draftPoints = [],
+  hoverPoint = null,
+  onHoverPointChange,
   onFloorDrawClick,
   sceneObjects,
   models,
@@ -222,6 +268,8 @@ export function Viewport3D({
     >
       <color attach="background" args={['#0b1120']} />
 
+      <CameraModeController viewMode={viewMode} orbitRef={orbitRef} />
+
       <ambientLight intensity={0.65} />
       <directionalLight
         position={[6, 9, 5]}
@@ -230,10 +278,10 @@ export function Viewport3D({
         shadow-mapSize={[2048, 2048]}
         shadow-camera-near={0.5}
         shadow-camera-far={35}
-        shadow-camera-left={-10}
-        shadow-camera-right={10}
-        shadow-camera-top={10}
-        shadow-camera-bottom={-10}
+        shadow-camera-left={-12}
+        shadow-camera-right={12}
+        shadow-camera-top={12}
+        shadow-camera-bottom={-12}
         shadow-bias={-0.0004}
       />
 
@@ -270,7 +318,7 @@ export function Viewport3D({
         sectionSize={1}
         sectionThickness={1.2}
         sectionColor="#334155"
-        fadeDistance={26}
+        fadeDistance={28}
         fadeStrength={1.5}
         position={[0, 0, 0]}
       />
@@ -281,6 +329,8 @@ export function Viewport3D({
         onSelectWall={onSelectWall}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
+        hoverPoint={hoverPoint}
+        onHoverPointChange={onHoverPointChange}
         onFloorDrawClick={onFloorDrawClick}
       />
 
@@ -319,9 +369,10 @@ export function Viewport3D({
         makeDefault
         enableDamping
         dampingFactor={0.08}
+        enableRotate={viewMode !== 'top'}
         maxPolarAngle={Math.PI / 2 - 0.03}
         minDistance={1.2}
-        maxDistance={28}
+        maxDistance={32}
       />
     </Canvas>
   );

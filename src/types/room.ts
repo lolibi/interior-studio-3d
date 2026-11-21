@@ -2,24 +2,37 @@ export interface WallSegment {
   id: string;
   start: [number, number]; // [x, z] в метри
   end: [number, number];   // [x, z] в метри
-  heightM: number;
-  thicknessM: number;
+  thicknessM: number;      // дебелина в метри (напр. 0.15 или 0.25)
+}
+
+export interface FloorplanUnderlay {
+  imageUrl: string;
+  widthM: number;
+  depthM: number;
+  offsetX: number;
+  offsetZ: number;
+  rotationDeg: number;
+  opacity: number;
+  visible: boolean;
+}
+
+export interface RoomConfig {
+  templateId: string | null;
+  templateName: string | null;
+  ceilingHeightM: number;
+  defaultThicknessM: number;
+  walls: WallSegment[];
+  floorplan: FloorplanUnderlay | null;
 }
 
 export interface ApartmentTemplate {
   id: string;
   name: string;
   description?: string;
-  walls: WallSegment[];
-  updatedAt?: string;
-}
-
-export interface RoomConfig {
-  templateId?: string | null;
-  templateName?: string | null;
-  defaultHeightM: number;
+  ceilingHeightM: number;
   defaultThicknessM: number;
   walls: WallSegment[];
+  updatedAt?: string;
 }
 
 export function getWallLengthM(wall: WallSegment): number {
@@ -28,67 +41,110 @@ export function getWallLengthM(wall: WallSegment): number {
   return Number(Math.hypot(dx, dz).toFixed(3));
 }
 
-/**
- * Ъгъл на стената в градуси в хоризонталната XZ равнина:
- * 0° = по +X, 90° = по +Z, 180°/-180° = по -X, -90° = по -Z
- */
 export function getWallAngleDeg(wall: WallSegment): number {
   const dx = wall.end[0] - wall.start[0];
   const dz = wall.end[1] - wall.start[1];
-  const deg = (Math.atan2(dz, dx) * 180) / Math.PI;
+  let deg = (Math.atan2(dz, dx) * 180) / Math.PI;
+  if (deg < 0) deg += 360;
   return Number(deg.toFixed(1));
 }
 
-/**
- * Връща обновен WallSegment с нова дължина (в метри) и/или нов ъгъл (в градуси),
- * запазвайки началната точка wall.start.
- */
+export function computeEndpointFromAngleAndLength(
+  start: [number, number],
+  lengthM: number,
+  angleDeg: number
+): [number, number] {
+  const safeLength = Math.max(0.05, Math.min(50, lengthM));
+  const rad = (angleDeg * Math.PI) / 180;
+  return [
+    Number((start[0] + Math.cos(rad) * safeLength).toFixed(3)),
+    Number((start[1] + Math.sin(rad) * safeLength).toFixed(3)),
+  ];
+}
+
 export function updateWallGeometry(
   wall: WallSegment,
-  nextLengthM: number,
-  nextAngleDeg: number
+  lengthM: number,
+  angleDeg: number
 ): WallSegment {
-  const safeLen = Math.max(0.1, Math.min(50, nextLengthM));
-  const rad = (nextAngleDeg * Math.PI) / 180;
-  const endX = Number((wall.start[0] + Math.cos(rad) * safeLen).toFixed(3));
-  const endZ = Number((wall.start[1] + Math.sin(rad) * safeLen).toFixed(3));
-
   return {
     ...wall,
-    end: [endX, endZ],
+    end: computeEndpointFromAngleAndLength(wall.start, lengthM, angleDeg),
   };
 }
 
-export function createStarterWalls(
-  heightM = 2.65,
-  thicknessM = 0.15
-): WallSegment[] {
-  const pts: [number, number][] = [
-    [-2.5, -2.0],
-    [2.5, -2.0],
-    [2.5, 2.0],
-    [-2.5, 2.0],
-  ];
+export function snapDrawingPoint(
+  rawPoint: [number, number],
+  anchorPoint: [number, number] | null,
+  snapTargets: [number, number][],
+  angleStepDeg = 45
+): [number, number] {
+  // 1. Прихващане към съществуващ ъгъл/точка (в радиус 20 см)
+  for (const target of snapTargets) {
+    if (Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]) <= 0.2) {
+      return [Number(target[0].toFixed(3)), Number(target[1].toFixed(3))];
+    }
+  }
 
-  return pts.map((p, i) => ({
-    id: `wall-init-${i + 1}`,
-    start: p,
-    end: pts[(i + 1) % pts.length],
-    heightM,
-    thicknessM,
-  }));
+  // 2. Ако няма начална точка, прихващаме към мрежа през 0.10 м (10 см)
+  if (!anchorPoint) {
+    return [
+      Number((Math.round(rawPoint[0] * 10) / 10).toFixed(2)),
+      Number((Math.round(rawPoint[1] * 10) / 10).toFixed(2)),
+    ];
+  }
+
+  // 3. Прихващане по ъгъл (напр. през 45°: 0°, 45°, 90°, 135°, 180°...) и стъпка 0.05 м (5 см)
+  const dx = rawPoint[0] - anchorPoint[0];
+  const dz = rawPoint[1] - anchorPoint[1];
+  const rawDist = Math.hypot(dx, dz);
+  if (rawDist < 0.02) {
+    return anchorPoint;
+  }
+
+  const rawDeg = (Math.atan2(dz, dx) * 180) / Math.PI;
+  const snappedDeg = Math.round(rawDeg / angleStepDeg) * angleStepDeg;
+  const snappedDist = Math.max(0.05, Math.round(rawDist * 20) / 20);
+
+  return computeEndpointFromAngleAndLength(anchorPoint, snappedDist, snappedDeg);
+}
+
+export function createStarterWalls(defaultThicknessM = 0.15): WallSegment[] {
+  return [
+    {
+      id: 'wall-init-1',
+      start: [-2.5, -2.0],
+      end: [2.5, -2.0],
+      thicknessM: defaultThicknessM,
+    },
+    {
+      id: 'wall-init-2',
+      start: [2.5, -2.0],
+      end: [2.5, 2.0],
+      thicknessM: defaultThicknessM,
+    },
+    {
+      id: 'wall-init-3',
+      start: [2.5, 2.0],
+      end: [-2.5, 2.0],
+      thicknessM: defaultThicknessM,
+    },
+    {
+      id: 'wall-init-4',
+      start: [-2.5, 2.0],
+      end: [-2.5, -2.0],
+      thicknessM: defaultThicknessM,
+    },
+  ];
 }
 
 export function createDefaultRoomConfig(): RoomConfig {
-  const defaultHeightM = 2.65;
-  const defaultThicknessM = 0.15;
   return {
     templateId: null,
     templateName: null,
-    defaultHeightM,
-    defaultThicknessM,
-    walls: createStarterWalls(defaultHeightM, defaultThicknessM),
+    ceilingHeightM: 2.65,
+    defaultThicknessM: 0.15,
+    walls: createStarterWalls(0.15),
+    floorplan: null,
   };
 }
-
-export const DEFAULT_ROOM_CONFIG: RoomConfig = createDefaultRoomConfig();

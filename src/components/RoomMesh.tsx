@@ -1,7 +1,13 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import * as THREE from 'three';
+import { Html, Line } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
-import type { RoomConfig, WallSegment } from '../types/room';
+import {
+  getWallAngleDeg,
+  getWallLengthM,
+  snapDrawingPoint,
+} from '../types/room';
+import type { FloorplanUnderlay, RoomConfig, WallSegment } from '../types/room';
 
 interface RoomMeshProps {
   room: RoomConfig;
@@ -9,75 +15,161 @@ interface RoomMeshProps {
   onSelectWall?: (wallId: string | null) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
+  hoverPoint?: [number, number] | null;
+  onHoverPointChange?: (pt: [number, number] | null) => void;
   onFloorDrawClick?: (point: [number, number]) => void;
 }
 
-interface ComputedWallBox {
-  wall: WallSegment;
-  centerX: number;
-  centerZ: number;
-  lengthM: number;
-  angleY: number;
+interface FloorplanPlaneProps {
+  floorplan: FloorplanUnderlay;
 }
 
-interface CornerJoint {
-  key: string;
-  x: number;
-  z: number;
-  heightM: number;
-  sizeM: number;
-}
+function FloorplanPlane({ floorplan }: FloorplanPlaneProps) {
+  const [texture, setTexture] = useState<THREE.Texture | null>(null);
 
-const DRAW_SNAP_M = 0.25;
-
-function snapMeter(val: number, step = DRAW_SNAP_M): number {
-  return Math.round(val / step) * step;
-}
-
-function computeWallBoxes(walls: WallSegment[]): ComputedWallBox[] {
-  return walls.map((wall) => {
-    const [x1, z1] = wall.start;
-    const [x2, z2] = wall.end;
-    const dx = x2 - x1;
-    const dz = z2 - z1;
-    const baseLen = Math.max(0.05, Math.hypot(dx, dz));
-    const t = Math.max(0.04, wall.thicknessM);
-    const lengthM = baseLen + t;
-    const centerX = (x1 + x2) / 2;
-    const centerZ = (z1 + z2) / 2;
-    const angleY = -Math.atan2(dz, dx);
-
-    return {
-      wall,
-      centerX,
-      centerZ,
-      lengthM,
-      angleY,
-    };
-  });
-}
-
-function computeCornerJoints(walls: WallSegment[]): CornerJoint[] {
-  const map = new Map<string, CornerJoint>();
-
-  for (const wall of walls) {
-    const pts: [number, number][] = [wall.start, wall.end];
-    const t = Math.max(0.04, wall.thicknessM);
-    const h = Math.max(0.2, wall.heightM);
-
-    for (const [x, z] of pts) {
-      const key = `${x.toFixed(3)}_${z.toFixed(3)}`;
-      const existing = map.get(key);
-      if (!existing) {
-        map.set(key, { key, x, z, heightM: h, sizeM: t });
-      } else {
-        existing.sizeM = Math.max(existing.sizeM, t);
-        existing.heightM = Math.max(existing.heightM, h);
-      }
+  useEffect(() => {
+    if (!floorplan.imageUrl) {
+      setTexture(null);
+      return;
     }
+
+    let cancelled = false;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    loader.load(
+      floorplan.imageUrl,
+      (loadedTex) => {
+        if (cancelled) {
+          loadedTex.dispose();
+          return;
+        }
+        loadedTex.colorSpace = THREE.SRGBColorSpace;
+        loadedTex.anisotropy = 4;
+        setTexture(loadedTex);
+      },
+      undefined,
+      () => {
+        if (!cancelled) setTexture(null);
+      }
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [floorplan.imageUrl]);
+
+  useEffect(() => {
+    return () => {
+      texture?.dispose();
+    };
+  }, [texture]);
+
+  if (!floorplan.visible || !texture) return null;
+
+  const rotRad = (floorplan.rotationDeg * Math.PI) / 180;
+
+  return (
+    <mesh
+      position={[floorplan.offsetX, 0.002, floorplan.offsetZ]}
+      rotation={[-Math.PI / 2, 0, -rotRad]}
+      receiveShadow
+    >
+      <planeGeometry
+        args={[
+          Math.max(0.5, floorplan.widthM),
+          Math.max(0.5, floorplan.depthM),
+        ]}
+      />
+      <meshBasicMaterial
+        map={texture}
+        transparent
+        opacity={Math.min(1, Math.max(0.1, floorplan.opacity))}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+}
+
+interface SingleWallProps {
+  wall: WallSegment;
+  ceilingHeightM: number;
+  isSelected: boolean;
+  isDrawingWalls: boolean;
+  onSelectWall?: (wallId: string | null) => void;
+}
+
+function SingleWall({
+  wall,
+  ceilingHeightM,
+  isSelected,
+  isDrawingWalls,
+  onSelectWall,
+}: SingleWallProps) {
+  const dx = wall.end[0] - wall.start[0];
+  const dz = wall.end[1] - wall.start[1];
+  const length = Math.max(0.05, Math.hypot(dx, dz));
+  const midX = (wall.start[0] + wall.end[0]) / 2;
+  const midZ = (wall.start[1] + wall.end[1]) / 2;
+  const angleY = -Math.atan2(dz, dx);
+
+  const height = Math.max(0.2, ceilingHeightM);
+  const thickness = Math.max(0.05, wall.thicknessM);
+
+  function handleClick(e: ThreeEvent<MouseEvent>) {
+    if (isDrawingWalls) return;
+    e.stopPropagation();
+    onSelectWall?.(wall.id);
   }
 
-  return Array.from(map.values());
+  return (
+    <group position={[midX, height / 2, midZ]} rotation={[0, angleY, 0]}>
+      <mesh castShadow receiveShadow onClick={handleClick}>
+        <boxGeometry args={[length, height, thickness]} />
+        <meshStandardMaterial
+          color={isSelected ? '#38bdf8' : '#e2e8f0'}
+          roughness={0.85}
+          metalness={0.05}
+        />
+      </mesh>
+
+      {isSelected && (
+        <>
+          <mesh>
+            <boxGeometry
+              args={[length + 0.015, height + 0.015, thickness + 0.015]}
+            />
+            <meshBasicMaterial
+              color="#0284c7"
+              wireframe
+              transparent
+              opacity={0.65}
+            />
+          </mesh>
+          <Html
+            position={[0, height / 2 + 0.22, 0]}
+            center
+            distanceFactor={8}
+            style={{ pointerEvents: 'none' }}
+          >
+            <div
+              style={{
+                backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                border: '1px solid #38bdf8',
+                color: '#f8fafc',
+                padding: '2px 7px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {getWallLengthM(wall)} м • {getWallAngleDeg(wall)}°
+            </div>
+          </Html>
+        </>
+      )}
+    </group>
+  );
 }
 
 export function RoomMesh({
@@ -86,146 +178,160 @@ export function RoomMesh({
   onSelectWall,
   isDrawingWalls = false,
   draftPoints = [],
+  hoverPoint = null,
+  onHoverPointChange,
   onFloorDrawClick,
 }: RoomMeshProps) {
-  const wallBoxes = useMemo(() => computeWallBoxes(room.walls), [room.walls]);
-  const cornerJoints = useMemo(() => computeCornerJoints(room.walls), [room.walls]);
-
-  const draftSegments = useMemo(() => {
-    if (draftPoints.length < 2) return [];
-    const segs: {
-      key: string;
-      centerX: number;
-      centerZ: number;
-      lengthM: number;
-      angleY: number;
-    }[] = [];
-
-    for (let i = 0; i < draftPoints.length - 1; i++) {
-      const [x1, z1] = draftPoints[i];
-      const [x2, z2] = draftPoints[i + 1];
-      const dx = x2 - x1;
-      const dz = z2 - z1;
-      const len = Math.hypot(dx, dz);
-      if (len < 0.01) continue;
-      segs.push({
-        key: `draft-seg-${i}`,
-        centerX: (x1 + x2) / 2,
-        centerZ: (z1 + z2) / 2,
-        lengthM: len,
-        angleY: -Math.atan2(dz, dx),
-      });
+  const snapTargets = useMemo(() => {
+    const pts: [number, number][] = [];
+    for (const w of room.walls) {
+      pts.push(w.start, w.end);
     }
+    for (const p of draftPoints) {
+      pts.push(p);
+    }
+    return pts;
+  }, [room.walls, draftPoints]);
 
-    return segs;
-  }, [draftPoints]);
+  function resolveSnappedFromEvent(e: ThreeEvent<MouseEvent | PointerEvent>): [number, number] {
+    const anchor =
+      draftPoints.length > 0 ? draftPoints[draftPoints.length - 1] : null;
+    return snapDrawingPoint([e.point.x, e.point.z], anchor, snapTargets, 45);
+  }
 
-  // Подова равнина за приемане на кликове при чертане и изчистване на селекцията при клик на празно
-  const floorPlaneGeometry = useMemo(() => {
-    const geo = new THREE.PlaneGeometry(40, 40);
-    geo.rotateX(-Math.PI / 2);
-    return geo;
-  }, []);
-
-  function handleWallClick(e: ThreeEvent<MouseEvent>, wallId: string) {
-    if (isDrawingWalls) return;
+  function handleFloorMove(e: ThreeEvent<PointerEvent>) {
+    if (!isDrawingWalls) return;
     e.stopPropagation();
-    onSelectWall?.(wallId);
+    const snapped = resolveSnappedFromEvent(e);
+    onHoverPointChange?.(snapped);
   }
 
   function handleFloorClick(e: ThreeEvent<MouseEvent>) {
+    if (!isDrawingWalls || !onFloorDrawClick) return;
     e.stopPropagation();
-    if (isDrawingWalls && onFloorDrawClick) {
-      const sx = Number(snapMeter(e.point.x).toFixed(2));
-      const sz = Number(snapMeter(e.point.z).toFixed(2));
-      onFloorDrawClick([sx, sz]);
-      return;
-    }
-    onSelectWall?.(null);
+    const snapped = resolveSnappedFromEvent(e);
+    onFloorDrawClick(snapped);
   }
 
+  const livePreviewData = useMemo(() => {
+    if (!isDrawingWalls || draftPoints.length === 0 || !hoverPoint) {
+      return null;
+    }
+    const anchor = draftPoints[draftPoints.length - 1];
+    const dx = hoverPoint[0] - anchor[0];
+    const dz = hoverPoint[1] - anchor[1];
+    const dist = Number(Math.hypot(dx, dz).toFixed(2));
+    let deg = (Math.atan2(dz, dx) * 180) / Math.PI;
+    if (deg < 0) deg += 360;
+    deg = Number(deg.toFixed(0));
+
+    return {
+      anchor,
+      target: hoverPoint,
+      midX: (anchor[0] + hoverPoint[0]) / 2,
+      midZ: (anchor[1] + hoverPoint[1]) / 2,
+      dist,
+      deg,
+    };
+  }, [isDrawingWalls, draftPoints, hoverPoint]);
+
+  const draftLinePoints = useMemo(() => {
+    const pts = draftPoints.map(
+      ([x, z]) => new THREE.Vector3(x, 0.03, z)
+    );
+    if (isDrawingWalls && hoverPoint && pts.length > 0) {
+      pts.push(new THREE.Vector3(hoverPoint[0], 0.03, hoverPoint[1]));
+    }
+    return pts;
+  }, [draftPoints, isDrawingWalls, hoverPoint]);
+
   return (
-    <group name="architecture-walls">
-      {/* Невидима/полупрозрачна подова плоча на y = 0 за кликове и чертане */}
+    <group>
+      {/* Невидима равнина за прецизно прихващане на кликове и движение по пода */}
       <mesh
-        geometry={floorPlaneGeometry}
         position={[0, 0.001, 0]}
-        receiveShadow
+        rotation={[-Math.PI / 2, 0, 0]}
+        onPointerMove={handleFloorMove}
         onClick={handleFloorClick}
       >
-        <meshStandardMaterial
-          color="#1e293b"
-          transparent
-          opacity={isDrawingWalls ? 0.25 : 0.12}
-          roughness={0.9}
-          metalness={0.0}
-        />
+        <planeGeometry args={[60, 60]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
 
-      {/* Стени в метри */}
-      {wallBoxes.map(({ wall, centerX, centerZ, lengthM, angleY }) => {
-        const isSelected = selectedWallId === wall.id;
-        const h = Math.max(0.2, wall.heightM);
-        const t = Math.max(0.04, wall.thicknessM);
+      {/* Подложка: План от строителя */}
+      {room.floorplan && <FloorplanPlane floorplan={room.floorplan} />}
 
-        return (
-          <mesh
-            key={wall.id}
-            position={[centerX, h / 2, centerZ]}
-            rotation={[0, angleY, 0]}
-            castShadow
-            receiveShadow
-            onClick={(e) => handleWallClick(e, wall.id)}
-          >
-            <boxGeometry args={[lengthM, h, t]} />
-            <meshStandardMaterial
-              color={isSelected ? '#e0f2fe' : '#f1f5f9'}
-              emissive={isSelected ? '#0284c7' : '#000000'}
-              emissiveIntensity={isSelected ? 0.35 : 0}
-              roughness={0.85}
-              metalness={0.02}
-            />
-          </mesh>
-        );
-      })}
-
-      {/* Съединителни възли по ъглите */}
-      {cornerJoints.map((joint) => (
-        <mesh
-          key={joint.key}
-          position={[joint.x, joint.heightM / 2, joint.z]}
-          castShadow
-          receiveShadow
-        >
-          <boxGeometry args={[joint.sizeM, joint.heightM, joint.sizeM]} />
-          <meshStandardMaterial color="#f1f5f9" roughness={0.85} metalness={0.02} />
-        </mesh>
+      {/* Всички стени с обща височина на апартамента */}
+      {room.walls.map((wall) => (
+        <SingleWall
+          key={wall.id}
+          wall={wall}
+          ceilingHeightM={room.ceilingHeightM}
+          isSelected={wall.id === selectedWallId}
+          isDrawingWalls={isDrawingWalls}
+          onSelectWall={onSelectWall}
+        />
       ))}
 
-      {/* Визуализация на точки и линии при активно чертане на стени */}
+      {/* Точки в краищата на стените (визуални възли при чертане) */}
       {isDrawingWalls &&
-        draftPoints.map((pt, idx) => (
-          <mesh key={`draft-pt-${idx}`} position={[pt[0], 0.05, pt[1]]}>
-            <cylinderGeometry args={[0.08, 0.08, 0.1, 16]} />
-            <meshStandardMaterial
-              color={idx === 0 ? '#22c55e' : '#38bdf8'}
-              emissive={idx === 0 ? '#16a34a' : '#0284c7'}
-              emissiveIntensity={0.4}
-            />
+        snapTargets.map((pt, idx) => (
+          <mesh key={`snap-node-${idx}`} position={[pt[0], 0.025, pt[1]]}>
+            <cylinderGeometry args={[0.07, 0.07, 0.03, 16]} />
+            <meshBasicMaterial color="#0284c7" />
           </mesh>
         ))}
 
+      {/* Жива линия при чертане */}
+      {isDrawingWalls && draftLinePoints.length >= 2 && (
+        <Line
+          points={draftLinePoints}
+          color="#38bdf8"
+          lineWidth={3}
+        />
+      )}
+
+      {/* Маркери на поставените точки в текущия чертеж */}
       {isDrawingWalls &&
-        draftSegments.map((seg) => (
-          <mesh
-            key={seg.key}
-            position={[seg.centerX, 0.04, seg.centerZ]}
-            rotation={[0, seg.angleY, 0]}
-          >
-            <boxGeometry args={[seg.lengthM, 0.06, 0.08]} />
-            <meshStandardMaterial color="#38bdf8" />
+        draftPoints.map((pt, idx) => (
+          <mesh key={`draft-pt-${idx}`} position={[pt[0], 0.04, pt[1]]}>
+            <sphereGeometry args={[0.09, 16, 16]} />
+            <meshBasicMaterial color={idx === 0 ? '#10b981' : '#38bdf8'} />
           </mesh>
         ))}
+
+      {/* Курсорна точка при прихващане */}
+      {isDrawingWalls && hoverPoint && (
+        <mesh position={[hoverPoint[0], 0.04, hoverPoint[1]]}>
+          <sphereGeometry args={[0.08, 16, 16]} />
+          <meshBasicMaterial color="#f59e0b" />
+        </mesh>
+      )}
+
+      {/* Етикет с жива дължина (м) и ъгъл (°) докато местиш мишката */}
+      {livePreviewData && livePreviewData.dist > 0 && (
+        <Html
+          position={[livePreviewData.midX, 0.35, livePreviewData.midZ]}
+          center
+          style={{ pointerEvents: 'none' }}
+        >
+          <div
+            style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.95)',
+              border: '1px solid #f59e0b',
+              color: '#fef3c7',
+              padding: '3px 8px',
+              borderRadius: '5px',
+              fontSize: '12px',
+              fontWeight: 700,
+              whiteSpace: 'nowrap',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.45)',
+            }}
+          >
+            {livePreviewData.dist} м • {livePreviewData.deg}°
+          </div>
+        </Html>
+      )}
     </group>
   );
 }

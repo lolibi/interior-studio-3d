@@ -6,13 +6,7 @@ import type {
   ModelCategory,
   ScaleMode,
 } from '../types/editor';
-import {
-  createStarterWalls,
-  getWallAngleDeg,
-  getWallLengthM,
-  updateWallGeometry,
-} from '../types/room';
-import type { ApartmentTemplate, WallSegment } from '../types/room';
+import type { ApartmentTemplate, RoomConfig } from '../types/room';
 import {
   createModelOnServer,
   deleteApartmentTemplateOnServer,
@@ -26,6 +20,7 @@ import {
 
 interface AdminPanelProps {
   models: CatalogModel[];
+  currentRoom: RoomConfig;
   onModelsUpdated: () => Promise<void> | void;
   onClose: () => void;
 }
@@ -49,7 +44,12 @@ const DEFAULT_MODEL_FORM: CreateModelInput = {
   isActive: true,
 };
 
-export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps) {
+export function AdminPanel({
+  models,
+  currentRoom,
+  onModelsUpdated,
+  onClose,
+}: AdminPanelProps) {
   const [adminPassword, setAdminPassword] = useState<string>(() => {
     try {
       return localStorage.getItem(ADMIN_PASS_STORAGE_KEY) ?? '';
@@ -65,18 +65,10 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [busyModelId, setBusyModelId] = useState<string | null>(null);
 
-  // --- Шаблони за апартаменти (само през Админ панела) ---
+  // --- Шаблони за апартаменти (в MySQL базата данни) ---
   const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
   const [templateName, setTemplateName] = useState('');
   const [templateDesc, setTemplateDesc] = useState('');
-  const [templateWalls, setTemplateWalls] = useState<WallSegment[]>(() =>
-    createStarterWalls(2.65, 0.15)
-  );
-  const [selectedTplWallId, setSelectedTplWallId] = useState<string | null>(
-    () => createStarterWalls(2.65, 0.15)[0]?.id ?? null
-  );
-  const [tplWallLenInput, setTplWallLenInput] = useState('5');
-  const [tplWallDegInput, setTplWallDegInput] = useState('0');
   const [isSavingTemplate, setIsSavingTemplate] = useState(false);
 
   const [statusMessage, setStatusMessage] = useState<{
@@ -95,70 +87,19 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
 
   useEffect(() => {
     let active = true;
-    fetchApartmentTemplates().then((list) => {
-      if (active) setTemplates(list);
-    });
+    fetchApartmentTemplates()
+      .then((list) => {
+        if (active) setTemplates(list);
+      })
+      .catch(() => {
+        // Ако таблицата в api.php още не е добавена, списъкът остава празен без срив
+      });
     return () => {
       active = false;
     };
   }, []);
 
-  const selectedTplWall =
-    templateWalls.find((w) => w.id === selectedTplWallId) ?? null;
-
-  useEffect(() => {
-    if (selectedTplWall) {
-      setTplWallLenInput(String(getWallLengthM(selectedTplWall)));
-      setTplWallDegInput(String(getWallAngleDeg(selectedTplWall)));
-    }
-  }, [selectedTplWall]);
-
-  function applySelectedTplWallGeometry() {
-    if (!selectedTplWall) return;
-    const len = parseFloat(tplWallLenInput.replace(',', '.'));
-    const deg = parseFloat(tplWallDegInput.replace(',', '.'));
-    if (Number.isNaN(len) || Number.isNaN(deg)) return;
-
-    const updatedWall = updateWallGeometry(selectedTplWall, len, deg);
-    setTemplateWalls((prev) =>
-      prev.map((w) => (w.id === selectedTplWall.id ? updatedWall : w))
-    );
-  }
-
-  function handleAddChainedTplWall() {
-    const lastWall = templateWalls[templateWalls.length - 1];
-    const startPt: [number, number] = lastWall ? lastWall.end : [0, 0];
-    const nextAngleDeg = lastWall ? (getWallAngleDeg(lastWall) + 90) % 360 : 0;
-    const rad = (nextAngleDeg * Math.PI) / 180;
-    const len = 3.0;
-    const endPt: [number, number] = [
-      Number((startPt[0] + Math.cos(rad) * len).toFixed(3)),
-      Number((startPt[1] + Math.sin(rad) * len).toFixed(3)),
-    ];
-
-    const newWall: WallSegment = {
-      id: `tpl-wall-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      start: startPt,
-      end: endPt,
-      heightM: lastWall?.heightM ?? 2.65,
-      thicknessM: lastWall?.thicknessM ?? 0.15,
-    };
-
-    setTemplateWalls((prev) => [...prev, newWall]);
-    setSelectedTplWallId(newWall.id);
-  }
-
-  function handleDeleteTplWall(wallId: string) {
-    setTemplateWalls((prev) => {
-      const next = prev.filter((w) => w.id !== wallId);
-      if (selectedTplWallId === wallId) {
-        setSelectedTplWallId(next[0]?.id ?? null);
-      }
-      return next;
-    });
-  }
-
-  async function handleSaveTemplate(e: React.FormEvent) {
+  async function handleSaveCurrentPlanAsTemplate(e: React.FormEvent) {
     e.preventDefault();
     setStatusMessage(null);
 
@@ -174,15 +115,15 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
     if (!cleanName) {
       setStatusMessage({
         type: 'error',
-        text: 'Въведете име на шаблона за апартамент (напр. „Тристаен панел“).',
+        text: 'Въведете име на шаблона за апартамент (напр. „Тристаен 85 кв.м“).',
       });
       return;
     }
 
-    if (templateWalls.length === 0) {
+    if (currentRoom.walls.length === 0) {
       setStatusMessage({
         type: 'error',
-        text: 'Добавете поне една стена към шаблона.',
+        text: 'Текущият чертеж в редактора няма стени. Начертайте стените в 2D/3D изгледа и опитайте отново.',
       });
       return;
     }
@@ -190,10 +131,17 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
     setIsSavingTemplate(true);
     try {
       const newTpl: ApartmentTemplate = {
-        id: `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         name: cleanName,
         description: templateDesc.trim() || undefined,
-        walls: templateWalls,
+        ceilingHeightM: currentRoom.ceilingHeightM,
+        defaultThicknessM: currentRoom.defaultThicknessM,
+        walls: currentRoom.walls.map((w, idx) => ({
+          id: `tpl-wall-${idx + 1}`,
+          start: [w.start[0], w.start[1]],
+          end: [w.end[0], w.end[1]],
+          thicknessM: w.thicknessM,
+        })),
         updatedAt: new Date().toISOString(),
       };
 
@@ -202,14 +150,18 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
       setTemplates(updatedList);
       setTemplateName('');
       setTemplateDesc('');
+      await onModelsUpdated();
       setStatusMessage({
         type: 'success',
-        text: `Шаблонът „${cleanName}“ е запазен.`,
+        text: `Шаблонът „${cleanName}“ (${newTpl.walls.length} стени, височина ${newTpl.ceilingHeightM} м) е записан в базата данни.`,
       });
     } catch (err) {
       setStatusMessage({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Грешка при запазване на шаблона.',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Грешка при запис на шаблона в базата данни.',
       });
     } finally {
       setIsSavingTemplate(false);
@@ -225,18 +177,27 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
       return;
     }
 
+    const confirmed = window.confirm(
+      `Сигурни ли сте, че искате да изтриете шаблона „${tpl.name}“?`
+    );
+    if (!confirmed) return;
+
     try {
       await deleteApartmentTemplateOnServer(tpl.id, adminPassword.trim());
       const updatedList = await fetchApartmentTemplates();
       setTemplates(updatedList);
+      await onModelsUpdated();
       setStatusMessage({
         type: 'success',
-        text: `Шаблонът „${tpl.name}“ е изтрит.`,
+        text: `Шаблонът „${tpl.name}“ е изтрит от базата данни.`,
       });
     } catch (err) {
       setStatusMessage({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Грешка при изтриване на шаблона.',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Грешка при изтриване на шаблона.',
       });
     }
   }
@@ -422,7 +383,7 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
               Административен панел — Каталог и Шаблони на апартаменти
             </h2>
             <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
-              Управление на .glb модели и шаблони на апартаменти в метри и градуси
+              Всички шаблони и 3D модели се записват директно в базата данни на studio.glb3d.com
             </div>
           </div>
 
@@ -471,30 +432,32 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
             gap: '14px',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ margin: 0, fontSize: '15px', color: '#f8fafc' }}>
-              Създаване на шаблон за апартамент ({templates.length} запазени)
-            </h3>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button type="button" className="btn" onClick={handleAddChainedTplWall}>
-                + Добави стена
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  const reset = createStarterWalls(2.65, 0.15);
-                  setTemplateWalls(reset);
-                  setSelectedTplWallId(reset[0]?.id ?? null);
-                }}
-              >
-                Базов контур
-              </button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '15px', color: '#f8fafc' }}>
+                Публикуване на шаблон за апартамент в базата ({templates.length} активни)
+              </h3>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '3px' }}>
+                Начертай разпределението в 2D/3D редактора (по подложка от строителя или с точни размери) и го запази тук за клиентите.
+              </div>
+            </div>
+            <div
+              style={{
+                backgroundColor: '#0f172a',
+                border: '1px solid #334155',
+                borderRadius: '6px',
+                padding: '6px 10px',
+                fontSize: '12px',
+                color: '#38bdf8',
+              }}
+            >
+              Текущ план в редактора: <strong>{currentRoom.walls.length} стени</strong> • Височина:{' '}
+              <strong>{currentRoom.ceilingHeightM} м</strong>
             </div>
           </div>
 
           <form
-            onSubmit={handleSaveTemplate}
+            onSubmit={handleSaveCurrentPlanAsTemplate}
             style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -505,7 +468,7 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
                 <input
                   type="text"
                   className="input-control"
-                  placeholder="Напр. Тристаен 85 кв.м"
+                  placeholder="Напр. Тристаен 85 кв.м (Южен)"
                   value={templateName}
                   onChange={(e) => setTemplateName(e.target.value)}
                 />
@@ -518,142 +481,70 @@ export function AdminPanel({ models, onModelsUpdated, onClose }: AdminPanelProps
                 <input
                   type="text"
                   className="input-control"
-                  placeholder="Напр. Панелен апартамент с хол, спалня и кухня"
+                  placeholder="Напр. Хол с кухненски бокс, две спални, баня и коридор"
                   value={templateDesc}
                   onChange={(e) => setTemplateDesc(e.target.value)}
                 />
               </div>
-
-              {selectedTplWall && (
-                <div
-                  style={{
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '10px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div className="section-label" style={{ marginBottom: 0 }}>
-                    Редакция на избрана стена в шаблона
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto', gap: '8px', alignItems: 'end' }}>
-                    <div className="axis-field">
-                      <span>Дължина (м)</span>
-                      <input
-                        type="text"
-                        className="input-control"
-                        value={tplWallLenInput}
-                        onChange={(e) => setTplWallLenInput(e.target.value)}
-                      />
-                    </div>
-                    <div className="axis-field">
-                      <span>Ъгъл (°)</span>
-                      <input
-                        type="text"
-                        className="input-control"
-                        value={tplWallDegInput}
-                        onChange={(e) => setTplWallDegInput(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      className="btn btn-active"
-                      onClick={applySelectedTplWallGeometry}
-                    >
-                      Приложи
-                    </button>
-                  </div>
-                </div>
-              )}
 
               <button
                 type="submit"
                 className="btn btn-active"
                 disabled={isSavingTemplate}
               >
-                {isSavingTemplate ? 'Записване...' : 'Запази шаблон за апартамент'}
+                {isSavingTemplate
+                  ? 'Записване в базата...'
+                  : 'Запази текущия начертан план като шаблон'}
               </button>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div className="section-label" style={{ marginBottom: 0 }}>
-                Стени в шаблона ({templateWalls.length})
+                Запазени шаблони в базата данни ({templates.length})
               </div>
-              <div
-                style={{
-                  maxHeight: '190px',
-                  overflowY: 'auto',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '4px',
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: '6px',
-                  padding: '8px',
-                }}
-              >
-                {templateWalls.map((w, idx) => {
-                  const isSel = w.id === selectedTplWallId;
-                  return (
-                    <div
-                      key={w.id}
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        backgroundColor: isSel ? '#1e3a8a' : '#1e293b',
-                        fontSize: '11px',
-                        cursor: 'pointer',
-                      }}
-                      onClick={() => setSelectedTplWallId(w.id)}
-                    >
-                      <span>
-                        Стена {idx + 1}: {getWallLengthM(w)} м • {getWallAngleDeg(w)}°
-                      </span>
-                      {templateWalls.length > 1 && (
-                        <button
-                          type="button"
-                          className="btn btn-danger"
-                          style={{ padding: '2px 6px', fontSize: '10px' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteTplWall(w.id);
-                          }}
-                        >
-                          ✕
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {templates.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '4px' }}>
+              {templates.length === 0 ? (
+                <div className="empty-state-box">
+                  Все още няма запазени шаблони в базата данни.
+                </div>
+              ) : (
+                <div
+                  style={{
+                    maxHeight: '185px',
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    backgroundColor: '#0f172a',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '8px',
+                  }}
+                >
                   {templates.map((tpl) => (
                     <div
                       key={tpl.id}
                       style={{
                         display: 'flex',
+                        justifyContent: 'space-between',
                         alignItems: 'center',
-                        gap: '6px',
-                        backgroundColor: '#0f172a',
-                        border: '1px solid #334155',
-                        borderRadius: '5px',
-                        padding: '4px 8px',
-                        fontSize: '11px',
+                        padding: '6px 8px',
+                        borderRadius: '4px',
+                        backgroundColor: '#1e293b',
+                        fontSize: '12px',
+                        gap: '8px',
                       }}
                     >
-                      <span>{tpl.name} ({tpl.walls.length} стени)</span>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, color: '#f8fafc' }}>{tpl.name}</div>
+                        <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                          {tpl.walls.length} стени • Височина: {tpl.ceilingHeightM} м
+                          {tpl.description ? ` • ${tpl.description}` : ''}
+                        </div>
+                      </div>
                       <button
                         type="button"
                         className="btn btn-danger"
-                        style={{ padding: '1px 5px', fontSize: '10px' }}
+                        style={{ padding: '4px 8px', fontSize: '11px', flexShrink: 0 }}
                         onClick={() => handleDeleteTemplate(tpl)}
                       >
                         Изтрий
