@@ -1,8 +1,9 @@
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { Html, Line, useGLTF } from '@react-three/drei';
+import { Html, Line, TransformControls, useGLTF } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
-import type { CatalogModel } from '../types/editor';
+import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
+import type { CatalogModel, TransformTool } from '../types/editor';
 import {
   findClosedRoomPolygons,
   getOpeningJambPoints,
@@ -10,6 +11,7 @@ import {
   getWallJointExtensions,
   getWallLengthM,
   snapDrawingPoint,
+  snapOpeningToWalls,
 } from '../types/room';
 import type {
   DoorSwing,
@@ -25,12 +27,18 @@ import { cloneAndStretchGlbByVertices } from '../utils/smartScaleGlb';
 interface RoomMeshProps {
   room: RoomConfig;
   models?: CatalogModel[];
+  transformTool?: TransformTool;
   selectedWallId?: string | null;
   selectedOpeningId?: string | null;
   selectedStandaloneOpeningId?: string | null;
   onSelectWall?: (wallId: string | null) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening?: (openingId: string | null) => void;
+  onUpdateStandaloneOpening?: (
+    openingId: string,
+    patch: Partial<StandaloneOpening>
+  ) => void;
+  onDraggingChange?: (dragging: boolean) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -368,21 +376,32 @@ function OpeningVisual({
 
 interface StandaloneOpeningMeshProps {
   opening: StandaloneOpening;
+  walls: WallSegment[];
   ceilingHeightM: number;
   models: CatalogModel[];
+  transformTool: TransformTool;
   isSelected: boolean;
   isInteractiveDisabled: boolean;
   onSelect?: (openingId: string) => void;
+  onUpdate?: (openingId: string, patch: Partial<StandaloneOpening>) => void;
+  onDraggingChange?: (dragging: boolean) => void;
 }
 
 function StandaloneOpeningMesh({
   opening,
+  walls,
   ceilingHeightM,
   models,
+  transformTool,
   isSelected,
   isInteractiveDisabled,
   onSelect,
+  onUpdate,
+  onDraggingChange,
 }: StandaloneOpeningMeshProps) {
+  const groupRef = useRef<THREE.Group | null>(null);
+  const controlsRef = useRef<TransformControlsImpl | null>(null);
+
   const sill = opening.type === 'door' ? 0 : Math.max(0, opening.sillHeightM);
   const clampedH = Math.min(
     Math.max(0.3, ceilingHeightM - sill),
@@ -391,51 +410,144 @@ function StandaloneOpeningMesh({
   const centerY = sill + clampedH / 2;
   const angleY = -(opening.rotationDeg * Math.PI) / 180;
 
-  return (
-    <group
-      position={[opening.position[0], centerY, opening.position[1]]}
-      rotation={[0, angleY, 0]}
-    >
-      <OpeningVisual
-        type={opening.type}
-        widthM={Math.max(0.3, opening.widthM)}
-        heightM={clampedH}
-        depthM={Math.max(0.06, opening.thicknessM)}
-        swing={opening.swing}
-        modelId={opening.modelId}
-        models={models}
-        isSelected={isSelected}
-        onClick={(e) => {
-          if (isInteractiveDisabled) return;
-          e.stopPropagation();
-          onSelect?.(opening.id);
-        }}
-      />
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group) return;
+    group.position.set(opening.position[0], centerY, opening.position[1]);
+    group.rotation.set(0, angleY, 0);
+    group.scale.set(1, 1, 1);
+  }, [opening.position, centerY, angleY]);
 
-      {isSelected && (
-        <Html
-          position={[0, clampedH / 2 + 0.24, 0]}
-          center
-          style={{ pointerEvents: 'none' }}
-        >
-          <div
-            style={{
-              backgroundColor: 'rgba(15, 23, 42, 0.94)',
-              border: '1px solid #38bdf8',
-              color: '#f8fafc',
-              padding: '2px 7px',
-              borderRadius: '4px',
-              fontSize: '11px',
-              fontWeight: 600,
-              whiteSpace: 'nowrap',
-            }}
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+
+    const handleDragEvent = (event: { value?: unknown }) => {
+      onDraggingChange?.(Boolean(event.value));
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ctrl = controls as any;
+    ctrl.addEventListener('dragging-changed', handleDragEvent);
+    return () => {
+      ctrl.removeEventListener('dragging-changed', handleDragEvent);
+      onDraggingChange?.(false);
+    };
+  }, [isSelected, transformTool, onDraggingChange]);
+
+  function handleGizmoObjectChange() {
+    const group = groupRef.current;
+    if (!group || !onUpdate) return;
+
+    // 1. Въртене с пивота (E)
+    if (transformTool === 'rotate') {
+      let deg = Number(((-group.rotation.y * 180) / Math.PI).toFixed(1));
+      if (deg < 0) deg += 360;
+      deg = Math.round(deg / 15) * 15;
+      group.rotation.set(0, -(deg * Math.PI) / 180, 0);
+      group.position.y = centerY;
+      onUpdate(opening.id, { rotationDeg: deg % 360 });
+      return;
+    }
+
+    // 2. Преместване с пивота (W) + автоматичен snap по оста и ъгъла на близката стена
+    const rawPos: [number, number] = [group.position.x, group.position.z];
+    const snapped = snapOpeningToWalls(
+      rawPos,
+      opening.rotationDeg,
+      walls,
+      0.35
+    );
+
+    // 3. Ако е прозорец и се вдига/сваля по Y, променя отстоянието от пода
+    let nextSill = sill;
+    if (opening.type === 'window' && Math.abs(group.position.y - centerY) > 0.02) {
+      const rawSill = group.position.y - clampedH / 2;
+      nextSill = Number(
+        Math.max(
+          0,
+          Math.min(ceilingHeightM - clampedH, Math.round(rawSill * 20) / 20)
+        ).toFixed(2)
+      );
+    }
+
+    const nextCenterY = nextSill + clampedH / 2;
+    group.position.set(snapped.position[0], nextCenterY, snapped.position[1]);
+    group.rotation.set(0, -(snapped.rotationDeg * Math.PI) / 180, 0);
+
+    onUpdate(opening.id, {
+      position: snapped.position,
+      rotationDeg: snapped.rotationDeg,
+      ...(snapped.snappedWallThicknessM
+        ? { thicknessM: snapped.snappedWallThicknessM }
+        : {}),
+      ...(opening.type === 'window' ? { sillHeightM: nextSill } : {}),
+    });
+  }
+
+  const gizmoMode = transformTool === 'rotate' ? 'rotate' : 'translate';
+
+  return (
+    <>
+      <group
+        ref={groupRef}
+        position={[opening.position[0], centerY, opening.position[1]]}
+        rotation={[0, angleY, 0]}
+      >
+        <OpeningVisual
+          type={opening.type}
+          widthM={Math.max(0.3, opening.widthM)}
+          heightM={clampedH}
+          depthM={Math.max(0.06, opening.thicknessM)}
+          swing={opening.swing}
+          modelId={opening.modelId}
+          models={models}
+          isSelected={isSelected}
+          onClick={(e) => {
+            if (isInteractiveDisabled) return;
+            e.stopPropagation();
+            onSelect?.(opening.id);
+          }}
+        />
+
+        {isSelected && (
+          <Html
+            position={[0, clampedH / 2 + 0.28, 0]}
+            center
+            style={{ pointerEvents: 'none' }}
           >
-            {opening.type === 'door' ? 'Врата' : 'Прозорец'} • {opening.widthM}×{clampedH} м
-            {opening.type === 'window' ? ` (от пода: ${sill} м)` : ''}
-          </div>
-        </Html>
+            <div
+              style={{
+                backgroundColor: 'rgba(15, 23, 42, 0.94)',
+                border: '1px solid #38bdf8',
+                color: '#f8fafc',
+                padding: '2px 7px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {opening.type === 'door' ? 'Врата' : 'Прозорец'} • {opening.widthM}×{clampedH} м
+              {opening.type === 'window' ? ` (от пода: ${sill} м)` : ''}
+            </div>
+          </Html>
+        )}
+      </group>
+
+      {isSelected && !isInteractiveDisabled && groupRef.current && (
+        <TransformControls
+          ref={controlsRef}
+          object={groupRef.current}
+          mode={gizmoMode}
+          space="world"
+          showY={gizmoMode === 'rotate' || opening.type === 'window'}
+          showX={gizmoMode === 'translate'}
+          showZ={gizmoMode === 'translate'}
+          onObjectChange={handleGizmoObjectChange}
+        />
       )}
-    </group>
+    </>
   );
 }
 
@@ -592,7 +704,6 @@ function SingleWall({
   const thickness = Math.max(0.05, wall.thicknessM);
   const embeddedOpenings = wall.openings ?? [];
 
-  // Обединяваме вградените отвори на стената + самостоятелните врати/прозорци, които лежат по нея
   const effectiveCutoutOpenings = useMemo(() => {
     const combined: WallOpening[] = [...embeddedOpenings];
     const ux = dx / baseLength;
@@ -757,12 +868,15 @@ function SingleWall({
 export function RoomMesh({
   room,
   models = [],
+  transformTool = 'translate',
   selectedWallId = null,
   selectedOpeningId = null,
   selectedStandaloneOpeningId = null,
   onSelectWall,
   onSelectOpening,
   onSelectStandaloneOpening,
+  onUpdateStandaloneOpening,
+  onDraggingChange,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -780,7 +894,6 @@ export function RoomMesh({
     [room.walls]
   );
 
-  // Точки за прихващане (snap): краища на стени + краища (каси) на врати и прозорци + текущи точки
   const snapTargets = useMemo(() => {
     const pts: [number, number][] = [];
     for (const w of room.walls) {
@@ -913,7 +1026,7 @@ export function RoomMesh({
       {/* Автоматични подове под затворените стаи */}
       <ClosedFloorsMesh polygons={closedPolygons} />
 
-      {/* Всички стени без overlapping по ъглите */}
+      {/* Всички стени */}
       {room.walls.map((wall) => (
         <SingleWall
           key={wall.id}
@@ -930,20 +1043,24 @@ export function RoomMesh({
         />
       ))}
 
-      {/* Самостоятелни врати и прозорци (могат да се слагат преди/независимо от стените) */}
+      {/* Самостоятелни врати и прозорци с 3D пивот и снап към стените */}
       {standaloneOpenings.map((op) => (
         <StandaloneOpeningMesh
           key={op.id}
           opening={op}
+          walls={room.walls}
           ceilingHeightM={room.ceilingHeightM}
           models={models}
+          transformTool={transformTool}
           isSelected={op.id === selectedStandaloneOpeningId}
           isInteractiveDisabled={isDrawingWalls || isCalibratingPlan}
           onSelect={(id) => onSelectStandaloneOpening?.(id)}
+          onUpdate={onUpdateStandaloneOpening}
+          onDraggingChange={onDraggingChange}
         />
       ))}
 
-      {/* Възли за прихващане (стени + каси на врати/прозорци) */}
+      {/* Възли за прихващане */}
       {isDrawingWalls &&
         snapTargets.map((pt, idx) => (
           <mesh key={`snap-node-${idx}`} position={[pt[0], 0.03, pt[1]]}>

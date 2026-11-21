@@ -19,7 +19,7 @@ export interface StandaloneOpening {
   rotationDeg: number;        // завъртане в градуси (0° = хоризонтално по X)
   widthM: number;             // ширина на отвора (м)
   heightM: number;            // височина на отвора (м)
-  sillHeightM: number;        // отстояние от земята / пода (0 за врати, напр. 0.90 за прозорци)
+  sillHeightM: number;      // отстояние от земята / пода (0 за врати, напр. 0.90 за прозорци)
   thicknessM: number;         // дълбочина / дебелина на касата (м)
   swing?: DoorSwing;          // посока на отваряне за врати
   modelId?: string | null;    // опционален .glb модел от каталога
@@ -101,6 +101,92 @@ export function getOpeningJambPoints(
     Number((op.position[1] + dz).toFixed(3)),
   ];
   return [left, right];
+}
+
+function normalizeAngleDeg(deg: number): number {
+  let a = deg % 360;
+  if (a < 0) a += 360;
+  return Number(a.toFixed(1));
+}
+
+function angleDiffDeg(a: number, b: number): number {
+  let diff = ((a - b + 540) % 360) - 180;
+  if (diff < -180) diff += 360;
+  return Math.abs(diff);
+}
+
+/**
+ * Прихваща (snap) врата или прозорец по дължината и наклона на най-близката стена,
+ * когато се мести с 3D пивота.
+ */
+export function snapOpeningToWalls(
+  rawPos: [number, number],
+  currentRotationDeg: number,
+  walls: WallSegment[],
+  snapRadiusM = 0.35
+): {
+  position: [number, number];
+  rotationDeg: number;
+  snappedWallThicknessM?: number;
+} {
+  let bestDist = snapRadiusM;
+  let bestResult: {
+    position: [number, number];
+    rotationDeg: number;
+    snappedWallThicknessM?: number;
+  } | null = null;
+
+  for (const wall of walls) {
+    const dx = wall.end[0] - wall.start[0];
+    const dz = wall.end[1] - wall.start[1];
+    const len = Math.hypot(dx, dz);
+    if (len < 0.05) continue;
+
+    const ux = dx / len;
+    const uz = dz / len;
+    const vx = rawPos[0] - wall.start[0];
+    const vz = rawPos[1] - wall.start[1];
+
+    const proj = vx * ux + vz * uz;
+    if (proj < -0.25 || proj > len + 0.25) continue;
+
+    const clampedProj = Math.max(0, Math.min(len, proj));
+    const snappedProj = Math.round(clampedProj * 20) / 20;
+    const cx = wall.start[0] + ux * snappedProj;
+    const cz = wall.start[1] + uz * snappedProj;
+
+    const perpDist = Math.hypot(rawPos[0] - cx, rawPos[1] - cz);
+    if (perpDist <= bestDist) {
+      bestDist = perpDist;
+
+      const wallDeg = normalizeAngleDeg((Math.atan2(dz, dx) * 180) / Math.PI);
+      const oppositeDeg = normalizeAngleDeg(wallDeg + 180);
+      const currNorm = normalizeAngleDeg(currentRotationDeg);
+
+      const alignedDeg =
+        angleDiffDeg(currNorm, oppositeDeg) < angleDiffDeg(currNorm, wallDeg)
+          ? oppositeDeg
+          : wallDeg;
+
+      bestResult = {
+        position: [Number(cx.toFixed(3)), Number(cz.toFixed(3))],
+        rotationDeg: alignedDeg,
+        snappedWallThicknessM: wall.thicknessM,
+      };
+    }
+  }
+
+  if (bestResult) {
+    return bestResult;
+  }
+
+  return {
+    position: [
+      Number((Math.round(rawPos[0] * 20) / 20).toFixed(2)),
+      Number((Math.round(rawPos[1] * 20) / 20).toFixed(2)),
+    ],
+    rotationDeg: normalizeAngleDeg(currentRotationDeg),
+  };
 }
 
 export function computeEndpointFromAngleAndLength(

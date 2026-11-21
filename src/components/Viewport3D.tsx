@@ -11,7 +11,7 @@ import {
 } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
-import type { RoomConfig } from '../types/room';
+import type { RoomConfig, StandaloneOpening } from '../types/room';
 import { RoomMesh } from './RoomMesh';
 import { SceneItemMesh } from './SceneItemMesh';
 
@@ -26,6 +26,10 @@ interface Viewport3DProps {
   onSelectWall?: (wallId: string | null) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening?: (openingId: string | null) => void;
+  onUpdateStandaloneOpening?: (
+    openingId: string,
+    patch: Partial<StandaloneOpening>
+  ) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -57,6 +61,7 @@ export function Viewport3D({
   onSelectWall,
   onSelectOpening,
   onSelectStandaloneOpening,
+  onUpdateStandaloneOpening,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -167,12 +172,15 @@ export function Viewport3D({
       <RoomMesh
         room={room}
         models={models}
+        transformTool={transformTool}
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
         selectedStandaloneOpeningId={selectedStandaloneOpeningId}
         onSelectWall={onSelectWall}
         onSelectOpening={onSelectOpening}
         onSelectStandaloneOpening={onSelectStandaloneOpening}
+        onUpdateStandaloneOpening={onUpdateStandaloneOpening}
+        onDraggingChange={setIsDraggingObject}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
         hoverPoint={hoverPoint}

@@ -347,7 +347,7 @@ export function App() {
     );
   }
 
-  // --- Самостоятелни врати и прозорци на плана (преди/независимо от стените) ---
+  // --- Самостоятелни врати и прозорци на плана (с 3D пивот и snap по стените) ---
   function handleCreateStandaloneOpening(type: OpeningType) {
     if (isCalibrationMandatory) {
       showTemporaryNotice('Първо скалирай качения план по 2 точки!', 'error');
@@ -382,29 +382,30 @@ export function App() {
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedInstanceId(null);
+    setActiveTool('translate');
     setSelectedStandaloneOpeningId(created.id);
 
     showTemporaryNotice(
       type === 'door'
-        ? 'Поставена е самостоятелна врата — намести я и снапни стените по касите ѝ!'
-        : 'Поставен е самостоятелен прозорец — задай отстояние от земята и снапни стените по него!',
+        ? 'Влачи стрелките на пивота, за да наместиш вратата (снапва се автоматично по стените!)'
+        : 'Влачи стрелките на пивота по X/Z или нагоре по Y за отстояние от земята!',
       'success'
     );
   }
 
-  function handleUpdateStandaloneOpening(
-    openingId: string,
-    patch: Partial<StandaloneOpening>
-  ) {
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      openings: (prev.openings ?? []).map((op) =>
-        op.id === openingId ? { ...op, ...patch } : op
-      ),
-    }));
-  }
+  const handleUpdateStandaloneOpening = useCallback(
+    (openingId: string, patch: Partial<StandaloneOpening>) => {
+      setRoom((prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        openings: (prev.openings ?? []).map((op) =>
+          op.id === openingId ? { ...op, ...patch } : op
+        ),
+      }));
+    },
+    []
+  );
 
   function handleDeleteStandaloneOpening(openingId: string) {
     setRoom((prev) => ({
@@ -1003,6 +1004,9 @@ export function App() {
         setActiveTool('rotate');
       } else if (key === 'r') {
         setActiveTool('scale');
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedStandaloneOpeningId) {
+        e.preventDefault();
+        handleDeleteStandaloneOpening(selectedStandaloneOpeningId);
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedInstanceId) {
         e.preventDefault();
         setSceneObjects((prev) =>
@@ -1021,6 +1025,7 @@ export function App() {
     isDrawingWalls,
     draftPoints,
     selectedInstanceId,
+    selectedStandaloneOpeningId,
     commitCurrentChain,
     handleBreakDrawChain,
     handleSaveSceneToCloud,
@@ -1264,7 +1269,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.6 CAD</span>
+            <span className="brand-badge">v2.7 CAD</span>
           </div>
         </div>
 
@@ -1339,7 +1344,7 @@ export function App() {
             className="btn"
             disabled={isCalibrationMandatory}
             onClick={() => handleCreateStandaloneOpening('door')}
-            title="Постави самостоятелна врата на плана (стените могат да се снапват към нея)"
+            title="Постави врата и я плъзни с 3D пивота по стената"
           >
             + Врата
           </button>
@@ -1348,7 +1353,7 @@ export function App() {
             className="btn"
             disabled={isCalibrationMandatory}
             onClick={() => handleCreateStandaloneOpening('window')}
-            title="Постави самостоятелен прозорец с отстояние от земята"
+            title="Постави прозорец и го плъзни с 3D пивота по стената"
           >
             + Прозорец
           </button>
@@ -1931,6 +1936,7 @@ export function App() {
                 setSelectedOpeningId(null);
                 if (openingId) setSelectedInstanceId(null);
               }}
+              onUpdateStandaloneOpening={handleUpdateStandaloneOpening}
               isDrawingWalls={isDrawingWalls}
               draftPoints={draftPoints}
               hoverPoint={hoverPoint}
@@ -2145,8 +2151,8 @@ export function App() {
               <span>
                 {selectedStandaloneOpening
                   ? selectedStandaloneOpening.type === 'door'
-                    ? 'Самостоятелна врата'
-                    : 'Самостоятелен прозорец'
+                    ? 'Врата (3D Пивот + Snap)'
+                    : 'Прозорец (3D Пивот + Snap)'
                   : selectedWall
                     ? 'Стена, врати и прозорци'
                     : 'Настройки на обект'}
@@ -2353,8 +2359,8 @@ export function App() {
                     )}
 
                     <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-                      Съвет: В режим „Чертай стени“ краищата на касата автоматично прихващат
-                      (snap) стените, а ако прекараш стена през нея, тя се изрязва сама.
+                      Влачи червената/синята стрелка на пивота (W) за местене по стената или
+                      използвай Въртене (E). При доближаване до стена се прихваща автоматично.
                     </div>
                   </div>
 
@@ -2365,7 +2371,7 @@ export function App() {
                       handleDeleteStandaloneOpening(selectedStandaloneOpening.id)
                     }
                   >
-                    Премахни от плана
+                    Премахни от плана (Del)
                   </button>
                 </>
               ) : selectedWall ? (
@@ -2630,9 +2636,8 @@ export function App() {
               ) : !selectedObject || !selectedModel ? (
                 <>
                   <div className="empty-state-box">
-                    Няма избран обект, стена или отвор. Използвайте „+ Врата“ / „+ Прозорец“
-                    горе, за да ги поставите директно на плана, и после снапнете стените към
-                    тях.
+                    Няма избран обект, стена или отвор. Натиснете „+ Врата“ / „+ Прозорец“
+                    горе и ги преместете с 3D пивота по стената.
                   </div>
 
                   {(room.openings ?? []).length > 0 && (
@@ -2657,7 +2662,7 @@ export function App() {
                             <span>
                               {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'} ({op.widthM}×{op.heightM} м)
                             </span>
-                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>Редакция</span>
+                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
                           </button>
                         ))}
                       </div>
