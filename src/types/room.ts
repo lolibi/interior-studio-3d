@@ -25,6 +25,15 @@ export interface StandaloneOpening {
   modelId?: string | null;    // опционален .glb модел от каталога
 }
 
+export interface FloorZone {
+  id: string;
+  name: string;
+  points: [number, number][]; // многоъгълник [x, z] в метри
+  color: string;              // цвят на настилката (напр. #b08968 паркет, #cbd5e1 плочки)
+  roughness: number;
+  metalness: number;
+}
+
 export interface WallSegment {
   id: string;
   start: [number, number]; // [x, z] в метри
@@ -52,6 +61,7 @@ export interface RoomConfig {
   defaultThicknessM: number;
   walls: WallSegment[];
   openings?: StandaloneOpening[];
+  floorZones?: FloorZone[];
   floorplan: FloorplanUnderlay | null;
 }
 
@@ -63,6 +73,7 @@ export interface ApartmentTemplate {
   defaultThicknessM: number;
   walls: WallSegment[];
   openings?: StandaloneOpening[];
+  floorZones?: FloorZone[];
   updatedAt?: string;
 }
 
@@ -248,7 +259,7 @@ export function getWallJointExtensions(
   wall: WallSegment,
   allWalls: WallSegment[]
 ): { startExt: number; endExt: number } {
-  const eps = 0.03;
+  const eps = 0.06;
   let startExt = 0;
   let endExt = 0;
 
@@ -269,7 +280,6 @@ export function getWallJointExtensions(
     const oUx = oDx / oLen;
     const oUz = oDz / oLen;
 
-    // Ако са колинеарни (продължение една на друга), не добавяме ъглово удължение
     const cross = Math.abs(wUx * oUz - wUz * oUx);
     if (cross < 0.15) continue;
 
@@ -297,57 +307,61 @@ export function getWallJointExtensions(
 }
 
 /**
- * Открива затворени контури (стаи) от графа на стените за автоматично генериране на под.
+ * Открива затворени контури (стаи) от графа на стените с толеранс на сглобките (до 12 см),
+ * за да не пропада подът при леки разминавания при чертане.
  */
 export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][][] {
   if (walls.length < 3) return [];
 
-  const snapKey = (p: [number, number]) =>
-    `${Math.round(p[0] * 20) / 20},${Math.round(p[1] * 20) / 20}`;
+  const clusterRadius = 0.12;
+  const clusters: { id: string; point: [number, number]; neighbors: string[] }[] = [];
 
-  const adj = new Map<string, { point: [number, number]; neighbors: string[] }>();
-
-  const ensureNode = (p: [number, number]): string => {
-    const key = snapKey(p);
-    if (!adj.has(key)) {
-      adj.set(key, {
-        point: [Math.round(p[0] * 20) / 20, Math.round(p[1] * 20) / 20],
-        neighbors: [],
-      });
+  const ensureCluster = (p: [number, number]): string => {
+    for (const c of clusters) {
+      if (Math.hypot(c.point[0] - p[0], c.point[1] - p[1]) <= clusterRadius) {
+        return c.id;
+      }
     }
-    return key;
+    const id = `node-${clusters.length}`;
+    clusters.push({
+      id,
+      point: [Number(p[0].toFixed(3)), Number(p[1].toFixed(3))],
+      neighbors: [],
+    });
+    return id;
   };
 
   for (const w of walls) {
-    const k1 = ensureNode(w.start);
-    const k2 = ensureNode(w.end);
+    const k1 = ensureCluster(w.start);
+    const k2 = ensureCluster(w.end);
     if (k1 === k2) continue;
-    const n1 = adj.get(k1)!;
-    const n2 = adj.get(k2)!;
+    const n1 = clusters.find((c) => c.id === k1)!;
+    const n2 = clusters.find((c) => c.id === k2)!;
     if (!n1.neighbors.includes(k2)) n1.neighbors.push(k2);
     if (!n2.neighbors.includes(k1)) n2.neighbors.push(k1);
   }
 
+  const byId = new Map(clusters.map((c) => [c.id, c]));
   const visitedDirected = new Set<string>();
   const polygons: [number, number][][] = [];
 
-  for (const [uKey, uNode] of adj.entries()) {
+  for (const uNode of clusters) {
     for (const vKey of uNode.neighbors) {
-      const edgeId = `${uKey}->${vKey}`;
+      const edgeId = `${uNode.id}->${vKey}`;
       if (visitedDirected.has(edgeId)) continue;
 
-      const cycleKeys: string[] = [uKey];
-      let prev = uKey;
+      const cycleKeys: string[] = [uNode.id];
+      let prev = uNode.id;
       let curr = vKey;
       let guard = 0;
 
-      while (curr !== uKey && guard < 40) {
+      while (curr !== uNode.id && guard < 40) {
         guard++;
         visitedDirected.add(`${prev}->${curr}`);
         cycleKeys.push(curr);
 
-        const currNode = adj.get(curr);
-        const prevNode = adj.get(prev);
+        const currNode = byId.get(curr);
+        const prevNode = byId.get(prev);
         if (!currNode || !prevNode || currNode.neighbors.length < 2) {
           break;
         }
@@ -362,7 +376,7 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
 
         for (const cand of currNode.neighbors) {
           if (cand === prev) continue;
-          const candNode = adj.get(cand);
+          const candNode = byId.get(cand);
           if (!candNode) continue;
 
           const outAngle = Math.atan2(
@@ -384,10 +398,10 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
         curr = bestNext;
       }
 
-      if (curr === uKey && cycleKeys.length >= 3) {
+      if (curr === uNode.id && cycleKeys.length >= 3) {
         visitedDirected.add(`${prev}->${curr}`);
         const polyPoints = cycleKeys
-          .map((k) => adj.get(k)?.point)
+          .map((k) => byId.get(k)?.point)
           .filter((p): p is [number, number] => Boolean(p));
 
         let signedArea = 0;
@@ -483,6 +497,7 @@ export function createDefaultRoomConfig(): RoomConfig {
     defaultThicknessM: 0.15,
     walls: createStarterWalls(0.15),
     openings: [],
+    floorZones: [],
     floorplan: null,
   };
 }

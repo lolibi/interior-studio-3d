@@ -26,6 +26,7 @@ import type {
   ApartmentTemplate,
   DoorSwing,
   FloorplanUnderlay,
+  FloorZone,
   OpeningType,
   RoomConfig,
   StandaloneOpening,
@@ -46,6 +47,19 @@ const SCALE_MODE_SHORT: Record<ScaleMode, string> = {
   constrained: 'Ограничен',
   free: 'Свободен',
 };
+
+const FLOOR_PRESETS: {
+  label: string;
+  color: string;
+  roughness: number;
+  metalness: number;
+}[] = [
+  { label: 'Паркет дъб', color: '#b08968', roughness: 0.55, metalness: 0.05 },
+  { label: 'Светъл дървен под', color: '#d4b483', roughness: 0.5, metalness: 0.05 },
+  { label: 'Тъмен орех', color: '#5c4033', roughness: 0.45, metalness: 0.08 },
+  { label: 'Гранитогрес светъл', color: '#cbd5e1', roughness: 0.28, metalness: 0.12 },
+  { label: 'Плочки / Бетон', color: '#94a3b8', roughness: 0.65, metalness: 0.08 },
+];
 
 type LeftTab = 'furniture' | 'templates';
 
@@ -109,6 +123,19 @@ function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
       }))
     : [];
 
+  const floorZones: FloorZone[] = Array.isArray(obj.floorZones)
+    ? obj.floorZones
+        .filter((z) => z && Array.isArray(z.points) && z.points.length >= 3)
+        .map((z, i) => ({
+          id: z.id || `fz-${i}-${Math.random().toString(36).slice(2, 6)}`,
+          name: typeof z.name === 'string' && z.name.trim() ? z.name : `Подова зона ${i + 1}`,
+          points: z.points.map((pt) => [Number(pt[0]) || 0, Number(pt[1]) || 0]),
+          color: typeof z.color === 'string' && z.color ? z.color : '#b08968',
+          roughness: typeof z.roughness === 'number' ? z.roughness : 0.55,
+          metalness: typeof z.metalness === 'number' ? z.metalness : 0.05,
+        }))
+    : [];
+
   let floorplan: FloorplanUnderlay | null = null;
   if (obj.floorplan && typeof obj.floorplan === 'object' && obj.floorplan.imageUrl) {
     const wM = Number(obj.floorplan.widthM) || 10;
@@ -135,10 +162,11 @@ function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
     ceilingHeightM,
     defaultThicknessM,
     walls:
-      walls.length > 0 || openings.length > 0
+      walls.length > 0 || openings.length > 0 || floorZones.length > 0
         ? walls
         : createStarterWalls(defaultThicknessM),
     openings,
+    floorZones,
     floorplan,
   };
 }
@@ -198,6 +226,7 @@ export function App() {
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
   const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(null);
   const [selectedStandaloneOpeningId, setSelectedStandaloneOpeningId] = useState<string | null>(null);
+  const [selectedFloorZoneId, setSelectedFloorZoneId] = useState<string | null>(null);
 
   const [wallLengthInput, setWallLengthInput] = useState('');
   const [wallAngleInput, setWallAngleInput] = useState('');
@@ -208,6 +237,10 @@ export function App() {
   const [draftPoints, setDraftPoints] = useState<[number, number][]>([]);
   const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
   const [exactDrawLengthInput, setExactDrawLengthInput] = useState('');
+
+  // Чертане на отделна подова зона (работи и при преходни стаи)
+  const [isDrawingFloorZone, setIsDrawingFloorZone] = useState(false);
+  const [zoneDraftPoints, setZoneDraftPoints] = useState<[number, number][]>([]);
 
   // Подложка план от строителя + задължителна 2-точкова калибрация при качване
   const [isUploadingPlan, setIsUploadingPlan] = useState(false);
@@ -299,6 +332,12 @@ export function App() {
     [room.openings, selectedStandaloneOpeningId]
   );
 
+  const selectedFloorZone = useMemo(
+    () =>
+      (room.floorZones ?? []).find((z) => z.id === selectedFloorZoneId) ?? null,
+    [room.floorZones, selectedFloorZoneId]
+  );
+
   useEffect(() => {
     if (selectedWall) {
       setWallLengthInput(String(getWallLengthM(selectedWall)));
@@ -347,7 +386,141 @@ export function App() {
     );
   }
 
-  // --- Самостоятелни врати и прозорци на плана (с 3D пивот и snap по стените) ---
+  // --- Отделяеми подови зони (FloorZone) ---
+  function toggleDrawFloorZoneMode() {
+    if (isCalibrationMandatory) {
+      showTemporaryNotice('Първо скалирай качения план по 2 точки!', 'error');
+      return;
+    }
+    setIsCalibratingPlan(false);
+    setCalibPoints([]);
+    setIsDrawingWalls(false);
+    setDraftPoints([]);
+
+    setIsDrawingFloorZone((prev) => {
+      const next = !prev;
+      setZoneDraftPoints([]);
+      setHoverPoint(null);
+      if (next) {
+        setSelectedInstanceId(null);
+        setSelectedWallId(null);
+        setSelectedOpeningId(null);
+        setSelectedStandaloneOpeningId(null);
+        setSelectedFloorZoneId(null);
+        setViewMode('top');
+        showTemporaryNotice(
+          'Подова зона: кликни 3 или повече точки по контура (дори при преходна стая) и натисни „Затвори зона“',
+          'success'
+        );
+      }
+      return next;
+    });
+  }
+
+  const commitFloorZonePolygon = useCallback(
+    (pts: [number, number][]) => {
+      if (pts.length < 3) {
+        setIsDrawingFloorZone(false);
+        setZoneDraftPoints([]);
+        setHoverPoint(null);
+        return;
+      }
+
+      const zoneIndex = (room.floorZones ?? []).length + 1;
+      const newZone: FloorZone = {
+        id: `fz-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: `Зона ${zoneIndex}`,
+        points: pts,
+        color: '#b08968',
+        roughness: 0.55,
+        metalness: 0.05,
+      };
+
+      setRoom((prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        floorZones: [...(prev.floorZones ?? []), newZone],
+      }));
+
+      setIsDrawingFloorZone(false);
+      setZoneDraftPoints([]);
+      setHoverPoint(null);
+      setSelectedFloorZoneId(newZone.id);
+      showTemporaryNotice(
+        `Създадена отделна подова зона „${newZone.name}“ — смени цвета или настилката отдясно ✓`,
+        'success'
+      );
+    },
+    [room.floorZones, showTemporaryNotice]
+  );
+
+  function handleFloorZoneDrawClick(pt: [number, number]) {
+    if (!isDrawingFloorZone || isCalibrationMandatory) return;
+
+    setZoneDraftPoints((prev) => {
+      if (prev.length >= 3) {
+        const first = prev[0];
+        if (Math.hypot(pt[0] - first[0], pt[1] - first[1]) < 0.01) {
+          setTimeout(() => commitFloorZonePolygon(prev), 0);
+          return prev;
+        }
+      }
+      const last = prev[prev.length - 1];
+      if (last && last[0] === pt[0] && last[1] === pt[1]) {
+        return prev;
+      }
+      return [...prev, pt];
+    });
+  }
+
+  function handleUpdateFloorZone(zoneId: string, patch: Partial<FloorZone>) {
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      floorZones: (prev.floorZones ?? []).map((z) =>
+        z.id === zoneId ? { ...z, ...patch } : z
+      ),
+    }));
+  }
+
+  function handleDuplicateFloorZone(zoneId: string) {
+    const src = (room.floorZones ?? []).find((z) => z.id === zoneId);
+    if (!src) return;
+    const dup: FloorZone = {
+      ...src,
+      id: `fz-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: `${src.name} (копие)`,
+      points: src.points.map(([x, z]) => [
+        Number((x + 0.5).toFixed(3)),
+        Number((z + 0.5).toFixed(3)),
+      ]),
+    };
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      floorZones: [...(prev.floorZones ?? []), dup],
+    }));
+    setSelectedFloorZoneId(dup.id);
+    showTemporaryNotice('Подовата зона е дублирана ✓', 'success');
+  }
+
+  function handleDeleteFloorZone(zoneId: string) {
+    setRoom((prev) => ({
+      ...prev,
+      templateId: null,
+      templateName: null,
+      floorZones: (prev.floorZones ?? []).filter((z) => z.id !== zoneId),
+    }));
+    if (selectedFloorZoneId === zoneId) {
+      setSelectedFloorZoneId(null);
+    }
+    showTemporaryNotice('Подовата зона е премахната', 'success');
+  }
+
+  // --- Самостоятелни врати и прозорци на плана (с 3D пивот, snap и дублиране) ---
   function handleCreateStandaloneOpening(type: OpeningType) {
     if (isCalibrationMandatory) {
       showTemporaryNotice('Първо скалирай качения план по 2 точки!', 'error');
@@ -378,9 +551,12 @@ export function App() {
     }));
 
     setIsDrawingWalls(false);
+    setIsDrawingFloorZone(false);
     setDraftPoints([]);
+    setZoneDraftPoints([]);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
+    setSelectedFloorZoneId(null);
     setSelectedInstanceId(null);
     setActiveTool('translate');
     setSelectedStandaloneOpeningId(created.id);
@@ -407,18 +583,54 @@ export function App() {
     []
   );
 
-  function handleDeleteStandaloneOpening(openingId: string) {
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      openings: (prev.openings ?? []).filter((op) => op.id !== openingId),
-    }));
-    if (selectedStandaloneOpeningId === openingId) {
-      setSelectedStandaloneOpeningId(null);
-    }
-    showTemporaryNotice('Премахнато от плана', 'success');
-  }
+  const handleDuplicateStandaloneOpening = useCallback(
+    (openingId: string) => {
+      const source = (room.openings ?? []).find((op) => op.id === openingId);
+      if (!source) return;
+
+      const rad = (source.rotationDeg * Math.PI) / 180;
+      const shift = Math.max(0.5, source.widthM + 0.25);
+      const nextX = Number((source.position[0] + Math.cos(rad) * shift).toFixed(3));
+      const nextZ = Number((source.position[1] + Math.sin(rad) * shift).toFixed(3));
+
+      const duplicate: StandaloneOpening = {
+        ...source,
+        id: `sop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        position: [nextX, nextZ],
+      };
+
+      setRoom((prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        openings: [...(prev.openings ?? []), duplicate],
+      }));
+
+      setActiveTool('translate');
+      setSelectedStandaloneOpeningId(duplicate.id);
+      showTemporaryNotice(
+        source.type === 'door'
+          ? 'Вратата е дублирана с всичките ѝ настройки ✓'
+          : 'Прозорецът е дублиран с всичките му настройки ✓',
+        'success'
+      );
+    },
+    [room.openings, showTemporaryNotice]
+  );
+
+  const handleDeleteStandaloneOpening = useCallback(
+    (openingId: string) => {
+      setRoom((prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        openings: (prev.openings ?? []).filter((op) => op.id !== openingId),
+      }));
+      setSelectedStandaloneOpeningId((curr) => (curr === openingId ? null : curr));
+      showTemporaryNotice('Премахнато от плана', 'success');
+    },
+    [showTemporaryNotice]
+  );
 
   // --- Вградени врати и прозорци към избрана стена ---
   function handleAddOpeningToSelectedWall(type: OpeningType) {
@@ -527,6 +739,12 @@ export function App() {
       })
     );
 
+    const clonedZones: FloorZone[] = (tpl.floorZones ?? []).map((z, idx) => ({
+      ...z,
+      id: `fz-tpl-${Date.now()}-${idx}`,
+      points: z.points.map((pt) => [pt[0], pt[1]]),
+    }));
+
     setRoom((prev) => ({
       ...prev,
       templateId: tpl.id,
@@ -535,12 +753,16 @@ export function App() {
       defaultThicknessM: tpl.defaultThicknessM || prev.defaultThicknessM,
       walls: clonedWalls,
       openings: clonedOpenings,
+      floorZones: clonedZones,
     }));
     setSelectedWallId(clonedWalls[0]?.id ?? null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
+    setSelectedFloorZoneId(null);
     setIsDrawingWalls(false);
+    setIsDrawingFloorZone(false);
     setDraftPoints([]);
+    setZoneDraftPoints([]);
     setHoverPoint(null);
     showTemporaryNotice(`Зареден шаблон: „${tpl.name}“`, 'success');
   }
@@ -556,15 +778,19 @@ export function App() {
       templateName: null,
       walls: [],
       openings: [],
+      floorZones: [],
     }));
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
+    setSelectedFloorZoneId(null);
     setIsCalibratingPlan(false);
     setCalibPoints([]);
     setDraftPoints([]);
+    setZoneDraftPoints([]);
     setHoverPoint(null);
     setExactDrawLengthInput('');
+    setIsDrawingFloorZone(false);
     setIsDrawingWalls(true);
     setViewMode('top');
     showTemporaryNotice(
@@ -583,6 +809,9 @@ export function App() {
     }
     setIsCalibratingPlan(false);
     setCalibPoints([]);
+    setIsDrawingFloorZone(false);
+    setZoneDraftPoints([]);
+
     setIsDrawingWalls((prev) => {
       const next = !prev;
       setDraftPoints([]);
@@ -593,6 +822,7 @@ export function App() {
         setSelectedWallId(null);
         setSelectedOpeningId(null);
         setSelectedStandaloneOpeningId(null);
+        setSelectedFloorZoneId(null);
         setViewMode('top');
         showTemporaryNotice(
           'CAD Чертане: снапва към краища на стени и каси на врати/прозорци • Space = нова верига • Esc = край',
@@ -751,10 +981,13 @@ export function App() {
       }));
       setViewMode('top');
       setIsDrawingWalls(false);
+      setIsDrawingFloorZone(false);
       setDraftPoints([]);
+      setZoneDraftPoints([]);
       setSelectedWallId(null);
       setSelectedOpeningId(null);
       setSelectedStandaloneOpeningId(null);
+      setSelectedFloorZoneId(null);
       setSelectedInstanceId(null);
       setIsCalibratingPlan(true);
       setIsCalibrationMandatory(true);
@@ -778,10 +1011,13 @@ export function App() {
   function startPlanCalibration(mandatory = false) {
     if (!room.floorplan) return;
     setIsDrawingWalls(false);
+    setIsDrawingFloorZone(false);
     setDraftPoints([]);
+    setZoneDraftPoints([]);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
+    setSelectedFloorZoneId(null);
     setSelectedInstanceId(null);
     setViewMode('top');
     setIsCalibratingPlan(true);
@@ -900,6 +1136,25 @@ export function App() {
     showTemporaryNotice('Стената е премахната', 'success');
   }
 
+  const handleDuplicateSelected = useCallback(() => {
+    if (!selectedObject) return;
+    const duplicate: SceneObject = {
+      instanceId: `obj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      modelId: selectedObject.modelId,
+      name: selectedObject.name || selectedModel?.name || 'Копие',
+      position: [
+        Number((selectedObject.position[0] + 0.4).toFixed(3)),
+        selectedObject.position[1],
+        selectedObject.position[2],
+      ],
+      rotation: [...selectedObject.rotation],
+      scale: [...selectedObject.scale],
+    };
+
+    setSceneObjects((prev) => [...prev, duplicate]);
+    setSelectedInstanceId(duplicate.instanceId);
+  }, [selectedObject, selectedModel]);
+
   const handleSaveSceneToCloud = useCallback(async () => {
     const inputTitle = window.prompt(
       'Въведете име на интериорния проект (записва се в базата данни):',
@@ -953,6 +1208,15 @@ export function App() {
           return;
         }
 
+        if (isDrawingFloorZone) {
+          e.preventDefault();
+          setIsDrawingFloorZone(false);
+          setZoneDraftPoints([]);
+          setHoverPoint(null);
+          showTemporaryNotice('Изход от очертаване на подова зона', 'success');
+          return;
+        }
+
         if (isDrawingWalls) {
           e.preventDefault();
           if (draftPoints.length >= 2) {
@@ -975,6 +1239,7 @@ export function App() {
         setSelectedWallId(null);
         setSelectedOpeningId(null);
         setSelectedStandaloneOpeningId(null);
+        setSelectedFloorZoneId(null);
         return;
       }
 
@@ -982,6 +1247,19 @@ export function App() {
         e.preventDefault();
         handleSaveSceneToCloud();
         return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') {
+        if (selectedStandaloneOpeningId) {
+          e.preventDefault();
+          handleDuplicateStandaloneOpening(selectedStandaloneOpeningId);
+          return;
+        }
+        if (selectedInstanceId) {
+          e.preventDefault();
+          handleDuplicateSelected();
+          return;
+        }
       }
 
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -995,7 +1273,7 @@ export function App() {
         return;
       }
 
-      if (isDrawingWalls || isCalibratingPlan) return;
+      if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
 
       const key = e.key.toLowerCase();
       if (key === 'w') {
@@ -1022,12 +1300,16 @@ export function App() {
     isAdminOpen,
     isCalibratingPlan,
     isCalibrationMandatory,
+    isDrawingFloorZone,
     isDrawingWalls,
     draftPoints,
     selectedInstanceId,
     selectedStandaloneOpeningId,
     commitCurrentChain,
     handleBreakDrawChain,
+    handleDuplicateStandaloneOpening,
+    handleDeleteStandaloneOpening,
+    handleDuplicateSelected,
     handleSaveSceneToCloud,
     showTemporaryNotice,
   ]);
@@ -1054,6 +1336,7 @@ export function App() {
       setSelectedWallId(loadedRoom.walls[0]?.id ?? null);
       setSelectedOpeningId(null);
       setSelectedStandaloneOpeningId(null);
+      setSelectedFloorZoneId(null);
       setCurrentSceneId(scene.id);
       setCurrentSceneTitle(scene.title);
       setSelectedInstanceId(null);
@@ -1073,10 +1356,11 @@ export function App() {
       sceneObjects.length > 0 ||
       room.walls.length > 0 ||
       (room.openings ?? []).length > 0 ||
+      (room.floorZones ?? []).length > 0 ||
       room.floorplan
     ) {
       const confirmed = window.confirm(
-        'Сигурни ли сте, че искате да изчистите напълно сцената (стени, врати, прозорци, подложка и мебели) и да започнете на чисто?'
+        'Сигурни ли сте, че искате да изчистите напълно сцената (стени, врати, прозорци, подове, подложка и мебели) и да започнете на чисто?'
       );
       if (!confirmed) return;
     }
@@ -1089,17 +1373,21 @@ export function App() {
       defaultThicknessM: 0.15,
       walls: [],
       openings: [],
+      floorZones: [],
       floorplan: null,
     });
     setSelectedInstanceId(null);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
+    setSelectedFloorZoneId(null);
     setIsCalibratingPlan(false);
     setIsCalibrationMandatory(false);
     setCalibPoints([]);
     setIsDrawingWalls(false);
+    setIsDrawingFloorZone(false);
     setDraftPoints([]);
+    setZoneDraftPoints([]);
     setCurrentSceneId(null);
     setCurrentSceneTitle('Нов проект');
     setLeftTab('templates');
@@ -1125,6 +1413,7 @@ export function App() {
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
+    setSelectedFloorZoneId(null);
   }
 
   function handleTransformChange(
@@ -1231,25 +1520,6 @@ export function App() {
     );
   }
 
-  function handleDuplicateSelected() {
-    if (!selectedObject) return;
-    const duplicate: SceneObject = {
-      instanceId: `obj-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      modelId: selectedObject.modelId,
-      name: selectedObject.name || selectedModel?.name || 'Копие',
-      position: [
-        Number((selectedObject.position[0] + 0.4).toFixed(3)),
-        selectedObject.position[1],
-        selectedObject.position[2],
-      ],
-      rotation: [...selectedObject.rotation],
-      scale: [...selectedObject.scale],
-    };
-
-    setSceneObjects((prev) => [...prev, duplicate]);
-    setSelectedInstanceId(duplicate.instanceId);
-  }
-
   function handleDeleteSelected() {
     if (!selectedObject) return;
     setSceneObjects((prev) =>
@@ -1269,7 +1539,7 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.7 CAD</span>
+            <span className="brand-badge">v2.8 CAD</span>
           </div>
         </div>
 
@@ -1296,10 +1566,11 @@ export function App() {
 
           <button
             type="button"
-            className={`btn ${activeTool === 'translate' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'translate' && !isDrawingWalls && !isDrawingFloorZone && !isCalibratingPlan ? 'btn-active' : ''}`}
             disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
+              setIsDrawingFloorZone(false);
               setActiveTool('translate');
             }}
           >
@@ -1307,10 +1578,11 @@ export function App() {
           </button>
           <button
             type="button"
-            className={`btn ${activeTool === 'rotate' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'rotate' && !isDrawingWalls && !isDrawingFloorZone && !isCalibratingPlan ? 'btn-active' : ''}`}
             disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
+              setIsDrawingFloorZone(false);
               setActiveTool('rotate');
             }}
           >
@@ -1318,10 +1590,11 @@ export function App() {
           </button>
           <button
             type="button"
-            className={`btn ${activeTool === 'scale' && !isDrawingWalls && !isCalibratingPlan ? 'btn-active' : ''}`}
+            className={`btn ${activeTool === 'scale' && !isDrawingWalls && !isDrawingFloorZone && !isCalibratingPlan ? 'btn-active' : ''}`}
             disabled={isCalibrationMandatory}
             onClick={() => {
               setIsDrawingWalls(false);
+              setIsDrawingFloorZone(false);
               setActiveTool('scale');
             }}
           >
@@ -1338,6 +1611,15 @@ export function App() {
             title="Чертай стени по 45°/90° • Снапва се към краищата на вратите и прозорците"
           >
             {isDrawingWalls ? 'Чертаеш стени...' : 'Чертай стени'}
+          </button>
+          <button
+            type="button"
+            className={`btn ${isDrawingFloorZone ? 'btn-active' : ''}`}
+            disabled={isCalibrationMandatory}
+            onClick={toggleDrawFloorZoneMode}
+            title="Очертай отделен под за стая или преходна зона"
+          >
+            {isDrawingFloorZone ? 'Чертаеш под...' : '+ Под / Зона'}
           </button>
           <button
             type="button"
@@ -1518,14 +1800,24 @@ export function App() {
                       </button>
                       <button
                         type="button"
-                        className="btn"
+                        className={`btn ${isDrawingFloorZone ? 'btn-active' : ''}`}
                         style={{ flex: 1, fontSize: '11px' }}
                         disabled={isCalibrationMandatory}
-                        onClick={handleStartCustomEmptyPlan}
+                        onClick={toggleDrawFloorZoneMode}
                       >
-                        Изчисти стените
+                        {isDrawingFloorZone ? 'Чертаеш под...' : '+ Отделен под'}
                       </button>
                     </div>
+
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '11px' }}
+                      disabled={isCalibrationMandatory}
+                      onClick={handleStartCustomEmptyPlan}
+                    >
+                      Изчисти стените и подовете
+                    </button>
                   </div>
 
                   {/* Подложка: План от строителя */}
@@ -1915,26 +2207,38 @@ export function App() {
               selectedWallId={selectedWallId}
               selectedOpeningId={selectedOpeningId}
               selectedStandaloneOpeningId={selectedStandaloneOpeningId}
+              selectedFloorZoneId={selectedFloorZoneId}
               onSelectWall={(wallId) => {
-                if (isDrawingWalls || isCalibratingPlan) return;
+                if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
                 setSelectedWallId(wallId);
                 setSelectedOpeningId(null);
                 setSelectedStandaloneOpeningId(null);
+                setSelectedFloorZoneId(null);
                 if (wallId) setSelectedInstanceId(null);
               }}
               onSelectOpening={(wallId, openingId) => {
-                if (isDrawingWalls || isCalibratingPlan) return;
+                if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
                 setSelectedWallId(wallId);
                 setSelectedOpeningId(openingId);
                 setSelectedStandaloneOpeningId(null);
+                setSelectedFloorZoneId(null);
                 setSelectedInstanceId(null);
               }}
               onSelectStandaloneOpening={(openingId) => {
-                if (isDrawingWalls || isCalibratingPlan) return;
+                if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
                 setSelectedStandaloneOpeningId(openingId);
                 setSelectedWallId(null);
                 setSelectedOpeningId(null);
+                setSelectedFloorZoneId(null);
                 if (openingId) setSelectedInstanceId(null);
+              }}
+              onSelectFloorZone={(zoneId) => {
+                if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
+                setSelectedFloorZoneId(zoneId);
+                setSelectedWallId(null);
+                setSelectedOpeningId(null);
+                setSelectedStandaloneOpeningId(null);
+                if (zoneId) setSelectedInstanceId(null);
               }}
               onUpdateStandaloneOpening={handleUpdateStandaloneOpening}
               isDrawingWalls={isDrawingWalls}
@@ -1942,6 +2246,9 @@ export function App() {
               hoverPoint={hoverPoint}
               onHoverPointChange={setHoverPoint}
               onFloorDrawClick={handleFloorDrawClick}
+              isDrawingFloorZone={isDrawingFloorZone}
+              zoneDraftPoints={zoneDraftPoints}
+              onFloorZoneDrawClick={handleFloorZoneDrawClick}
               isCalibratingPlan={isCalibratingPlan}
               calibPoints={calibPoints}
               onCalibFloorClick={handleCalibFloorClick}
@@ -1951,6 +2258,53 @@ export function App() {
               onSelectObject={setSelectedInstanceId}
               onTransformChange={handleTransformChange}
             />
+
+            {/* Лента за очертаване на отделен под / зона (дори при преходни стаи) */}
+            {isDrawingFloorZone && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '12px',
+                  left: '12px',
+                  backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                  border: '1px solid #f59e0b',
+                  borderRadius: '8px',
+                  padding: '10px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                }}
+              >
+                <span style={{ fontSize: '12px', fontWeight: 600, color: '#fbbf24' }}>
+                  Отделен под ({zoneDraftPoints.length} т.)
+                </span>
+
+                <button
+                  type="button"
+                  className="btn btn-active"
+                  style={{ padding: '4px 10px', fontSize: '11px' }}
+                  disabled={zoneDraftPoints.length < 3}
+                  onClick={() => commitFloorZonePolygon(zoneDraftPoints)}
+                >
+                  Затвори зона
+                </button>
+
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  style={{ padding: '4px 8px', fontSize: '11px' }}
+                  onClick={() => {
+                    setIsDrawingFloorZone(false);
+                    setZoneDraftPoints([]);
+                    setHoverPoint(null);
+                  }}
+                >
+                  Отказ (Esc)
+                </button>
+              </div>
+            )}
 
             {/* Видима лента за калибрация на плана по 2 точки */}
             {isCalibratingPlan && (
@@ -2140,30 +2494,144 @@ export function App() {
             <div className="viewport-hint">
               {isCalibratingPlan
                 ? 'Кликни 2 точки по стена с известен размер (Десен бутон: мести плана • Скрол: приближи)'
-                : isDrawingWalls
-                  ? 'Ляв клик: точка (снап към стени и каси на врати/прозорци) • Десен бутон: мести плана • Space: нова верига • Esc: край'
-                  : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Врати/Прозорци: ${(room.openings ?? []).length}`}
+                : isDrawingFloorZone
+                  ? 'Кликни точки около желания под (дори в преходна стая) и натисни „Затвори зона“'
+                  : isDrawingWalls
+                    ? 'Ляв клик: точка (снап към стени и каси на врати/прозорци) • Десен бутон: мести плана • Space: нова верига • Esc: край'
+                    : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Подови зони: ${(room.floorZones ?? []).length} • Врати/Прозорци: ${(room.openings ?? []).length}`}
             </div>
           </section>
 
           <aside className="sidebar-right">
             <div className="panel-header">
               <span>
-                {selectedStandaloneOpening
-                  ? selectedStandaloneOpening.type === 'door'
-                    ? 'Врата (3D Пивот + Snap)'
-                    : 'Прозорец (3D Пивот + Snap)'
-                  : selectedWall
-                    ? 'Стена, врати и прозорци'
-                    : 'Настройки на обект'}
+                {selectedFloorZone
+                  ? 'Подова зона'
+                  : selectedStandaloneOpening
+                    ? selectedStandaloneOpening.type === 'door'
+                      ? 'Врата (3D Пивот + Snap)'
+                      : 'Прозорец (3D Пивот + Snap)'
+                    : selectedWall
+                      ? 'Стена, врати и прозорци'
+                      : 'Настройки на обект'}
               </span>
               <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-                {selectedStandaloneOpening || selectedWall ? 'м / °' : `Единици: ${unitLabel}`}
+                {selectedFloorZone
+                  ? 'настилка'
+                  : selectedStandaloneOpening || selectedWall
+                    ? 'м / °'
+                    : `Единици: ${unitLabel}`}
               </span>
             </div>
 
             <div className="panel-body">
-              {selectedStandaloneOpening ? (
+              {selectedFloorZone ? (
+                <div
+                  style={{
+                    backgroundColor: '#0f172a',
+                    border: '1px solid #f59e0b',
+                    borderRadius: '6px',
+                    padding: '10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '10px',
+                  }}
+                >
+                  <div className="axis-field">
+                    <span>Наименование на зоната</span>
+                    <input
+                      type="text"
+                      className="input-control"
+                      value={selectedFloorZone.name}
+                      onChange={(e) =>
+                        handleUpdateFloorZone(selectedFloorZone.id, {
+                          name: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="section-label" style={{ marginBottom: 0 }}>
+                    Бързи настилки
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {FLOOR_PRESETS.map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        className="btn"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          justifyContent: 'flex-start',
+                          fontSize: '11px',
+                          padding: '5px 8px',
+                        }}
+                        onClick={() =>
+                          handleUpdateFloorZone(selectedFloorZone.id, {
+                            color: preset.color,
+                            roughness: preset.roughness,
+                            metalness: preset.metalness,
+                          })
+                        }
+                      >
+                        <span
+                          style={{
+                            width: '12px',
+                            height: '12px',
+                            borderRadius: '3px',
+                            backgroundColor: preset.color,
+                            border: '1px solid rgba(255,255,255,0.25)',
+                            flexShrink: 0,
+                          }}
+                        />
+                        <span>{preset.label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="axis-field">
+                    <span>Цвят (HEX)</span>
+                    <input
+                      type="color"
+                      style={{
+                        width: '100%',
+                        height: '30px',
+                        background: 'transparent',
+                        border: '1px solid #334155',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                      }}
+                      value={selectedFloorZone.color}
+                      onChange={(e) =>
+                        handleUpdateFloorZone(selectedFloorZone.id, {
+                          color: e.target.value,
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flex: 1, fontSize: '11px' }}
+                      onClick={() => handleDuplicateFloorZone(selectedFloorZone.id)}
+                    >
+                      Дублирай зона
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      style={{ flex: 1, fontSize: '11px' }}
+                      onClick={() => handleDeleteFloorZone(selectedFloorZone.id)}
+                    >
+                      Премахни
+                    </button>
+                  </div>
+                </div>
+              ) : selectedStandaloneOpening ? (
                 <>
                   <div
                     style={{
@@ -2364,19 +2832,41 @@ export function App() {
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    className="btn btn-danger"
-                    onClick={() =>
-                      handleDeleteStandaloneOpening(selectedStandaloneOpening.id)
-                    }
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                      marginTop: '6px',
+                      paddingTop: '12px',
+                      borderTop: '1px solid #334155',
+                    }}
                   >
-                    Премахни от плана (Del)
-                  </button>
+                    <button
+                      type="button"
+                      className="btn btn-active"
+                      onClick={() =>
+                        handleDuplicateStandaloneOpening(selectedStandaloneOpening.id)
+                      }
+                    >
+                      {selectedStandaloneOpening.type === 'door'
+                        ? 'Дублирай вратата (Ctrl+D)'
+                        : 'Дублирай прозореца (Ctrl+D)'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() =>
+                        handleDeleteStandaloneOpening(selectedStandaloneOpening.id)
+                      }
+                    >
+                      Премахни от плана (Del)
+                    </button>
+                  </div>
                 </>
               ) : selectedWall ? (
                 <>
-                  {/* Геометрия на стената */}
                   <div
                     style={{
                       backgroundColor: '#0f172a',
@@ -2431,7 +2921,6 @@ export function App() {
                     </button>
                   </div>
 
-                  {/* Вградени врати и прозорци в тази стена */}
                   <div
                     style={{
                       backgroundColor: '#0f172a',
@@ -2636,9 +3125,60 @@ export function App() {
               ) : !selectedObject || !selectedModel ? (
                 <>
                   <div className="empty-state-box">
-                    Няма избран обект, стена или отвор. Натиснете „+ Врата“ / „+ Прозорец“
-                    горе и ги преместете с 3D пивота по стената.
+                    Няма избран обект, стена или под. Натиснете „+ Под / Зона“ за отделен под
+                    (включително при преходни стаи) или „+ Врата“ / „+ Прозорец“.
                   </div>
+
+                  {(room.floorZones ?? []).length > 0 && (
+                    <div>
+                      <div className="section-label">
+                        Отделни подови зони ({(room.floorZones ?? []).length})
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        {(room.floorZones ?? []).map((zone) => (
+                          <div
+                            key={zone.id}
+                            style={{ display: 'flex', gap: '4px', alignItems: 'center' }}
+                          >
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{
+                                flex: 1,
+                                textAlign: 'left',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                              }}
+                              onClick={() => setSelectedFloorZoneId(zone.id)}
+                            >
+                              <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <span
+                                  style={{
+                                    width: '10px',
+                                    height: '10px',
+                                    borderRadius: '2px',
+                                    backgroundColor: zone.color,
+                                  }}
+                                />
+                                <span>{zone.name}</span>
+                              </span>
+                              <span style={{ fontSize: '10px', color: '#94a3b8' }}>Настилка</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ padding: '5px 8px', fontSize: '11px' }}
+                              title="Дублирай"
+                              onClick={() => handleDuplicateFloorZone(zone.id)}
+                            >
+                              ⧉
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {(room.openings ?? []).length > 0 && (
                     <div>
@@ -2647,23 +3187,37 @@ export function App() {
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         {(room.openings ?? []).map((op, idx) => (
-                          <button
+                          <div
                             key={op.id}
-                            type="button"
-                            className="btn"
-                            style={{
-                              textAlign: 'left',
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                            }}
-                            onClick={() => setSelectedStandaloneOpeningId(op.id)}
+                            style={{ display: 'flex', gap: '4px', alignItems: 'center' }}
                           >
-                            <span>
-                              {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'} ({op.widthM}×{op.heightM} м)
-                            </span>
-                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
-                          </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{
+                                flex: 1,
+                                textAlign: 'left',
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                              }}
+                              onClick={() => setSelectedStandaloneOpeningId(op.id)}
+                            >
+                              <span>
+                                {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'} ({op.widthM}×{op.heightM} м)
+                              </span>
+                              <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ padding: '5px 8px', fontSize: '11px' }}
+                              title="Дублирай"
+                              onClick={() => handleDuplicateStandaloneOpening(op.id)}
+                            >
+                              ⧉
+                            </button>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -2954,7 +3508,7 @@ export function App() {
                       className="btn"
                       onClick={handleDuplicateSelected}
                     >
-                      Дублирай обекта
+                      Дублирай обекта (Ctrl+D)
                     </button>
                     <button
                       type="button"
