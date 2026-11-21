@@ -3,7 +3,9 @@ import * as THREE from 'three';
 import { Html, Line } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import {
+  findClosedRoomPolygons,
   getWallAngleDeg,
+  getWallJointExtensions,
   getWallLengthM,
   snapDrawingPoint,
 } from '../types/room';
@@ -18,6 +20,10 @@ interface RoomMeshProps {
   hoverPoint?: [number, number] | null;
   onHoverPointChange?: (pt: [number, number] | null) => void;
   onFloorDrawClick?: (point: [number, number]) => void;
+  onBreakDrawChain?: () => void;
+  isCalibratingPlan?: boolean;
+  calibPoints?: [number, number][];
+  onCalibFloorClick?: (point: [number, number]) => void;
 }
 
 interface FloorplanPlaneProps {
@@ -90,33 +96,95 @@ function FloorplanPlane({ floorplan }: FloorplanPlaneProps) {
   );
 }
 
+interface ClosedFloorsMeshProps {
+  polygons: [number, number][][];
+}
+
+function ClosedFloorsMesh({ polygons }: ClosedFloorsMeshProps) {
+  const geometries = useMemo(() => {
+    return polygons.map((poly) => {
+      const shape = new THREE.Shape();
+      // Shape в XY се завърта по X на +90° (Math.PI / 2), за да съвпадне с [x, z] на пода
+      shape.moveTo(poly[0][0], poly[0][1]);
+      for (let i = 1; i < poly.length; i++) {
+        shape.lineTo(poly[i][0], poly[i][1]);
+      }
+      shape.closePath();
+      return new THREE.ShapeGeometry(shape);
+    });
+  }, [polygons]);
+
+  useEffect(() => {
+    return () => {
+      for (const g of geometries) {
+        g.dispose();
+      }
+    };
+  }, [geometries]);
+
+  return (
+    <group>
+      {geometries.map((geom, idx) => (
+        <mesh
+          key={`room-floor-${idx}`}
+          geometry={geom}
+          rotation={[Math.PI / 2, 0, 0]}
+          position={[0, 0.004, 0]}
+          receiveShadow
+        >
+          <meshStandardMaterial
+            color="#334155"
+            roughness={0.9}
+            metalness={0.05}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 interface SingleWallProps {
   wall: WallSegment;
+  allWalls: WallSegment[];
   ceilingHeightM: number;
   isSelected: boolean;
-  isDrawingWalls: boolean;
+  isInteractiveDisabled: boolean;
   onSelectWall?: (wallId: string | null) => void;
 }
 
 function SingleWall({
   wall,
+  allWalls,
   ceilingHeightM,
   isSelected,
-  isDrawingWalls,
+  isInteractiveDisabled,
   onSelectWall,
 }: SingleWallProps) {
   const dx = wall.end[0] - wall.start[0];
   const dz = wall.end[1] - wall.start[1];
-  const length = Math.max(0.05, Math.hypot(dx, dz));
-  const midX = (wall.start[0] + wall.end[0]) / 2;
-  const midZ = (wall.start[1] + wall.end[1]) / 2;
+  const baseLength = Math.max(0.05, Math.hypot(dx, dz));
   const angleY = -Math.atan2(dz, dx);
+
+  const { startExt, endExt } = useMemo(
+    () => getWallJointExtensions(wall, allWalls),
+    [wall, allWalls]
+  );
+
+  const renderLength = baseLength + startExt + endExt;
+  // Изместваме центъра по оста на стената според удълженията в началото и края
+  const shiftAlongWall = (endExt - startExt) / 2;
+  const dirX = dx / baseLength;
+  const dirZ = dz / baseLength;
+
+  const midX = (wall.start[0] + wall.end[0]) / 2 + dirX * shiftAlongWall;
+  const midZ = (wall.start[1] + wall.end[1]) / 2 + dirZ * shiftAlongWall;
 
   const height = Math.max(0.2, ceilingHeightM);
   const thickness = Math.max(0.05, wall.thicknessM);
 
   function handleClick(e: ThreeEvent<MouseEvent>) {
-    if (isDrawingWalls) return;
+    if (isInteractiveDisabled) return;
     e.stopPropagation();
     onSelectWall?.(wall.id);
   }
@@ -124,7 +192,7 @@ function SingleWall({
   return (
     <group position={[midX, height / 2, midZ]} rotation={[0, angleY, 0]}>
       <mesh castShadow receiveShadow onClick={handleClick}>
-        <boxGeometry args={[length, height, thickness]} />
+        <boxGeometry args={[renderLength, height, thickness]} />
         <meshStandardMaterial
           color={isSelected ? '#38bdf8' : '#e2e8f0'}
           roughness={0.85}
@@ -136,7 +204,7 @@ function SingleWall({
         <>
           <mesh>
             <boxGeometry
-              args={[length + 0.015, height + 0.015, thickness + 0.015]}
+              args={[renderLength + 0.015, height + 0.015, thickness + 0.015]}
             />
             <meshBasicMaterial
               color="#0284c7"
@@ -148,7 +216,6 @@ function SingleWall({
           <Html
             position={[0, height / 2 + 0.22, 0]}
             center
-            distanceFactor={8}
             style={{ pointerEvents: 'none' }}
           >
             <div
@@ -181,7 +248,16 @@ export function RoomMesh({
   hoverPoint = null,
   onHoverPointChange,
   onFloorDrawClick,
+  onBreakDrawChain,
+  isCalibratingPlan = false,
+  calibPoints = [],
+  onCalibFloorClick,
 }: RoomMeshProps) {
+  const closedPolygons = useMemo(
+    () => findClosedRoomPolygons(room.walls),
+    [room.walls]
+  );
+
   const snapTargets = useMemo(() => {
     const pts: [number, number][] = [];
     for (const w of room.walls) {
@@ -193,27 +269,63 @@ export function RoomMesh({
     return pts;
   }, [room.walls, draftPoints]);
 
-  function resolveSnappedFromEvent(e: ThreeEvent<MouseEvent | PointerEvent>): [number, number] {
+  function resolveSnappedFromEvent(
+    e: ThreeEvent<MouseEvent | PointerEvent>
+  ): [number, number] {
+    if (isCalibratingPlan) {
+      return [
+        Number(e.point.x.toFixed(3)),
+        Number(e.point.z.toFixed(3)),
+      ];
+    }
     const anchor =
       draftPoints.length > 0 ? draftPoints[draftPoints.length - 1] : null;
     return snapDrawingPoint([e.point.x, e.point.z], anchor, snapTargets, 45);
   }
 
   function handleFloorMove(e: ThreeEvent<PointerEvent>) {
-    if (!isDrawingWalls) return;
+    if (!isDrawingWalls && !isCalibratingPlan) return;
     e.stopPropagation();
     const snapped = resolveSnappedFromEvent(e);
     onHoverPointChange?.(snapped);
   }
 
   function handleFloorClick(e: ThreeEvent<MouseEvent>) {
-    if (!isDrawingWalls || !onFloorDrawClick) return;
+    if (isCalibratingPlan && onCalibFloorClick) {
+      e.stopPropagation();
+      const pt = resolveSnappedFromEvent(e);
+      onCalibFloorClick(pt);
+      return;
+    }
+
+    if (isDrawingWalls && onFloorDrawClick) {
+      e.stopPropagation();
+      const snapped = resolveSnappedFromEvent(e);
+      onFloorDrawClick(snapped);
+    }
+  }
+
+  function handleFloorContextMenu(e: ThreeEvent<MouseEvent>) {
+    if (!isDrawingWalls) return;
     e.stopPropagation();
-    const snapped = resolveSnappedFromEvent(e);
-    onFloorDrawClick(snapped);
+    onBreakDrawChain?.();
   }
 
   const livePreviewData = useMemo(() => {
+    if (isCalibratingPlan && calibPoints.length === 1 && hoverPoint) {
+      const anchor = calibPoints[0];
+      const dist = Number(
+        Math.hypot(hoverPoint[0] - anchor[0], hoverPoint[1] - anchor[1]).toFixed(2)
+      );
+      return {
+        anchor,
+        target: hoverPoint,
+        midX: (anchor[0] + hoverPoint[0]) / 2,
+        midZ: (anchor[1] + hoverPoint[1]) / 2,
+        label: `Референция: ${dist} м (кликни втора точка)`,
+      };
+    }
+
     if (!isDrawingWalls || draftPoints.length === 0 || !hoverPoint) {
       return null;
     }
@@ -230,86 +342,108 @@ export function RoomMesh({
       target: hoverPoint,
       midX: (anchor[0] + hoverPoint[0]) / 2,
       midZ: (anchor[1] + hoverPoint[1]) / 2,
-      dist,
-      deg,
+      label: `${dist} м • ${deg}°`,
     };
-  }, [isDrawingWalls, draftPoints, hoverPoint]);
+  }, [isCalibratingPlan, calibPoints, isDrawingWalls, draftPoints, hoverPoint]);
 
   const draftLinePoints = useMemo(() => {
     const pts = draftPoints.map(
-      ([x, z]) => new THREE.Vector3(x, 0.03, z)
+      ([x, z]) => new THREE.Vector3(x, 0.04, z)
     );
     if (isDrawingWalls && hoverPoint && pts.length > 0) {
-      pts.push(new THREE.Vector3(hoverPoint[0], 0.03, hoverPoint[1]));
+      pts.push(new THREE.Vector3(hoverPoint[0], 0.04, hoverPoint[1]));
     }
     return pts;
   }, [draftPoints, isDrawingWalls, hoverPoint]);
 
+  const calibLinePoints = useMemo(() => {
+    const pts = calibPoints.map(
+      ([x, z]) => new THREE.Vector3(x, 0.05, z)
+    );
+    if (isCalibratingPlan && calibPoints.length === 1 && hoverPoint) {
+      pts.push(new THREE.Vector3(hoverPoint[0], 0.05, hoverPoint[1]));
+    }
+    return pts;
+  }, [calibPoints, isCalibratingPlan, hoverPoint]);
+
   return (
     <group>
-      {/* Невидима равнина за прецизно прихващане на кликове и движение по пода */}
+      {/* Невидима равнина за прихващане на кликове и движение по пода */}
       <mesh
         position={[0, 0.001, 0]}
         rotation={[-Math.PI / 2, 0, 0]}
         onPointerMove={handleFloorMove}
         onClick={handleFloorClick}
+        onContextMenu={handleFloorContextMenu}
       >
-        <planeGeometry args={[60, 60]} />
+        <planeGeometry args={[80, 80]} />
         <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
 
       {/* Подложка: План от строителя */}
       {room.floorplan && <FloorplanPlane floorplan={room.floorplan} />}
 
-      {/* Всички стени с обща височина на апартамента */}
+      {/* Автоматични подове под затворените стаи */}
+      <ClosedFloorsMesh polygons={closedPolygons} />
+
+      {/* Всички стени с плътни ъглови сглобки */}
       {room.walls.map((wall) => (
         <SingleWall
           key={wall.id}
           wall={wall}
+          allWalls={room.walls}
           ceilingHeightM={room.ceilingHeightM}
           isSelected={wall.id === selectedWallId}
-          isDrawingWalls={isDrawingWalls}
+          isInteractiveDisabled={isDrawingWalls || isCalibratingPlan}
           onSelectWall={onSelectWall}
         />
       ))}
 
-      {/* Точки в краищата на стените (визуални възли при чертане) */}
+      {/* Възли в краищата на съществуващи стени за лесно прихващане */}
       {isDrawingWalls &&
         snapTargets.map((pt, idx) => (
-          <mesh key={`snap-node-${idx}`} position={[pt[0], 0.025, pt[1]]}>
+          <mesh key={`snap-node-${idx}`} position={[pt[0], 0.03, pt[1]]}>
             <cylinderGeometry args={[0.07, 0.07, 0.03, 16]} />
             <meshBasicMaterial color="#0284c7" />
           </mesh>
         ))}
 
-      {/* Жива линия при чертане */}
+      {/* Линия за калибрация на плана */}
+      {isCalibratingPlan && calibLinePoints.length >= 2 && (
+        <Line points={calibLinePoints} color="#f59e0b" lineWidth={3} />
+      )}
+      {isCalibratingPlan &&
+        calibPoints.map((pt, idx) => (
+          <mesh key={`calib-pt-${idx}`} position={[pt[0], 0.06, pt[1]]}>
+            <sphereGeometry args={[0.1, 16, 16]} />
+            <meshBasicMaterial color="#f59e0b" />
+          </mesh>
+        ))}
+
+      {/* Жива линия при чертане на стени */}
       {isDrawingWalls && draftLinePoints.length >= 2 && (
-        <Line
-          points={draftLinePoints}
-          color="#38bdf8"
-          lineWidth={3}
-        />
+        <Line points={draftLinePoints} color="#38bdf8" lineWidth={3} />
       )}
 
-      {/* Маркери на поставените точки в текущия чертеж */}
+      {/* Маркери на поставените точки в текущата верига */}
       {isDrawingWalls &&
         draftPoints.map((pt, idx) => (
-          <mesh key={`draft-pt-${idx}`} position={[pt[0], 0.04, pt[1]]}>
+          <mesh key={`draft-pt-${idx}`} position={[pt[0], 0.05, pt[1]]}>
             <sphereGeometry args={[0.09, 16, 16]} />
             <meshBasicMaterial color={idx === 0 ? '#10b981' : '#38bdf8'} />
           </mesh>
         ))}
 
-      {/* Курсорна точка при прихващане */}
-      {isDrawingWalls && hoverPoint && (
-        <mesh position={[hoverPoint[0], 0.04, hoverPoint[1]]}>
+      {/* Курсорна точка */}
+      {(isDrawingWalls || isCalibratingPlan) && hoverPoint && (
+        <mesh position={[hoverPoint[0], 0.05, hoverPoint[1]]}>
           <sphereGeometry args={[0.08, 16, 16]} />
           <meshBasicMaterial color="#f59e0b" />
         </mesh>
       )}
 
-      {/* Етикет с жива дължина (м) и ъгъл (°) докато местиш мишката */}
-      {livePreviewData && livePreviewData.dist > 0 && (
+      {/* Жив етикет с размери */}
+      {livePreviewData && (
         <Html
           position={[livePreviewData.midX, 0.35, livePreviewData.midZ]}
           center
@@ -328,7 +462,7 @@ export function RoomMesh({
               boxShadow: '0 4px 12px rgba(0,0,0,0.45)',
             }}
           >
-            {livePreviewData.dist} м • {livePreviewData.deg}°
+            {livePreviewData.label}
           </div>
         </Html>
       )}
