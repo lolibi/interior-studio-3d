@@ -1,12 +1,10 @@
-import { useEffect, useRef } from 'react';
-import * as THREE from 'three';
+import { useEffect, useRef, useState } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import {
   Environment,
   Grid,
   Lightformer,
   OrbitControls,
-  TransformControls,
 } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
@@ -71,164 +69,6 @@ function CameraModeController({ viewMode, orbitRef }: CameraModeControllerProps)
   return null;
 }
 
-interface SelectedObjectGizmoProps {
-  selectedObject: SceneObject;
-  selectedModel: CatalogModel;
-  transformTool: TransformTool;
-  orbitRef: React.RefObject<OrbitControlsImpl | null>;
-  onTransformChange: (
-    instanceId: string,
-    position: [number, number, number],
-    rotation: [number, number, number],
-    scale: [number, number, number]
-  ) => void;
-}
-
-function SelectedObjectGizmo({
-  selectedObject,
-  selectedModel,
-  transformTool,
-  orbitRef,
-  onTransformChange,
-}: SelectedObjectGizmoProps) {
-  const targetRef = useRef<THREE.Group | null>(null);
-
-  useEffect(() => {
-    const group = targetRef.current;
-    if (!group) return;
-    group.position.set(...selectedObject.position);
-    group.rotation.set(...selectedObject.rotation);
-    group.scale.set(...selectedObject.scale);
-  }, [
-    selectedObject.instanceId,
-    selectedObject.position,
-    selectedObject.rotation,
-    selectedObject.scale,
-  ]);
-
-  function commitTransform() {
-    const group = targetRef.current;
-    if (!group) return;
-
-    const clampedY = Math.max(0, group.position.y);
-    group.position.y = clampedY;
-
-    let sx = Math.max(0.05, group.scale.x);
-    let sy = Math.max(0.05, group.scale.y);
-    let sz = Math.max(0.05, group.scale.z);
-
-    if (selectedModel.scaleMode === 'fixed') {
-      sx = 1;
-      sy = 1;
-      sz = 1;
-    } else if (selectedModel.scaleMode === 'constrained') {
-      const { allowX, allowY, allowZ, minCm, maxCm } = selectedModel.scaleConstraints;
-      const baseW = Math.max(1, selectedModel.dimensionsCm.width);
-      const baseH = Math.max(1, selectedModel.dimensionsCm.height);
-      const baseD = Math.max(1, selectedModel.dimensionsCm.depth);
-
-      if (!allowX) {
-        sx = 1;
-      } else {
-        const minSx = minCm.width / baseW;
-        const maxSx = maxCm.width / baseW;
-        sx = Math.min(maxSx, Math.max(minSx, sx));
-      }
-
-      if (!allowY) {
-        sy = 1;
-      } else {
-        const minSy = minCm.height / baseH;
-        const maxSy = maxCm.height / baseH;
-        sy = Math.min(maxSy, Math.max(minSy, sy));
-      }
-
-      if (!allowZ) {
-        sz = 1;
-      } else {
-        const minSz = minCm.depth / baseD;
-        const maxSz = maxCm.depth / baseD;
-        sz = Math.min(maxSz, Math.max(minSz, sz));
-      }
-    }
-
-    group.scale.set(sx, sy, sz);
-
-    onTransformChange(
-      selectedObject.instanceId,
-      [
-        Number(group.position.x.toFixed(3)),
-        Number(clampedY.toFixed(3)),
-        Number(group.position.z.toFixed(3)),
-      ],
-      [
-        Number(group.rotation.x.toFixed(4)),
-        Number(group.rotation.y.toFixed(4)),
-        Number(group.rotation.z.toFixed(4)),
-      ],
-      [Number(sx.toFixed(3)), Number(sy.toFixed(3)), Number(sz.toFixed(3))]
-    );
-  }
-
-  const showScale =
-    transformTool !== 'scale' || selectedModel.scaleMode !== 'fixed';
-  const effectiveMode: 'translate' | 'rotate' | 'scale' =
-    transformTool === 'scale' && !showScale ? 'translate' : transformTool;
-
-  return (
-    <>
-      <group
-        ref={targetRef}
-        position={selectedObject.position}
-        rotation={selectedObject.rotation}
-        scale={selectedObject.scale}
-      />
-      {targetRef.current && (
-        <TransformControls
-          object={targetRef.current}
-          mode={effectiveMode}
-          size={0.75}
-          showX={
-            effectiveMode === 'scale'
-              ? selectedModel.scaleMode === 'free' ||
-                (selectedModel.scaleMode === 'constrained' &&
-                  selectedModel.scaleConstraints.allowX)
-              : true
-          }
-          showY={
-            effectiveMode === 'scale'
-              ? selectedModel.scaleMode === 'free' ||
-                (selectedModel.scaleMode === 'constrained' &&
-                  selectedModel.scaleConstraints.allowY)
-              : true
-          }
-          showZ={
-            effectiveMode === 'scale'
-              ? selectedModel.scaleMode === 'free' ||
-                (selectedModel.scaleMode === 'constrained' &&
-                  selectedModel.scaleConstraints.allowZ)
-              : true
-          }
-          onMouseDown={() => {
-            if (orbitRef.current) orbitRef.current.enabled = false;
-          }}
-          onMouseUp={() => {
-            if (orbitRef.current) orbitRef.current.enabled = true;
-            commitTransform();
-          }}
-          onObjectChange={() => {
-            if (effectiveMode === 'translate' && targetRef.current) {
-              if (targetRef.current.position.y < 0) {
-                targetRef.current.position.y = 0;
-              }
-            }
-          }}
-        />
-      )}
-    </>
-  );
-}
-
 export function Viewport3D({
   room,
   viewMode = '3d',
@@ -247,12 +87,7 @@ export function Viewport3D({
   onTransformChange,
 }: Viewport3DProps) {
   const orbitRef = useRef<OrbitControlsImpl | null>(null);
-
-  const selectedObject =
-    sceneObjects.find((obj) => obj.instanceId === selectedInstanceId) ?? null;
-  const selectedModel = selectedObject
-    ? models.find((m) => m.id === selectedObject.modelId) ?? null
-    : null;
+  const [isDraggingObject, setIsDraggingObject] = useState(false);
 
   return (
     <Canvas
@@ -341,32 +176,26 @@ export function Viewport3D({
         return (
           <SceneItemMesh
             key={obj.instanceId}
-            sceneObject={obj}
+            item={obj}
             model={model}
-            isSelected={obj.instanceId === selectedInstanceId}
+            isSelected={!isDrawingWalls && obj.instanceId === selectedInstanceId}
+            transformTool={transformTool}
             onSelect={(id) => {
               if (!isDrawingWalls) {
                 onSelectObject(id);
                 onSelectWall?.(null);
               }
             }}
+            onTransformChange={onTransformChange}
+            onDraggingChange={setIsDraggingObject}
           />
         );
       })}
 
-      {!isDrawingWalls && selectedObject && selectedModel && (
-        <SelectedObjectGizmo
-          selectedObject={selectedObject}
-          selectedModel={selectedModel}
-          transformTool={transformTool}
-          orbitRef={orbitRef}
-          onTransformChange={onTransformChange}
-        />
-      )}
-
       <OrbitControls
         ref={orbitRef}
         makeDefault
+        enabled={!isDraggingObject}
         enableDamping
         dampingFactor={0.08}
         enableRotate={viewMode !== 'top'}

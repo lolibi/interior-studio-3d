@@ -1,4 +1,7 @@
+import type { RoomConfig } from './room';
+
 export type ModelCategory =
+  | 'living_room'
   | 'sofas'
   | 'chairs'
   | 'tables'
@@ -41,6 +44,17 @@ export interface CatalogModel {
   isActive: boolean;
 }
 
+export interface CreateModelInput {
+  name: string;
+  category: ModelCategory;
+  dimensionsCm: DimensionsCm;
+  scaleMode: ScaleMode;
+  scaleConstraints: ScaleConstraints;
+  glbUrl: string;
+  previewUrl: string;
+  isActive: boolean;
+}
+
 export interface SceneObject {
   instanceId: string;
   modelId: string;
@@ -53,11 +67,23 @@ export interface SceneObject {
 export interface SavedSceneSummary {
   id: string;
   title: string;
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
+  updatedAt?: string;
+}
+
+export interface SavedScene {
+  id: string;
+  title: string;
+  objects: SceneObject[];
+  room?: RoomConfig;
+  created_at?: string;
+  updated_at?: string;
+  updatedAt?: string;
 }
 
 export const CATEGORY_LABELS: Record<ModelCategory, string> = {
+  living_room: 'Хол и дневна',
   sofas: 'Дивани и кресла',
   chairs: 'Столове',
   tables: 'Маси',
