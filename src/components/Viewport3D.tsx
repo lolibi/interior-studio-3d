@@ -11,7 +11,12 @@ import {
 } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
-import type { RoomConfig, StandaloneOpening } from '../types/room';
+import type {
+  RoomConfig,
+  SelectedWallVertex,
+  StandaloneOpening,
+  WallSegment,
+} from '../types/room';
 import { RoomMesh } from './RoomMesh';
 import { SceneItemMesh } from './SceneItemMesh';
 
@@ -23,19 +28,29 @@ interface Viewport3DProps {
   selectedWallId?: string | null;
   selectedOpeningId?: string | null;
   selectedStandaloneOpeningId?: string | null;
+  selectedFloorZoneId?: string | null;
+  selectedWallVertex?: SelectedWallVertex | null;
+  linkedVertexJoint?: boolean;
+  autoStraightenVertices?: boolean;
   onSelectWall?: (wallId: string | null) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening?: (openingId: string | null) => void;
+  onSelectFloorZone?: (zoneId: string | null) => void;
+  onSelectWallVertex?: (vertex: SelectedWallVertex | null) => void;
   onUpdateStandaloneOpening?: (
     openingId: string,
     patch: Partial<StandaloneOpening>
   ) => void;
+  onCommitWallsFromVertex?: (nextWalls: WallSegment[]) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
   onHoverPointChange?: (pt: [number, number] | null) => void;
   onFloorDrawClick?: (point: [number, number]) => void;
   onBreakDrawChain?: () => void;
+  isDrawingFloorZone?: boolean;
+  zoneDraftPoints?: [number, number][];
+  onFloorZoneDrawClick?: (point: [number, number]) => void;
   isCalibratingPlan?: boolean;
   calibPoints?: [number, number][];
   onCalibFloorClick?: (point: [number, number]) => void;
@@ -58,15 +73,25 @@ export function Viewport3D({
   selectedWallId = null,
   selectedOpeningId = null,
   selectedStandaloneOpeningId = null,
+  selectedFloorZoneId = null,
+  selectedWallVertex = null,
+  linkedVertexJoint = true,
+  autoStraightenVertices = true,
   onSelectWall,
   onSelectOpening,
   onSelectStandaloneOpening,
+  onSelectFloorZone,
+  onSelectWallVertex,
   onUpdateStandaloneOpening,
+  onCommitWallsFromVertex,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
   onHoverPointChange,
   onFloorDrawClick,
+  isDrawingFloorZone = false,
+  zoneDraftPoints = [],
+  onFloorZoneDrawClick,
   isCalibratingPlan = false,
   calibPoints = [],
   onCalibFloorClick,
@@ -81,7 +106,8 @@ export function Viewport3D({
   const [isDraggingObject, setIsDraggingObject] = useState(false);
 
   const isTopOrtho = viewMode === 'top';
-  const isBusyDrawingOrCalib = isDrawingWalls || isCalibratingPlan;
+  const isBusyDrawingOrCalib =
+    isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
 
   return (
     <Canvas
@@ -92,6 +118,8 @@ export function Viewport3D({
           onSelectObject(null);
           onSelectWall?.(null);
           onSelectStandaloneOpening?.(null);
+          onSelectFloorZone?.(null);
+          onSelectWallVertex?.(null);
         }
       }}
     >
@@ -176,16 +204,30 @@ export function Viewport3D({
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
         selectedStandaloneOpeningId={selectedStandaloneOpeningId}
-        onSelectWall={onSelectWall}
-        onSelectOpening={onSelectOpening}
-        onSelectStandaloneOpening={onSelectStandaloneOpening}
-        onUpdateStandaloneOpening={onUpdateStandaloneOpening}
+        selectedFloorZoneId={selectedFloorZoneId}
+        selectedWallVertex={selectedWallVertex}
+        linkedVertexJoint={linkedVertexJoint}
+        autoStraightenVertices={autoStraightenVertices}
+        onSelectWall={(wallId) => onSelectWall?.(wallId)}
+        onSelectOpening={(wallId, openingId) => onSelectOpening?.(wallId, openingId)}
+        onSelectStandaloneOpening={(openingId) =>
+          onSelectStandaloneOpening?.(openingId)
+        }
+        onSelectFloorZone={onSelectFloorZone}
+        onSelectWallVertex={onSelectWallVertex}
+        onUpdateStandaloneOpening={(openingId, patch) =>
+          onUpdateStandaloneOpening?.(openingId, patch)
+        }
+        onCommitWallsFromVertex={onCommitWallsFromVertex}
         onDraggingChange={setIsDraggingObject}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
         hoverPoint={hoverPoint}
-        onHoverPointChange={onHoverPointChange}
-        onFloorDrawClick={onFloorDrawClick}
+        onHoverPointChange={(pt) => onHoverPointChange?.(pt)}
+        onFloorDrawClick={(pt) => onFloorDrawClick?.(pt)}
+        isDrawingFloorZone={isDrawingFloorZone}
+        zoneDraftPoints={zoneDraftPoints}
+        onFloorZoneDrawClick={onFloorZoneDrawClick}
         isCalibratingPlan={isCalibratingPlan}
         calibPoints={calibPoints}
         onCalibFloorClick={onCalibFloorClick}
@@ -207,6 +249,8 @@ export function Viewport3D({
                 onSelectObject(id);
                 onSelectWall?.(null);
                 onSelectStandaloneOpening?.(null);
+                onSelectFloorZone?.(null);
+                onSelectWallVertex?.(null);
               }
             }}
             onTransformChange={onTransformChange}

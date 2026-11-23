@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { useGLTF } from '@react-three/drei';
-import { TransformControls } from '@react-three/drei';
+import { useGLTF, TransformControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import type { CatalogModel, TransformTool } from '../types/editor';
 import {
+  applyVertexMoveToWalls,
   findClosedRoomPolygons,
   getOpeningJambPoints,
   getWallJointExtensions,
@@ -14,6 +14,7 @@ import {
 import type {
   FloorZone,
   RoomConfig,
+  SelectedWallVertex,
   StandaloneOpening,
   WallOpening,
   WallSegment,
@@ -26,14 +27,19 @@ interface RoomMeshProps {
   selectedOpeningId: string | null;
   selectedStandaloneOpeningId: string | null;
   selectedFloorZoneId?: string | null;
+  selectedWallVertex?: SelectedWallVertex | null;
+  linkedVertexJoint?: boolean;
+  autoStraightenVertices?: boolean;
   onSelectWall: (wallId: string | null) => void;
   onSelectOpening: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
+  onSelectWallVertex?: (vertex: SelectedWallVertex | null) => void;
   onUpdateStandaloneOpening: (
     openingId: string,
     patch: Partial<StandaloneOpening>
   ) => void;
+  onCommitWallsFromVertex?: (nextWalls: WallSegment[]) => void;
   isDrawingWalls: boolean;
   draftPoints: [number, number][];
   hoverPoint: [number, number] | null;
@@ -204,6 +210,46 @@ function renderStandardOpeningGeometry(
   );
 }
 
+function projectStandaloneOpeningOntoWall(
+  op: StandaloneOpening,
+  wallStart: [number, number],
+  dirX: number,
+  dirZ: number,
+  effStartDist: number,
+  length: number,
+  thickness: number
+): WallOpening | null {
+  const vx = op.position[0] - wallStart[0];
+  const vz = op.position[1] - wallStart[1];
+
+  const projAlong = vx * dirX + vz * dirZ;
+  const perpDist = Math.abs(-vx * dirZ + vz * dirX);
+
+  const maxPerp = Math.max(0.35, thickness / 2 + 0.3);
+  if (perpDist > maxPerp) return null;
+
+  const localCenterM = projAlong - effStartDist;
+  const halfW = Math.max(0.15, op.widthM / 2);
+
+  const clampedStart = Math.max(0.02, localCenterM - halfW);
+  const clampedEnd = Math.min(length - 0.02, localCenterM + halfW);
+
+  if (clampedEnd - clampedStart <= 0.05) {
+    return null;
+  }
+
+  return {
+    id: `cut-${op.id}`,
+    type: op.type,
+    offsetFromStartM: clampedStart,
+    widthM: clampedEnd - clampedStart,
+    heightM: op.heightM,
+    sillHeightM: op.type === 'window' ? op.sillHeightM : 0,
+    swing: op.swing,
+    modelId: op.modelId,
+  };
+}
+
 function StandaloneOpeningItem({
   opening,
   models,
@@ -214,7 +260,8 @@ function StandaloneOpeningItem({
   isCalibratingPlan,
   transformTool,
   onSelect,
-  onUpdate,
+  onLiveMove,
+  onCommit,
   onDraggingChange,
 }: {
   opening: StandaloneOpening;
@@ -226,13 +273,15 @@ function StandaloneOpeningItem({
   isCalibratingPlan: boolean;
   transformTool: TransformTool;
   onSelect: () => void;
-  onUpdate: (patch: Partial<StandaloneOpening>) => void;
+  onLiveMove: (next: StandaloneOpening) => void;
+  onCommit: (patch: Partial<StandaloneOpening>) => void;
   onDraggingChange: (dragging: boolean) => void;
 }) {
+  const openingGroupRef = useRef<THREE.Group | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pivotRef = useRef<any>(null);
-  const rotDegRef = useRef<number>(opening.rotationDeg);
-  rotDegRef.current = opening.rotationDeg;
+  const controlsRef = useRef<any>(null);
+  const latestDraftRef = useRef<StandaloneOpening>(opening);
+  latestDraftRef.current = opening;
 
   const customModel = useMemo(
     () => (opening.modelId ? models.find((m) => m.id === opening.modelId) ?? null : null),
@@ -245,6 +294,7 @@ function StandaloneOpeningItem({
   return (
     <>
       <group
+        ref={openingGroupRef}
         position={[opening.position[0], baseY, opening.position[1]]}
         rotation={[0, yawRad, 0]}
         onClick={(e: ThreeEvent<MouseEvent>) => {
@@ -284,53 +334,244 @@ function StandaloneOpeningItem({
       </group>
 
       {isSelected &&
+        openingGroupRef.current &&
         !isDrawingWalls &&
         !isDrawingFloorZone &&
         !isCalibratingPlan &&
         (transformTool === 'translate' || transformTool === 'rotate') && (
           <TransformControls
-            ref={pivotRef}
+            ref={controlsRef}
+            object={openingGroupRef.current}
             mode={transformTool === 'rotate' ? 'rotate' : 'translate'}
             size={0.72}
-            position={[opening.position[0], baseY + 0.25, opening.position[1]]}
-            rotation={[0, yawRad, 0]}
             showY={transformTool === 'rotate' || opening.type === 'window'}
             onMouseDown={() => onDraggingChange(true)}
-            onMouseUp={() => {
-              onDraggingChange(false);
-              const obj = pivotRef.current?.object;
+            onObjectChange={() => {
+              const obj = openingGroupRef.current;
               if (!obj) return;
 
               if (transformTool === 'rotate') {
                 const deg = Number(
                   (((-obj.rotation.y * 180) / Math.PI) % 360 + 360) % 360
                 );
-                const snappedDeg = Math.round(deg / 15) * 15;
-                onUpdate({ rotationDeg: snappedDeg });
+                const next: StandaloneOpening = {
+                  ...opening,
+                  rotationDeg: Number(deg.toFixed(1)),
+                };
+                latestDraftRef.current = next;
+                onLiveMove(next);
               } else {
-                const rawXZ: [number, number] = [obj.position.x, obj.position.z];
+                const rawPos: [number, number] = [
+                  Number(obj.position.x.toFixed(3)),
+                  Number(obj.position.z.toFixed(3)),
+                ];
                 const snapped = snapOpeningToWalls(
-                  rawXZ,
-                  rotDegRef.current,
+                  rawPos,
+                  opening.rotationDeg,
                   walls,
-                  0.35
+                  0.6
+                );
+                const nextSill =
+                  opening.type === 'window'
+                    ? Number(Math.max(0, obj.position.y).toFixed(2))
+                    : 0;
+
+                obj.position.set(snapped.position[0], nextSill, snapped.position[1]);
+                obj.rotation.set(0, (-snapped.rotationDeg * Math.PI) / 180, 0);
+
+                const next: StandaloneOpening = {
+                  ...opening,
+                  position: snapped.position,
+                  rotationDeg: snapped.rotationDeg,
+                  sillHeightM: nextSill,
+                  thicknessM: snapped.snappedWallThicknessM ?? opening.thicknessM,
+                };
+                latestDraftRef.current = next;
+                onLiveMove(next);
+              }
+            }}
+            onMouseUp={() => {
+              onDraggingChange(false);
+              const draft = latestDraftRef.current;
+
+              if (transformTool === 'rotate') {
+                const snappedDeg = Math.round(draft.rotationDeg / 15) * 15;
+                onCommit({ rotationDeg: snappedDeg });
+              } else {
+                const snapped = snapOpeningToWalls(
+                  draft.position,
+                  draft.rotationDeg,
+                  walls,
+                  0.6
                 );
                 const patch: Partial<StandaloneOpening> = {
                   position: snapped.position,
                   rotationDeg: snapped.rotationDeg,
+                  sillHeightM: draft.sillHeightM,
                 };
-                if (opening.type === 'window') {
-                  const nextSill = Number(
-                    Math.max(0, obj.position.y - 0.25).toFixed(2)
-                  );
-                  patch.sillHeightM = nextSill;
+                if (snapped.snappedWallThicknessM) {
+                  patch.thicknessM = snapped.snappedWallThicknessM;
                 }
-                onUpdate(patch);
+                onCommit(patch);
               }
             }}
           />
         )}
     </>
+  );
+}
+
+function WallVertexHandlesAndPivot({
+  walls,
+  selectedWallId,
+  selectedVertex,
+  linkedVertexJoint,
+  autoStraightenVertices,
+  snapTargets,
+  ceilingHeightM,
+  onSelectVertex,
+  onLiveWallsChange,
+  onCommitWalls,
+  onDraggingChange,
+}: {
+  walls: WallSegment[];
+  selectedWallId: string | null;
+  selectedVertex: SelectedWallVertex | null;
+  linkedVertexJoint: boolean;
+  autoStraightenVertices: boolean;
+  snapTargets: [number, number][];
+  ceilingHeightM: number;
+  onSelectVertex: (vertex: SelectedWallVertex | null) => void;
+  onLiveWallsChange: (nextWalls: WallSegment[] | null) => void;
+  onCommitWalls: (nextWalls: WallSegment[]) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const pivotRef = useRef<THREE.Object3D | null>(null);
+  const latestWallsRef = useRef<WallSegment[]>(walls);
+  latestWallsRef.current = walls;
+
+  const activeVertex = useMemo(() => {
+    if (!selectedVertex) return null;
+    const w = walls.find((item) => item.id === selectedVertex.wallId);
+    if (!w) return null;
+    const pt = selectedVertex.endKey === 'start' ? w.start : w.end;
+    return {
+      wallId: w.id,
+      endKey: selectedVertex.endKey,
+      point: pt,
+    };
+  }, [walls, selectedVertex]);
+
+  const pinHeightM = ceilingHeightM + 0.18;
+  const gizmoY = ceilingHeightM + 0.14;
+
+  return (
+    <group>
+      {walls.map((w) => {
+        const isWallFocused =
+          selectedWallId === w.id || selectedVertex?.wallId === w.id;
+
+        const baseRadius = Math.max(0.115, w.thicknessM * 0.68);
+
+        return (
+          <group key={`handles-${w.id}`}>
+            {(['start', 'end'] as const).map((endKey) => {
+              const pt = endKey === 'start' ? w.start : w.end;
+              const isThisVertexSelected =
+                selectedVertex?.wallId === w.id && selectedVertex?.endKey === endKey;
+
+              if (!isWallFocused && !isThisVertexSelected) return null;
+
+              const radius = isThisVertexSelected ? baseRadius + 0.03 : baseRadius;
+
+              return (
+                <group
+                  key={`${w.id}-${endKey}`}
+                  position={[pt[0], 0, pt[1]]}
+                  onClick={(e: ThreeEvent<MouseEvent>) => {
+                    e.stopPropagation();
+                    onSelectVertex({ wallId: w.id, endKey });
+                  }}
+                >
+                  <mesh position={[0, pinHeightM / 2, 0]}>
+                    <cylinderGeometry args={[radius, radius, pinHeightM, 20]} />
+                    <meshStandardMaterial
+                      color={isThisVertexSelected ? '#f59e0b' : '#0284c7'}
+                      emissive={isThisVertexSelected ? '#d97706' : '#0369a1'}
+                      emissiveIntensity={0.45}
+                      roughness={0.3}
+                    />
+                  </mesh>
+                  <mesh position={[0, pinHeightM + 0.04, 0]}>
+                    <sphereGeometry args={[radius * 1.15, 18, 18]} />
+                    <meshStandardMaterial
+                      color={isThisVertexSelected ? '#fbbf24' : '#38bdf8'}
+                      emissive={isThisVertexSelected ? '#b45309' : '#0284c7'}
+                      emissiveIntensity={0.4}
+                      roughness={0.25}
+                    />
+                  </mesh>
+                </group>
+              );
+            })}
+          </group>
+        );
+      })}
+
+      {activeVertex && (
+        <>
+          <object3D
+            ref={pivotRef}
+            position={[activeVertex.point[0], gizmoY, activeVertex.point[1]]}
+          />
+          {pivotRef.current && (
+            <TransformControls
+              object={pivotRef.current}
+              mode="translate"
+              size={0.8}
+              showY={false}
+              onMouseDown={() => onDraggingChange(true)}
+              onObjectChange={() => {
+                const obj = pivotRef.current;
+                if (!obj) return;
+
+                const nextWalls = applyVertexMoveToWalls(
+                  walls,
+                  activeVertex.wallId,
+                  activeVertex.endKey,
+                  [Number(obj.position.x.toFixed(3)), Number(obj.position.z.toFixed(3))],
+                  snapTargets,
+                  {
+                    linkedJoint: linkedVertexJoint,
+                    autoStraighten: autoStraightenVertices,
+                  }
+                );
+
+                const updatedW = nextWalls.find(
+                  (item) => item.id === activeVertex.wallId
+                );
+                if (updatedW) {
+                  const syncedPt =
+                    activeVertex.endKey === 'start'
+                      ? updatedW.start
+                      : updatedW.end;
+                  obj.position.set(syncedPt[0], gizmoY, syncedPt[1]);
+                }
+
+                latestWallsRef.current = nextWalls;
+                onLiveWallsChange(nextWalls);
+              }}
+              onMouseUp={() => {
+                onDraggingChange(false);
+                const finalWalls = latestWallsRef.current;
+                onLiveWallsChange(null);
+                onCommitWalls(finalWalls);
+              }}
+            />
+          )}
+        </>
+      )}
+    </group>
   );
 }
 
@@ -450,6 +691,7 @@ function FloorZonePolygonMesh({
   metalness,
   opacity,
   yOffset,
+  polygonOffsetFactor = -1,
   isSelected,
   onClick,
 }: {
@@ -459,6 +701,7 @@ function FloorZonePolygonMesh({
   metalness: number;
   opacity: number;
   yOffset: number;
+  polygonOffsetFactor?: number;
   isSelected: boolean;
   onClick?: (e: ThreeEvent<MouseEvent>) => void;
 }) {
@@ -497,6 +740,9 @@ function FloorZonePolygonMesh({
         metalness={metalness}
         transparent={opacity < 1}
         opacity={opacity}
+        polygonOffset
+        polygonOffsetFactor={polygonOffsetFactor}
+        polygonOffsetUnits={-1}
         side={THREE.DoubleSide}
       />
     </mesh>
@@ -506,6 +752,7 @@ function FloorZonePolygonMesh({
 function WallSegmentItem({
   wall,
   allWalls,
+  standaloneOpenings,
   ceilingHeightM,
   models,
   isSelected,
@@ -518,6 +765,7 @@ function WallSegmentItem({
 }: {
   wall: WallSegment;
   allWalls: WallSegment[];
+  standaloneOpenings: StandaloneOpening[];
   ceilingHeightM: number;
   models: CatalogModel[];
   isSelected: boolean;
@@ -548,12 +796,29 @@ function WallSegmentItem({
   const centerX = wall.start[0] + dirX * midDist;
   const centerZ = wall.start[1] + dirZ * midDist;
 
-  const rawOpenings = wall.openings ?? [];
+  const projectedStandaloneCutouts: WallOpening[] = [];
+  for (const sop of standaloneOpenings) {
+    const cut = projectStandaloneOpeningOntoWall(
+      sop,
+      wall.start,
+      dirX,
+      dirZ,
+      effStartDist,
+      length,
+      thickness
+    );
+    if (cut) projectedStandaloneCutouts.push(cut);
+  }
+
+  const rawOpenings: WallOpening[] = [
+    ...(wall.openings ?? []),
+    ...projectedStandaloneCutouts,
+  ];
+
   const validOpenings: WallOpening[] = rawOpenings
     .map((op) => {
-      const w = Math.max(0.2, Math.min(op.widthM, length - 0.04));
+      const w = Math.max(0.1, Math.min(op.widthM, length - 0.04));
       const start = Math.max(0, Math.min(op.offsetFromStartM, length - w));
-      const end = start + w;
       const sill = op.type === 'window' ? Math.max(0, op.sillHeightM) : 0;
       const h = Math.max(0.2, Math.min(op.heightM, ceilingHeightM - sill));
       return {
@@ -562,10 +827,9 @@ function WallSegmentItem({
         widthM: w,
         sillHeightM: sill,
         heightM: h,
-        _endM: end,
       };
     })
-    .filter((op) => op._endM > op.offsetFromStartM + 0.02)
+    .filter((op) => op.widthM > 0.02)
     .sort((a, b) => a.offsetFromStartM - b.offsetFromStartM);
 
   const wallColor = isSelected ? '#38bdf8' : '#e2e8f0';
@@ -581,7 +845,7 @@ function WallSegmentItem({
   let cursorM = 0;
 
   for (const op of validOpenings) {
-    if (op.offsetFromStartM > cursorM + 0.01) {
+    if (op.offsetFromStartM > cursorM + 0.005) {
       spans.push({
         startM: cursorM,
         endM: op.offsetFromStartM,
@@ -590,7 +854,7 @@ function WallSegmentItem({
       });
     }
 
-    if (op.type === 'window' && op.sillHeightM > 0.01) {
+    if (op.type === 'window' && op.sillHeightM > 0.005) {
       spans.push({
         startM: op.offsetFromStartM,
         endM: op.offsetFromStartM + op.widthM,
@@ -600,7 +864,7 @@ function WallSegmentItem({
     }
 
     const lintelBottomY = op.sillHeightM + op.heightM;
-    if (ceilingHeightM > lintelBottomY + 0.01) {
+    if (ceilingHeightM > lintelBottomY + 0.005) {
       spans.push({
         startM: op.offsetFromStartM,
         endM: op.offsetFromStartM + op.widthM,
@@ -612,7 +876,7 @@ function WallSegmentItem({
     cursorM = Math.max(cursorM, op.offsetFromStartM + op.widthM);
   }
 
-  if (length > cursorM + 0.01) {
+  if (length > cursorM + 0.005) {
     spans.push({
       startM: cursorM,
       endM: length,
@@ -649,12 +913,15 @@ function WallSegmentItem({
               color={wallColor}
               roughness={0.75}
               metalness={0.05}
+              polygonOffset={isSelected}
+              polygonOffsetFactor={isSelected ? -3 : 0}
+              polygonOffsetUnits={isSelected ? -3 : 0}
             />
           </mesh>
         );
       })}
 
-      {validOpenings.map((op) => {
+      {(wall.openings ?? []).map((op) => {
         const localX = op.offsetFromStartM + op.widthM / 2 - length / 2;
         const isOpSelected = selectedOpeningId === op.id;
         const customModel = op.modelId
@@ -702,11 +969,16 @@ export function RoomMesh({
   selectedOpeningId,
   selectedStandaloneOpeningId,
   selectedFloorZoneId,
+  selectedWallVertex = null,
+  linkedVertexJoint = true,
+  autoStraightenVertices = true,
   onSelectWall,
   onSelectOpening,
   onSelectStandaloneOpening,
   onSelectFloorZone,
+  onSelectWallVertex,
   onUpdateStandaloneOpening,
+  onCommitWallsFromVertex,
   isDrawingWalls,
   draftPoints,
   hoverPoint,
@@ -721,24 +993,68 @@ export function RoomMesh({
   transformTool,
   onDraggingChange,
 }: RoomMeshProps) {
-  const autoPolygons = useMemo(
-    () => findClosedRoomPolygons(room.walls),
-    [room.walls]
-  );
+  const [liveOpening, setLiveOpening] = useState<StandaloneOpening | null>(null);
+  const [liveWalls, setLiveWalls] = useState<WallSegment[] | null>(null);
+
+  useEffect(() => {
+    setLiveOpening(null);
+  }, [selectedStandaloneOpeningId, room.openings]);
+
+  useEffect(() => {
+    setLiveWalls(null);
+  }, [room.walls]);
+
+  const effectiveWalls = useMemo(() => {
+    const base = liveWalls ?? room.walls;
+    const byKey = new Map<string, WallSegment>();
+
+    for (const w of base) {
+      const a = `${w.start[0].toFixed(3)},${w.start[1].toFixed(3)}`;
+      const b = `${w.end[0].toFixed(3)},${w.end[1].toFixed(3)}`;
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+
+      const existing = byKey.get(key);
+      if (!existing || w.id === selectedWallId || selectedWallVertex?.wallId === w.id) {
+        byKey.set(key, w);
+      }
+    }
+
+    return Array.from(byKey.values());
+  }, [liveWalls, room.walls, selectedWallId, selectedWallVertex]);
+
+  const autoPolygons = useMemo(() => {
+    const raw = findClosedRoomPolygons(effectiveWalls);
+    const seen = new Set<string>();
+    return raw.filter((poly) => {
+      const key = [...poly]
+        .map(([x, z]) => `${x.toFixed(2)},${z.toFixed(2)}`)
+        .sort()
+        .join('|');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [effectiveWalls]);
 
   const floorZones: FloorZone[] = room.floorZones ?? [];
 
+  const effectiveStandaloneOpenings = useMemo(() => {
+    const base = room.openings ?? [];
+    if (!liveOpening) return base;
+    return base.map((op) => (op.id === liveOpening.id ? liveOpening : op));
+  }, [room.openings, liveOpening]);
+
   const snapTargets = useMemo<[number, number][]>(() => {
     const pts: [number, number][] = [];
-    for (const w of room.walls) {
+    for (const w of effectiveWalls) {
       pts.push(w.start, w.end);
     }
-    for (const op of room.openings ?? []) {
+    for (const op of effectiveStandaloneOpenings) {
       const [left, right] = getOpeningJambPoints(op);
       pts.push(left, right);
     }
     return pts;
-  }, [room.walls, room.openings]);
+  }, [effectiveWalls, effectiveStandaloneOpenings]);
 
   const activeDraftPts = isDrawingFloorZone ? zoneDraftPoints : draftPoints;
   const anchorPoint =
@@ -830,7 +1146,6 @@ export function RoomMesh({
         onHoverPointChange={onHoverPointChange}
       />
 
-      {/* 1. Автоматично засечени затворени помещения */}
       {autoPolygons.map((poly, idx) => (
         <FloorZonePolygonMesh
           key={`auto-floor-${idx}`}
@@ -839,7 +1154,8 @@ export function RoomMesh({
           roughness={0.7}
           metalness={0.05}
           opacity={0.42}
-          yOffset={0.004}
+          yOffset={0.003 + idx * 0.001}
+          polygonOffsetFactor={-1 - idx}
           isSelected={false}
           onClick={(e) => {
             if (isAnyDrawMode || isCalibratingPlan) return;
@@ -847,11 +1163,11 @@ export function RoomMesh({
             onSelectWall(null);
             onSelectStandaloneOpening(null);
             onSelectFloorZone?.(null);
+            onSelectWallVertex?.(null);
           }}
         />
       ))}
 
-      {/* 2. Отделяеми / ръчни подови зони (работят и при преходни стаи) */}
       {floorZones.map((zone, idx) => (
         <FloorZonePolygonMesh
           key={zone.id}
@@ -860,7 +1176,8 @@ export function RoomMesh({
           roughness={zone.roughness ?? 0.55}
           metalness={zone.metalness ?? 0.05}
           opacity={0.95}
-          yOffset={0.008 + idx * 0.001}
+          yOffset={0.015 + idx * 0.0015}
+          polygonOffsetFactor={-10 - idx}
           isSelected={selectedFloorZoneId === zone.id}
           onClick={(e) => {
             if (isAnyDrawMode || isCalibratingPlan) return;
@@ -868,16 +1185,17 @@ export function RoomMesh({
             onSelectFloorZone?.(zone.id);
             onSelectWall(null);
             onSelectStandaloneOpening(null);
+            onSelectWallVertex?.(null);
           }}
         />
       ))}
 
-      {/* Стени и вградени отвори */}
-      {room.walls.map((wall) => (
+      {effectiveWalls.map((wall) => (
         <WallSegmentItem
           key={wall.id}
           wall={wall}
-          allWalls={room.walls}
+          allWalls={effectiveWalls}
+          standaloneOpenings={effectiveStandaloneOpenings}
           ceilingHeightM={room.ceilingHeightM}
           models={models}
           isSelected={selectedWallId === wall.id}
@@ -890,25 +1208,43 @@ export function RoomMesh({
         />
       ))}
 
-      {/* Самостоятелни врати и прозорци на плана */}
-      {(room.openings ?? []).map((op) => (
+      {!isAnyDrawMode && !isCalibratingPlan && (
+        <WallVertexHandlesAndPivot
+          walls={effectiveWalls}
+          selectedWallId={selectedWallId}
+          selectedVertex={selectedWallVertex}
+          linkedVertexJoint={linkedVertexJoint}
+          autoStraightenVertices={autoStraightenVertices}
+          snapTargets={snapTargets}
+          ceilingHeightM={room.ceilingHeightM}
+          onSelectVertex={(v) => onSelectWallVertex?.(v)}
+          onLiveWallsChange={setLiveWalls}
+          onCommitWalls={(nextWalls) => onCommitWallsFromVertex?.(nextWalls)}
+          onDraggingChange={onDraggingChange}
+        />
+      )}
+
+      {effectiveStandaloneOpenings.map((op) => (
         <StandaloneOpeningItem
           key={op.id}
           opening={op}
           models={models}
-          walls={room.walls}
+          walls={effectiveWalls}
           isSelected={selectedStandaloneOpeningId === op.id}
           isDrawingWalls={isDrawingWalls}
           isDrawingFloorZone={isDrawingFloorZone}
           isCalibratingPlan={isCalibratingPlan}
           transformTool={transformTool}
           onSelect={() => onSelectStandaloneOpening(op.id)}
-          onUpdate={(patch) => onUpdateStandaloneOpening(op.id, patch)}
+          onLiveMove={(next) => setLiveOpening(next)}
+          onCommit={(patch) => {
+            setLiveOpening(null);
+            onUpdateStandaloneOpening(op.id, patch);
+          }}
           onDraggingChange={onDraggingChange}
         />
       ))}
 
-      {/* Визуализация при чертане на стени или отделна подова зона */}
       {isAnyDrawMode &&
         activeDraftPts.map((pt, idx) => (
           <mesh key={`draft-pt-${idx}`} position={[pt[0], 0.04, pt[1]]}>

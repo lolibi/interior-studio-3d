@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Viewport3D } from './components/Viewport3D';
 import type { ViewportCameraMode } from './components/Viewport3D';
 import { AdminPanel } from './components/AdminPanel';
+import { useHistoryState } from './hooks/useHistoryState';
 import { CATEGORY_LABELS } from './types/editor';
 import type {
   CatalogModel,
@@ -20,6 +21,7 @@ import {
   createStarterWalls,
   getWallAngleDeg,
   getWallLengthM,
+  straightenWallOrthogonal,
   updateWallGeometry,
 } from './types/room';
 import type {
@@ -29,6 +31,7 @@ import type {
   FloorZone,
   OpeningType,
   RoomConfig,
+  SelectedWallVertex,
   StandaloneOpening,
   WallOpening,
   WallSegment,
@@ -62,6 +65,11 @@ const FLOOR_PRESETS: {
 ];
 
 type LeftTab = 'furniture' | 'templates';
+
+interface DesignSnapshot {
+  room: RoomConfig;
+  sceneObjects: SceneObject[];
+}
 
 function normalizeLoadedRoomConfig(rawRoom: unknown): RoomConfig {
   const base = createDefaultRoomConfig();
@@ -220,13 +228,79 @@ export function App() {
 
   const [leftTab, setLeftTab] = useState<LeftTab>('furniture');
   const [viewMode, setViewMode] = useState<ViewportCameraMode>('3d');
-  const [room, setRoom] = useState<RoomConfig>(() => createDefaultRoomConfig());
+
+  // Единна история (Undo / Redo) за цялата сцена: стая + мебели
+  const {
+    state: design,
+    set: setDesign,
+    undo: undoDesign,
+    redo: redoDesign,
+    resetHistory: resetDesignHistory,
+    canUndo,
+    canRedo,
+  } = useHistoryState<DesignSnapshot>(
+    {
+      room: createDefaultRoomConfig(),
+      sceneObjects: [],
+    },
+    { maxHistory: 60, coalesceMs: 450 }
+  );
+
+  const room = design.room;
+  const sceneObjects = design.sceneObjects;
+
+  const setRoom = useCallback(
+    (
+      updater: RoomConfig | ((prev: RoomConfig) => RoomConfig),
+      forceNewStep = false
+    ) => {
+      setDesign(
+        (prev) => ({
+          ...prev,
+          room:
+            typeof updater === 'function'
+              ? (updater as (p: RoomConfig) => RoomConfig)(prev.room)
+              : updater,
+        }),
+        forceNewStep
+      );
+    },
+    [setDesign]
+  );
+
+  const setSceneObjects = useCallback(
+    (
+      updater: SceneObject[] | ((prev: SceneObject[]) => SceneObject[]),
+      forceNewStep = false
+    ) => {
+      setDesign(
+        (prev) => ({
+          ...prev,
+          sceneObjects:
+            typeof updater === 'function'
+              ? (updater as (p: SceneObject[]) => SceneObject[])(
+                  prev.sceneObjects
+                )
+              : updater,
+        }),
+        forceNewStep
+      );
+    },
+    [setDesign]
+  );
+
   const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
 
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
   const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(null);
   const [selectedStandaloneOpeningId, setSelectedStandaloneOpeningId] = useState<string | null>(null);
   const [selectedFloorZoneId, setSelectedFloorZoneId] = useState<string | null>(null);
+
+  // Редакция на стени по въртекси (ъгли), снапване и ортогонално изправяне
+  const [selectedWallVertex, setSelectedWallVertex] =
+    useState<SelectedWallVertex | null>(null);
+  const [linkedVertexJoint, setLinkedVertexJoint] = useState(true);
+  const [autoStraightenVertices, setAutoStraightenVertices] = useState(true);
 
   const [wallLengthInput, setWallLengthInput] = useState('');
   const [wallAngleInput, setWallAngleInput] = useState('');
@@ -249,7 +323,6 @@ export function App() {
   const [calibPoints, setCalibPoints] = useState<[number, number][]>([]);
   const [calibRealMetersInput, setCalibRealMetersInput] = useState('');
 
-  const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
   const [currentSceneId, setCurrentSceneId] = useState<string | null>(null);
   const [currentSceneTitle, setCurrentSceneTitle] = useState<string>('Нов проект');
   const [savedScenes, setSavedScenes] = useState<SavedSceneSummary[]>([]);
@@ -281,6 +354,78 @@ export function App() {
     },
     []
   );
+
+  // Почиства селекциите, ако след Undo/Redo избраният елемент вече не съществува
+  useEffect(() => {
+    if (selectedWallId && !room.walls.some((w) => w.id === selectedWallId)) {
+      setSelectedWallId(null);
+      setSelectedOpeningId(null);
+    }
+    if (
+      selectedWallVertex &&
+      !room.walls.some((w) => w.id === selectedWallVertex.wallId)
+    ) {
+      setSelectedWallVertex(null);
+    }
+    if (
+      selectedStandaloneOpeningId &&
+      !(room.openings ?? []).some((op) => op.id === selectedStandaloneOpeningId)
+    ) {
+      setSelectedStandaloneOpeningId(null);
+    }
+    if (
+      selectedFloorZoneId &&
+      !(room.floorZones ?? []).some((z) => z.id === selectedFloorZoneId)
+    ) {
+      setSelectedFloorZoneId(null);
+    }
+    if (
+      selectedInstanceId &&
+      !sceneObjects.some((o) => o.instanceId === selectedInstanceId)
+    ) {
+      setSelectedInstanceId(null);
+    }
+  }, [
+    room.walls,
+    room.openings,
+    room.floorZones,
+    sceneObjects,
+    selectedWallId,
+    selectedWallVertex,
+    selectedStandaloneOpeningId,
+    selectedFloorZoneId,
+    selectedInstanceId,
+  ]);
+
+  const handleUndo = useCallback(() => {
+    if (isDrawingWalls && draftPoints.length > 0) {
+      setDraftPoints((prev) => prev.slice(0, -1));
+      showTemporaryNotice('Премахната последна точка от чертежа', 'success');
+      return;
+    }
+    if (isDrawingFloorZone && zoneDraftPoints.length > 0) {
+      setZoneDraftPoints((prev) => prev.slice(0, -1));
+      showTemporaryNotice('Премахната последна точка от зоната', 'success');
+      return;
+    }
+    if (!canUndo) return;
+    undoDesign();
+    showTemporaryNotice('Върната стъпка назад (Undo)', 'success');
+  }, [
+    isDrawingWalls,
+    draftPoints.length,
+    isDrawingFloorZone,
+    zoneDraftPoints.length,
+    canUndo,
+    undoDesign,
+    showTemporaryNotice,
+  ]);
+
+  const handleRedo = useCallback(() => {
+    if (!canRedo) return;
+    redoDesign();
+    showTemporaryNotice('Върната стъпка напред (Redo)', 'success');
+  }, [canRedo, redoDesign, showTemporaryNotice]);
 
   const refreshServerData = useCallback(async () => {
     setIsLoadingModels(true);
@@ -346,6 +491,46 @@ export function App() {
     }
   }, [selectedWall]);
 
+  const handleCommitWallsFromVertex = useCallback(
+    (nextWalls: WallSegment[]) => {
+      setRoom(
+        (prev) => ({
+          ...prev,
+          templateId: null,
+          templateName: null,
+          walls: nextWalls,
+        }),
+        true
+      );
+    },
+    [setRoom]
+  );
+
+  function handleStraightenSelectedWall() {
+    if (!selectedWall) return;
+    const movingEnd =
+      selectedWallVertex?.wallId === selectedWall.id
+        ? selectedWallVertex.endKey
+        : 'end';
+    const straightened = straightenWallOrthogonal(selectedWall, movingEnd);
+
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: prev.walls.map((w) =>
+          w.id === selectedWall.id ? straightened : w
+        ),
+      }),
+      true
+    );
+    showTemporaryNotice(
+      `Стената е изправена до ${getWallAngleDeg(straightened)}°`,
+      'success'
+    );
+  }
+
   function handleCeilingHeightChange(rawValue: string) {
     const parsed = parseFloat(rawValue.replace(',', '.'));
     if (Number.isNaN(parsed)) return;
@@ -374,12 +559,15 @@ export function App() {
       thicknessM: nextT,
     };
 
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: prev.walls.map((w) => (w.id === selectedWall.id ? updatedWall : w)),
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: prev.walls.map((w) => (w.id === selectedWall.id ? updatedWall : w)),
+      }),
+      true
+    );
     showTemporaryNotice(
       `Стената е обновена: ${getWallLengthM(updatedWall)} м • ${getWallAngleDeg(updatedWall)}°`,
       'success'
@@ -396,6 +584,7 @@ export function App() {
     setCalibPoints([]);
     setIsDrawingWalls(false);
     setDraftPoints([]);
+    setSelectedWallVertex(null);
 
     setIsDrawingFloorZone((prev) => {
       const next = !prev;
@@ -436,12 +625,15 @@ export function App() {
         metalness: 0.05,
       };
 
-      setRoom((prev) => ({
-        ...prev,
-        templateId: null,
-        templateName: null,
-        floorZones: [...(prev.floorZones ?? []), newZone],
-      }));
+      setRoom(
+        (prev) => ({
+          ...prev,
+          templateId: null,
+          templateName: null,
+          floorZones: [...(prev.floorZones ?? []), newZone],
+        }),
+        true
+      );
 
       setIsDrawingFloorZone(false);
       setZoneDraftPoints([]);
@@ -452,7 +644,7 @@ export function App() {
         'success'
       );
     },
-    [room.floorZones, showTemporaryNotice]
+    [room.floorZones, setRoom, showTemporaryNotice]
   );
 
   function handleFloorZoneDrawClick(pt: [number, number]) {
@@ -497,23 +689,29 @@ export function App() {
         Number((z + 0.5).toFixed(3)),
       ]),
     };
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      floorZones: [...(prev.floorZones ?? []), dup],
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        floorZones: [...(prev.floorZones ?? []), dup],
+      }),
+      true
+    );
     setSelectedFloorZoneId(dup.id);
     showTemporaryNotice('Подовата зона е дублирана ✓', 'success');
   }
 
   function handleDeleteFloorZone(zoneId: string) {
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      floorZones: (prev.floorZones ?? []).filter((z) => z.id !== zoneId),
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        floorZones: (prev.floorZones ?? []).filter((z) => z.id !== zoneId),
+      }),
+      true
+    );
     if (selectedFloorZoneId === zoneId) {
       setSelectedFloorZoneId(null);
     }
@@ -543,12 +741,15 @@ export function App() {
       modelId: null,
     };
 
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      openings: [...(prev.openings ?? []), created],
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        openings: [...(prev.openings ?? []), created],
+      }),
+      true
+    );
 
     setIsDrawingWalls(false);
     setIsDrawingFloorZone(false);
@@ -556,6 +757,7 @@ export function App() {
     setZoneDraftPoints([]);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
+    setSelectedWallVertex(null);
     setSelectedFloorZoneId(null);
     setSelectedInstanceId(null);
     setActiveTool('translate');
@@ -580,7 +782,7 @@ export function App() {
         ),
       }));
     },
-    []
+    [setRoom]
   );
 
   const handleDuplicateStandaloneOpening = useCallback(
@@ -599,12 +801,15 @@ export function App() {
         position: [nextX, nextZ],
       };
 
-      setRoom((prev) => ({
-        ...prev,
-        templateId: null,
-        templateName: null,
-        openings: [...(prev.openings ?? []), duplicate],
-      }));
+      setRoom(
+        (prev) => ({
+          ...prev,
+          templateId: null,
+          templateName: null,
+          openings: [...(prev.openings ?? []), duplicate],
+        }),
+        true
+      );
 
       setActiveTool('translate');
       setSelectedStandaloneOpeningId(duplicate.id);
@@ -615,21 +820,24 @@ export function App() {
         'success'
       );
     },
-    [room.openings, showTemporaryNotice]
+    [room.openings, setRoom, showTemporaryNotice]
   );
 
   const handleDeleteStandaloneOpening = useCallback(
     (openingId: string) => {
-      setRoom((prev) => ({
-        ...prev,
-        templateId: null,
-        templateName: null,
-        openings: (prev.openings ?? []).filter((op) => op.id !== openingId),
-      }));
+      setRoom(
+        (prev) => ({
+          ...prev,
+          templateId: null,
+          templateName: null,
+          openings: (prev.openings ?? []).filter((op) => op.id !== openingId),
+        }),
+        true
+      );
       setSelectedStandaloneOpeningId((curr) => (curr === openingId ? null : curr));
       showTemporaryNotice('Премахнато от плана', 'success');
     },
-    [showTemporaryNotice]
+    [setRoom, showTemporaryNotice]
   );
 
   // --- Вградени врати и прозорци към избрана стена ---
@@ -658,16 +866,19 @@ export function App() {
       modelId: null,
     };
 
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: prev.walls.map((w) =>
-        w.id === selectedWall.id
-          ? { ...w, openings: [...(w.openings ?? []), newOpening] }
-          : w
-      ),
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: prev.walls.map((w) =>
+          w.id === selectedWall.id
+            ? { ...w, openings: [...(w.openings ?? []), newOpening] }
+            : w
+        ),
+      }),
+      true
+    );
     setSelectedOpeningId(newOpening.id);
     showTemporaryNotice(
       type === 'door' ? 'Добавена врата в стената ✓' : 'Добавен прозорец в стената ✓',
@@ -697,19 +908,22 @@ export function App() {
   }
 
   function handleDeleteOpening(wallId: string, openingId: string) {
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: prev.walls.map((w) =>
-        w.id === wallId
-          ? {
-              ...w,
-              openings: (w.openings ?? []).filter((op) => op.id !== openingId),
-            }
-          : w
-      ),
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: prev.walls.map((w) =>
+          w.id === wallId
+            ? {
+                ...w,
+                openings: (w.openings ?? []).filter((op) => op.id !== openingId),
+              }
+            : w
+        ),
+      }),
+      true
+    );
     if (selectedOpeningId === openingId) {
       setSelectedOpeningId(null);
     }
@@ -745,20 +959,24 @@ export function App() {
       points: z.points.map((pt) => [pt[0], pt[1]]),
     }));
 
-    setRoom((prev) => ({
-      ...prev,
-      templateId: tpl.id,
-      templateName: tpl.name,
-      ceilingHeightM: tpl.ceilingHeightM || prev.ceilingHeightM,
-      defaultThicknessM: tpl.defaultThicknessM || prev.defaultThicknessM,
-      walls: clonedWalls,
-      openings: clonedOpenings,
-      floorZones: clonedZones,
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: tpl.id,
+        templateName: tpl.name,
+        ceilingHeightM: tpl.ceilingHeightM || prev.ceilingHeightM,
+        defaultThicknessM: tpl.defaultThicknessM || prev.defaultThicknessM,
+        walls: clonedWalls,
+        openings: clonedOpenings,
+        floorZones: clonedZones,
+      }),
+      true
+    );
     setSelectedWallId(clonedWalls[0]?.id ?? null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
+    setSelectedWallVertex(null);
     setIsDrawingWalls(false);
     setIsDrawingFloorZone(false);
     setDraftPoints([]);
@@ -772,18 +990,22 @@ export function App() {
       showTemporaryNotice('Първо завърши задължителното скалиране на качения план!', 'error');
       return;
     }
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: [],
-      openings: [],
-      floorZones: [],
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: [],
+        openings: [],
+        floorZones: [],
+      }),
+      true
+    );
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
+    setSelectedWallVertex(null);
     setIsCalibratingPlan(false);
     setCalibPoints([]);
     setDraftPoints([]);
@@ -811,6 +1033,7 @@ export function App() {
     setCalibPoints([]);
     setIsDrawingFloorZone(false);
     setZoneDraftPoints([]);
+    setSelectedWallVertex(null);
 
     setIsDrawingWalls((prev) => {
       const next = !prev;
@@ -860,12 +1083,15 @@ export function App() {
         }
 
         if (newSegments.length > 0) {
-          setRoom((prev) => ({
-            ...prev,
-            templateId: null,
-            templateName: null,
-            walls: [...prev.walls, ...newSegments],
-          }));
+          setRoom(
+            (prev) => ({
+              ...prev,
+              templateId: null,
+              templateName: null,
+              walls: [...prev.walls, ...newSegments],
+            }),
+            true
+          );
           if (!keepDrawingActive) {
             setSelectedWallId(newSegments[0].id);
           }
@@ -885,7 +1111,7 @@ export function App() {
         setIsDrawingWalls(false);
       }
     },
-    [room.defaultThicknessM, showTemporaryNotice]
+    [room.defaultThicknessM, setRoom, showTemporaryNotice]
   );
 
   const handleBreakDrawChain = useCallback(() => {
@@ -965,20 +1191,23 @@ export function App() {
       const initialWidthM = 12;
       const initialDepthM = Number((initialWidthM / aspectRatio).toFixed(3));
 
-      setRoom((prev) => ({
-        ...prev,
-        floorplan: {
-          imageUrl: uploaded.url,
-          widthM: initialWidthM,
-          depthM: initialDepthM,
-          aspectRatio,
-          offsetX: 0,
-          offsetZ: 0,
-          rotationDeg: 0,
-          opacity: 0.72,
-          visible: true,
-        },
-      }));
+      setRoom(
+        (prev) => ({
+          ...prev,
+          floorplan: {
+            imageUrl: uploaded.url,
+            widthM: initialWidthM,
+            depthM: initialDepthM,
+            aspectRatio,
+            offsetX: 0,
+            offsetZ: 0,
+            rotationDeg: 0,
+            opacity: 0.72,
+            visible: true,
+          },
+        }),
+        true
+      );
       setViewMode('top');
       setIsDrawingWalls(false);
       setIsDrawingFloorZone(false);
@@ -988,6 +1217,7 @@ export function App() {
       setSelectedOpeningId(null);
       setSelectedStandaloneOpeningId(null);
       setSelectedFloorZoneId(null);
+      setSelectedWallVertex(null);
       setSelectedInstanceId(null);
       setIsCalibratingPlan(true);
       setIsCalibrationMandatory(true);
@@ -1018,6 +1248,7 @@ export function App() {
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
+    setSelectedWallVertex(null);
     setSelectedInstanceId(null);
     setViewMode('top');
     setIsCalibratingPlan(true);
@@ -1060,13 +1291,16 @@ export function App() {
     }
 
     const [p1, p2] = calibPoints;
-    setRoom((prev) => {
-      if (!prev.floorplan) return prev;
-      return {
-        ...prev,
-        floorplan: calibrateFloorplanByTwoPoints(prev.floorplan, p1, p2, realMeters),
-      };
-    });
+    setRoom(
+      (prev) => {
+        if (!prev.floorplan) return prev;
+        return {
+          ...prev,
+          floorplan: calibrateFloorplanByTwoPoints(prev.floorplan, p1, p2, realMeters),
+        };
+      },
+      true
+    );
 
     setIsCalibratingPlan(false);
     setIsCalibrationMandatory(false);
@@ -1125,16 +1359,33 @@ export function App() {
 
   function handleDeleteSelectedWall() {
     if (!selectedWallId) return;
-    setRoom((prev) => ({
-      ...prev,
-      templateId: null,
-      templateName: null,
-      walls: prev.walls.filter((w) => w.id !== selectedWallId),
-    }));
+    setRoom(
+      (prev) => ({
+        ...prev,
+        templateId: null,
+        templateName: null,
+        walls: prev.walls.filter((w) => w.id !== selectedWallId),
+      }),
+      true
+    );
     setSelectedWallId(null);
     setSelectedOpeningId(null);
+    setSelectedWallVertex(null);
     showTemporaryNotice('Стената е премахната', 'success');
   }
+
+  const handleToggleMirrorSelected = useCallback(() => {
+    if (!selectedObject) return;
+    setSceneObjects(
+      (prev) =>
+        prev.map((obj) =>
+          obj.instanceId === selectedObject.instanceId
+            ? { ...obj, mirrored: !obj.mirrored }
+            : obj
+        ),
+      true
+    );
+  }, [selectedObject, setSceneObjects]);
 
   const handleDuplicateSelected = useCallback(() => {
     if (!selectedObject) return;
@@ -1149,11 +1400,12 @@ export function App() {
       ],
       rotation: [...selectedObject.rotation],
       scale: [...selectedObject.scale],
+      mirrored: Boolean(selectedObject.mirrored),
     };
 
-    setSceneObjects((prev) => [...prev, duplicate]);
+    setSceneObjects((prev) => [...prev, duplicate], true);
     setSelectedInstanceId(duplicate.instanceId);
-  }, [selectedObject, selectedModel]);
+  }, [selectedObject, selectedModel, setSceneObjects]);
 
   const handleSaveSceneToCloud = useCallback(async () => {
     const inputTitle = window.prompt(
@@ -1189,6 +1441,25 @@ export function App() {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (isAdminOpen) return;
+
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      const isInputFocused =
+        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+      // Undo / Redo (Ctrl+Z / Cmd+Z и Ctrl+Y / Cmd+Shift+Z)
+      if ((e.metaKey || e.ctrlKey) && !isInputFocused) {
+        const k = e.key.toLowerCase();
+        if (k === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          handleUndo();
+          return;
+        }
+        if ((k === 'z' && e.shiftKey) || k === 'y') {
+          e.preventDefault();
+          handleRedo();
+          return;
+        }
+      }
 
       if (e.key === 'Escape') {
         if (isCalibratingPlan) {
@@ -1240,6 +1511,7 @@ export function App() {
         setSelectedOpeningId(null);
         setSelectedStandaloneOpeningId(null);
         setSelectedFloorZoneId(null);
+        setSelectedWallVertex(null);
         return;
       }
 
@@ -1262,8 +1534,7 @@ export function App() {
         }
       }
 
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+      if (isInputFocused) {
         return;
       }
 
@@ -1287,8 +1558,9 @@ export function App() {
         handleDeleteStandaloneOpening(selectedStandaloneOpeningId);
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedInstanceId) {
         e.preventDefault();
-        setSceneObjects((prev) =>
-          prev.filter((obj) => obj.instanceId !== selectedInstanceId)
+        setSceneObjects(
+          (prev) => prev.filter((obj) => obj.instanceId !== selectedInstanceId),
+          true
         );
         setSelectedInstanceId(null);
       }
@@ -1305,12 +1577,15 @@ export function App() {
     draftPoints,
     selectedInstanceId,
     selectedStandaloneOpeningId,
+    handleUndo,
+    handleRedo,
     commitCurrentChain,
     handleBreakDrawChain,
     handleDuplicateStandaloneOpening,
     handleDeleteStandaloneOpening,
     handleDuplicateSelected,
     handleSaveSceneToCloud,
+    setSceneObjects,
     showTemporaryNotice,
   ]);
 
@@ -1330,13 +1605,16 @@ export function App() {
     if (!sceneId) return;
     try {
       const scene = await fetchSceneById(sceneId);
-      setSceneObjects(scene.objects);
       const loadedRoom = normalizeLoadedRoomConfig(scene.room);
-      setRoom(loadedRoom);
+      resetDesignHistory({
+        room: loadedRoom,
+        sceneObjects: scene.objects,
+      });
       setSelectedWallId(loadedRoom.walls[0]?.id ?? null);
       setSelectedOpeningId(null);
       setSelectedStandaloneOpeningId(null);
       setSelectedFloorZoneId(null);
+      setSelectedWallVertex(null);
       setCurrentSceneId(scene.id);
       setCurrentSceneTitle(scene.title);
       setSelectedInstanceId(null);
@@ -1365,22 +1643,25 @@ export function App() {
       if (!confirmed) return;
     }
 
-    setSceneObjects([]);
-    setRoom({
-      templateId: null,
-      templateName: null,
-      ceilingHeightM: 2.65,
-      defaultThicknessM: 0.15,
-      walls: [],
-      openings: [],
-      floorZones: [],
-      floorplan: null,
+    resetDesignHistory({
+      room: {
+        templateId: null,
+        templateName: null,
+        ceilingHeightM: 2.65,
+        defaultThicknessM: 0.15,
+        walls: [],
+        openings: [],
+        floorZones: [],
+        floorplan: null,
+      },
+      sceneObjects: [],
     });
     setSelectedInstanceId(null);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
+    setSelectedWallVertex(null);
     setIsCalibratingPlan(false);
     setIsCalibrationMandatory(false);
     setCalibPoints([]);
@@ -1406,14 +1687,16 @@ export function App() {
       position: [Number(offsetX.toFixed(2)), 0, Number(offsetZ.toFixed(2))],
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
+      mirrored: false,
     };
 
-    setSceneObjects((prev) => [...prev, newInstance]);
+    setSceneObjects((prev) => [...prev, newInstance], true);
     setSelectedInstanceId(newInstance.instanceId);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
+    setSelectedWallVertex(null);
   }
 
   function handleTransformChange(
@@ -1470,11 +1753,14 @@ export function App() {
     if (!selectedObject) return;
     const nextRot: [number, number, number] = [...selectedObject.rotation];
     nextRot[1] = nextRot[1] + degToRad(deltaDegrees);
-    handleTransformChange(
-      selectedObject.instanceId,
-      selectedObject.position,
-      nextRot,
-      selectedObject.scale
+    setSceneObjects(
+      (prev) =>
+        prev.map((obj) =>
+          obj.instanceId === selectedObject.instanceId
+            ? { ...obj, rotation: nextRot }
+            : obj
+        ),
+      true
     );
   }
 
@@ -1522,8 +1808,9 @@ export function App() {
 
   function handleDeleteSelected() {
     if (!selectedObject) return;
-    setSceneObjects((prev) =>
-      prev.filter((obj) => obj.instanceId !== selectedObject.instanceId)
+    setSceneObjects(
+      (prev) => prev.filter((obj) => obj.instanceId !== selectedObject.instanceId),
+      true
     );
     setSelectedInstanceId(null);
   }
@@ -1539,8 +1826,29 @@ export function App() {
         <div className="topbar-group">
           <div className="brand-title">
             <span>Interior Studio 3D</span>
-            <span className="brand-badge">v2.8 CAD</span>
+            <span className="brand-badge">v2.9 CAD</span>
           </div>
+
+          <span style={{ width: '1px', height: '18px', backgroundColor: '#334155', margin: '0 2px' }} />
+
+          <button
+            type="button"
+            className="btn"
+            disabled={!canUndo && !(isDrawingWalls && draftPoints.length > 0) && !(isDrawingFloorZone && zoneDraftPoints.length > 0)}
+            onClick={handleUndo}
+            title="Назад / Undo (Ctrl+Z)"
+          >
+            ↶
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={!canRedo}
+            onClick={handleRedo}
+            title="Напред / Redo (Ctrl+Y / Ctrl+Shift+Z)"
+          >
+            ↷
+          </button>
         </div>
 
         <div className="topbar-group">
@@ -1988,7 +2296,7 @@ export function App() {
                               setIsCalibrationMandatory(false);
                               setCalibPoints([]);
                               setCalibRealMetersInput('');
-                              setRoom((prev) => ({ ...prev, floorplan: null }));
+                              setRoom((prev) => ({ ...prev, floorplan: null }), true);
                             }}
                           >
                             Премахни
@@ -2208,13 +2516,22 @@ export function App() {
               selectedOpeningId={selectedOpeningId}
               selectedStandaloneOpeningId={selectedStandaloneOpeningId}
               selectedFloorZoneId={selectedFloorZoneId}
+              selectedWallVertex={selectedWallVertex}
+              linkedVertexJoint={linkedVertexJoint}
+              autoStraightenVertices={autoStraightenVertices}
+              onSelectWallVertex={setSelectedWallVertex}
+              onCommitWallsFromVertex={handleCommitWallsFromVertex}
               onSelectWall={(wallId) => {
                 if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
                 setSelectedWallId(wallId);
                 setSelectedOpeningId(null);
                 setSelectedStandaloneOpeningId(null);
                 setSelectedFloorZoneId(null);
-                if (wallId) setSelectedInstanceId(null);
+                if (!wallId) {
+                  setSelectedWallVertex(null);
+                } else {
+                  setSelectedInstanceId(null);
+                }
               }}
               onSelectOpening={(wallId, openingId) => {
                 if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
@@ -2222,6 +2539,7 @@ export function App() {
                 setSelectedOpeningId(openingId);
                 setSelectedStandaloneOpeningId(null);
                 setSelectedFloorZoneId(null);
+                setSelectedWallVertex(null);
                 setSelectedInstanceId(null);
               }}
               onSelectStandaloneOpening={(openingId) => {
@@ -2230,6 +2548,7 @@ export function App() {
                 setSelectedWallId(null);
                 setSelectedOpeningId(null);
                 setSelectedFloorZoneId(null);
+                setSelectedWallVertex(null);
                 if (openingId) setSelectedInstanceId(null);
               }}
               onSelectFloorZone={(zoneId) => {
@@ -2238,6 +2557,7 @@ export function App() {
                 setSelectedWallId(null);
                 setSelectedOpeningId(null);
                 setSelectedStandaloneOpeningId(null);
+                setSelectedWallVertex(null);
                 if (zoneId) setSelectedInstanceId(null);
               }}
               onUpdateStandaloneOpening={handleUpdateStandaloneOpening}
@@ -2255,7 +2575,12 @@ export function App() {
               sceneObjects={sceneObjects}
               selectedInstanceId={selectedInstanceId}
               transformTool={activeTool}
-              onSelectObject={setSelectedInstanceId}
+              onSelectObject={(instanceId) => {
+                setSelectedInstanceId(instanceId);
+                if (instanceId) {
+                  setSelectedWallVertex(null);
+                }
+              }}
               onTransformChange={handleTransformChange}
             />
 
@@ -2497,7 +2822,7 @@ export function App() {
                 : isDrawingFloorZone
                   ? 'Кликни точки около желания под (дори в преходна стая) и натисни „Затвори зона“'
                   : isDrawingWalls
-                    ? 'Ляв клик: точка (снап към стени и каси на врати/прозорци) • Десен бутон: мести плана • Space: нова верига • Esc: край'
+                    ? 'Ляв клик: точка (снап към стени и каси на врати/прозорци) • Десен бутон: мести плана • Ctrl+Z: назад • Esc: край'
                     : `Проект: ${currentSceneTitle} • Стени: ${room.walls.length} • Подови зони: ${(room.floorZones ?? []).length} • Врати/Прозорци: ${(room.openings ?? []).length}`}
             </div>
           </section>
@@ -2512,7 +2837,7 @@ export function App() {
                       ? 'Врата (3D Пивот + Snap)'
                       : 'Прозорец (3D Пивот + Snap)'
                     : selectedWall
-                      ? 'Стена, врати и прозорци'
+                      ? 'Стена, въртекси и отвори'
                       : 'Настройки на обект'}
               </span>
               <span style={{ fontSize: '11px', color: '#94a3b8' }}>
@@ -2880,6 +3205,82 @@ export function App() {
                   >
                     <div style={{ fontWeight: 600, fontSize: '13px', color: '#f8fafc' }}>
                       Стена ({getWallLengthM(selectedWall)} м • {getWallAngleDeg(selectedWall)}°)
+                    </div>
+
+                    {/* Въртекси (ъгли), снапване и ортогонално изправяне */}
+                    <div
+                      style={{
+                        backgroundColor: '#1e293b',
+                        border: '1px solid #334155',
+                        borderRadius: '6px',
+                        padding: '8px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px',
+                      }}
+                    >
+                      <div className="section-label" style={{ marginBottom: 0 }}>
+                        Въртекс (ъгъл) и изправяне
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        {(['start', 'end'] as const).map((endKey) => {
+                          const isActiveV =
+                            selectedWallVertex?.wallId === selectedWall.id &&
+                            selectedWallVertex?.endKey === endKey;
+                          const pt =
+                            endKey === 'start'
+                              ? selectedWall.start
+                              : selectedWall.end;
+                          return (
+                            <button
+                              key={endKey}
+                              type="button"
+                              className={`btn ${isActiveV ? 'btn-active' : ''}`}
+                              style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
+                              onClick={() =>
+                                setSelectedWallVertex(
+                                  isActiveV
+                                    ? null
+                                    : { wallId: selectedWall.id, endKey }
+                                )
+                              }
+                            >
+                              {endKey === 'start' ? 'Начало' : 'Край'} ({pt[0]}, {pt[1]})
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '4px' }}>
+                        <button
+                          type="button"
+                          className={`btn ${linkedVertexJoint ? 'btn-active' : ''}`}
+                          style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
+                          onClick={() => setLinkedVertexJoint((v) => !v)}
+                        >
+                          {linkedVertexJoint ? 'Свързан ъгъл: ДА' : 'Свързан ъгъл: НЕ'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn ${autoStraightenVertices ? 'btn-active' : ''}`}
+                          style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
+                          onClick={() => setAutoStraightenVertices((v) => !v)}
+                        >
+                          {autoStraightenVertices
+                            ? 'Авто-изправяне: ДА'
+                            : 'Авто-изправяне: НЕ'}
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '11px', padding: '5px 8px' }}
+                        onClick={handleStraightenSelectedWall}
+                      >
+                        📐 Изправи стената (0° / 90° / 180° / 270°)
+                      </button>
                     </div>
 
                     <div className="axis-grid">
@@ -3503,6 +3904,15 @@ export function App() {
                       borderTop: '1px solid #334155',
                     }}
                   >
+                    <button
+                      type="button"
+                      className={`btn ${selectedObject.mirrored ? 'btn-active' : ''}`}
+                      onClick={handleToggleMirrorSelected}
+                    >
+                      {selectedObject.mirrored
+                        ? 'Огледално: Включено (Mirror)'
+                        : 'Огледално (Mirror)'}
+                    </button>
                     <button
                       type="button"
                       className="btn"

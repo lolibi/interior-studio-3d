@@ -62,6 +62,7 @@ export interface SceneObject {
   position: [number, number, number];
   rotation: [number, number, number];
   scale: [number, number, number];
+  mirrored?: boolean;
 }
 
 export interface SavedSceneSummary {

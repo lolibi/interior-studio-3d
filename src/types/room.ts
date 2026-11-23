@@ -42,6 +42,11 @@ export interface WallSegment {
   openings?: WallOpening[];
 }
 
+export interface SelectedWallVertex {
+  wallId: string;
+  endKey: 'start' | 'end';
+}
+
 export interface FloorplanUnderlay {
   imageUrl: string;
   widthM: number;
@@ -89,6 +94,197 @@ export function getWallAngleDeg(wall: WallSegment): number {
   let deg = (Math.atan2(dz, dx) * 180) / Math.PI;
   if (deg < 0) deg += 360;
   return Number(deg.toFixed(1));
+}
+
+/**
+ * Изправя стена към най-близкия ортогонален ъгъл (0° / 90° / 180° / 270°), като запазва дължината ѝ
+ * и премества избрания край (или края на стената по подразбиране).
+ */
+export function straightenWallOrthogonal(
+  wall: WallSegment,
+  movingEnd: 'start' | 'end' = 'end'
+): WallSegment {
+  const len = Math.max(0.05, getWallLengthM(wall));
+  const currentDeg = getWallAngleDeg(wall);
+  const orthoAngles = [0, 90, 180, 270];
+
+  let nearestDeg = 0;
+  let bestDiff = Infinity;
+  for (const target of orthoAngles) {
+    let diff = Math.abs(currentDeg - target);
+    if (diff > 180) diff = 360 - diff;
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      nearestDeg = target;
+    }
+  }
+
+  const rad = (nearestDeg * Math.PI) / 180;
+  const dx = Math.cos(rad) * len;
+  const dz = Math.sin(rad) * len;
+
+  if (movingEnd === 'start') {
+    return {
+      ...wall,
+      start: [
+        Number((wall.end[0] - dx).toFixed(3)),
+        Number((wall.end[1] - dz).toFixed(3)),
+      ],
+    };
+  }
+
+  return {
+    ...wall,
+    end: [
+      Number((wall.start[0] + dx).toFixed(3)),
+      Number((wall.start[1] + dz).toFixed(3)),
+    ],
+  };
+}
+
+/**
+ * Прилага движение на въртекс върху масива от стени с независим двуосов CAD snap (X и Z):
+ * - при linkedJoint = true мести всички краища на стени, намиращи се в същия ъгъл (възел);
+ * - при autoStraighten = true изправя поотделно X и Z спрямо всички свързани стени и ъгли в стаята,
+ *   така че и червената (X), и синята (Z) стрелка на пивота прихващат правите ъгли (90°).
+ */
+export function applyVertexMoveToWalls(
+  walls: WallSegment[],
+  wallId: string,
+  endKey: 'start' | 'end',
+  rawPoint: [number, number],
+  snapTargets: [number, number][],
+  options: {
+    linkedJoint: boolean;
+    autoStraighten: boolean;
+    orthoToleranceDeg?: number;
+  }
+): WallSegment[] {
+  const targetWall = walls.find((w) => w.id === wallId);
+  if (!targetWall) return walls;
+
+  const originPt: [number, number] =
+    endKey === 'start' ? targetWall.start : targetWall.end;
+  const primaryAnchorPt: [number, number] =
+    endKey === 'start' ? targetWall.end : targetWall.start;
+
+  const jointTol = 0.04;
+
+  // Събираме противоположните краища на ВСИЧКИ стени, които участват в този ъгъл
+  const connectedAnchors: [number, number][] = [primaryAnchorPt];
+  if (options.linkedJoint) {
+    for (const w of walls) {
+      if (w.id === wallId) continue;
+      if (Math.hypot(w.start[0] - originPt[0], w.start[1] - originPt[1]) <= jointTol) {
+        connectedAnchors.push(w.end);
+      } else if (Math.hypot(w.end[0] - originPt[0], w.end[1] - originPt[1]) <= jointTol) {
+        connectedAnchors.push(w.start);
+      }
+    }
+  }
+
+  const filteredSnapTargets = snapTargets.filter(
+    (pt) => Math.hypot(pt[0] - originPt[0], pt[1] - originPt[1]) > 0.01
+  );
+
+  // 1. Директен точков snap (ако пуснем въртекса директно върху друга съществуваща точка)
+  let exactPointSnap: [number, number] | null = null;
+  let bestPointDist = 0.16;
+  for (const t of filteredSnapTargets) {
+    const d = Math.hypot(rawPoint[0] - t[0], rawPoint[1] - t[1]);
+    if (d <= bestPointDist) {
+      bestPointDist = d;
+      exactPointSnap = [Number(t[0].toFixed(3)), Number(t[1].toFixed(3))];
+    }
+  }
+
+  let nextPt: [number, number];
+
+  if (exactPointSnap) {
+    nextPt = exactPointSnap;
+  } else {
+    // Базова стъпка 5 см по мрежата
+    let snappedX = Number((Math.round(rawPoint[0] * 20) / 20).toFixed(3));
+    let snappedZ = Number((Math.round(rawPoint[1] * 20) / 20).toFixed(3));
+
+    const tolRad = ((options.orthoToleranceDeg ?? 7) * Math.PI) / 180;
+    const maxAxisAlignDist = 0.22;
+
+    // 2. Независимо подравняване по ос X (червена стрелка -> вертикални стени 90°/270°)
+    let bestDx = maxAxisAlignDist;
+    for (const anchor of connectedAnchors) {
+      const dx = Math.abs(rawPoint[0] - anchor[0]);
+      const dz = Math.abs(rawPoint[1] - anchor[1]);
+      const angleFromVertical = dz > 0.05 ? Math.atan2(dx, dz) : 0;
+      const withinOrtho = options.autoStraighten && angleFromVertical <= tolRad;
+
+      if ((withinOrtho || dx <= 0.16) && dx < bestDx) {
+        bestDx = dx;
+        snappedX = Number(anchor[0].toFixed(3));
+      }
+    }
+    if (bestDx === maxAxisAlignDist) {
+      for (const t of filteredSnapTargets) {
+        const dx = Math.abs(rawPoint[0] - t[0]);
+        if (dx <= 0.12 && dx < bestDx) {
+          bestDx = dx;
+          snappedX = Number(t[0].toFixed(3));
+        }
+      }
+    }
+
+    // 3. Независимо подравняване по ос Z (синя стрелка -> хоризонтални стени 0°/180°)
+    let bestDz = maxAxisAlignDist;
+    for (const anchor of connectedAnchors) {
+      const dx = Math.abs(rawPoint[0] - anchor[0]);
+      const dz = Math.abs(rawPoint[1] - anchor[1]);
+      const angleFromHorizontal = dx > 0.05 ? Math.atan2(dz, dx) : 0;
+      const withinOrtho = options.autoStraighten && angleFromHorizontal <= tolRad;
+
+      if ((withinOrtho || dz <= 0.16) && dz < bestDz) {
+        bestDz = dz;
+        snappedZ = Number(anchor[1].toFixed(3));
+      }
+    }
+    if (bestDz === maxAxisAlignDist) {
+      for (const t of filteredSnapTargets) {
+        const dz = Math.abs(rawPoint[1] - t[1]);
+        if (dz <= 0.12 && dz < bestDz) {
+          bestDz = dz;
+          snappedZ = Number(t[1].toFixed(3));
+        }
+      }
+    }
+
+    nextPt = [snappedX, snappedZ];
+  }
+
+  return walls.map((w) => {
+    if (w.id === wallId) {
+      return endKey === 'start'
+        ? { ...w, start: nextPt }
+        : { ...w, end: nextPt };
+    }
+
+    if (!options.linkedJoint) {
+      return w;
+    }
+
+    const startMatches =
+      Math.hypot(w.start[0] - originPt[0], w.start[1] - originPt[1]) <= jointTol;
+    const endMatches =
+      Math.hypot(w.end[0] - originPt[0], w.end[1] - originPt[1]) <= jointTol;
+
+    if (!startMatches && !endMatches) {
+      return w;
+    }
+
+    return {
+      ...w,
+      start: startMatches ? nextPt : w.start,
+      end: endMatches ? nextPt : w.end,
+    };
+  });
 }
 
 /**
