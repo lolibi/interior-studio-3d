@@ -1,5 +1,50 @@
 export type OpeningType = 'door' | 'window';
 export type DoorSwing = 'left-in' | 'right-in' | 'left-out' | 'right-out';
+export type WallSide = 'front' | 'back';
+
+export type SurfaceTarget =
+  | { kind: 'wall'; wallId: string; side: WallSide }
+  | { kind: 'floor'; zoneId: string };
+
+export interface CustomUvwSettings {
+  tileWidthCm?: number | null;
+  tileHeightCm?: number | null;
+  rotationDeg?: number;
+  offsetXCm?: number;
+  offsetYCm?: number;
+}
+
+export function surfaceKey(target: SurfaceTarget): string {
+  return target.kind === 'wall'
+    ? `wall:${target.wallId}:${target.side}`
+    : `floor:${target.zoneId}`;
+}
+
+export function isSameSurface(
+  a: SurfaceTarget | null | undefined,
+  b: SurfaceTarget | null | undefined
+): boolean {
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'wall' && b.kind === 'wall') {
+    return a.wallId === b.wallId && a.side === b.side;
+  }
+  if (a.kind === 'floor' && b.kind === 'floor') {
+    return a.zoneId === b.zoneId;
+  }
+  return false;
+}
+
+export function toggleSurfaceInList(
+  list: SurfaceTarget[],
+  target: SurfaceTarget
+): SurfaceTarget[] {
+  const exists = list.some((item) => isSameSurface(item, target));
+  if (exists) {
+    return list.filter((item) => !isSameSurface(item, target));
+  }
+  return [...list, target];
+}
 
 export interface SavedCamera {
   id: string;
@@ -7,7 +52,7 @@ export interface SavedCamera {
   position: [number, number, number];
   target: [number, number, number];
   fov?: number;
-  isInterior?: boolean; // при true включва тавана автоматично
+  isInterior?: boolean;
 }
 
 export interface WallOpening {
@@ -18,7 +63,7 @@ export interface WallOpening {
   heightM: number;
   sillHeightM: number;
   swing?: DoorSwing;
-  frameColor?: string;      // цвят на дограмата / касата (напр. #ffffff, #383e42 антрацит)
+  frameColor?: string;
   modelId?: string | null;
 }
 
@@ -32,7 +77,7 @@ export interface StandaloneOpening {
   sillHeightM: number;
   thicknessM: number;
   swing?: DoorSwing;
-  frameColor?: string;      // цвят на дограмата / касата
+  frameColor?: string;
   modelId?: string | null;
 }
 
@@ -43,8 +88,9 @@ export interface FloorZone {
   color: string;
   roughness: number;
   metalness: number;
-  textureId?: string | null;       // ID на текстура от каталога (паркет, плочки и др.)
-  textureRotationDeg?: number;     // завъртане на шарката (0°, 45°, 90°)
+  textureId?: string | null;
+  textureRotationDeg?: number;
+  uvw?: CustomUvwSettings;
 }
 
 export interface WallSegment {
@@ -53,12 +99,14 @@ export interface WallSegment {
   end: [number, number];
   thicknessM: number;
   openings?: WallOpening[];
-  frontColor?: string;             // цвят на лице А (напр. #f8fafc)
-  frontTextureId?: string | null;  // текстура/плочки на лице А
-  frontTileHeightM?: number | null;// височина на плочките на лице А (напр. 2.40 м в баня)
-  backColor?: string;              // цвят на лице Б
-  backTextureId?: string | null;   // текстура/плочки на лице Б
-  backTileHeightM?: number | null; // височина на плочките на лице Б
+  frontColor?: string;
+  frontTextureId?: string | null;
+  frontTileHeightM?: number | null;
+  frontUvw?: CustomUvwSettings;
+  backColor?: string;
+  backTextureId?: string | null;
+  backTileHeightM?: number | null;
+  backUvw?: CustomUvwSettings;
 }
 
 export interface SelectedWallVertex {

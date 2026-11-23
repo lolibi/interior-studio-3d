@@ -11,15 +11,22 @@ import {
   PerspectiveCamera,
 } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import type { CatalogModel, SceneObject, TransformTool } from '../types/editor';
+import type {
+  CatalogModel,
+  CatalogTexture,
+  SceneObject,
+  TransformTool,
+} from '../types/editor';
 import type {
   RoomConfig,
   SelectedWallVertex,
   StandaloneOpening,
+  SurfaceTarget,
   WallSegment,
 } from '../types/room';
 import { RoomMesh } from './RoomMesh';
 import { SceneItemMesh } from './SceneItemMesh';
+import type { DiscoveredMaterialSlot } from './SceneItemMesh';
 
 export type ViewportCameraMode = '3d' | 'top';
 
@@ -30,10 +37,15 @@ interface Viewport3DProps {
   selectedOpeningId?: string | null;
   selectedStandaloneOpeningId?: string | null;
   selectedFloorZoneId?: string | null;
+  selectedSurfaces?: SurfaceTarget[];
+  draggedTextureId?: string | null;
   selectedWallVertex?: SelectedWallVertex | null;
   linkedVertexJoint?: boolean;
   autoStraightenVertices?: boolean;
   onSelectWall?: (wallId: string | null) => void;
+  onSelectSurface?: (target: SurfaceTarget, additive: boolean) => void;
+  onClearSurfaceSelection?: () => void;
+  onDropTextureOnSurface?: (target: SurfaceTarget, textureId: string) => void;
   onSelectOpening?: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening?: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
@@ -57,9 +69,14 @@ interface Viewport3DProps {
   onCalibFloorClick?: (point: [number, number]) => void;
   sceneObjects: SceneObject[];
   models: CatalogModel[];
+  textures?: CatalogTexture[];
   selectedInstanceId: string | null;
   transformTool: TransformTool;
   onSelectObject: (instanceId: string | null) => void;
+  onMaterialsDiscovered?: (
+    instanceId: string,
+    slots: DiscoveredMaterialSlot[]
+  ) => void;
   onTransformChange: (
     instanceId: string,
     position: [number, number, number],
@@ -91,7 +108,6 @@ function computeSegmentBadge(
   const midX = (p1[0] + p2[0]) / 2;
   const midZ = (p1[1] + p2[1]) / 2;
 
-  // Перпендикулярно отместване встрани от линията, за да не закрива стената
   const nx = -dz / lengthM;
   const nz = dx / lengthM;
   const offset = 0.28;
@@ -115,10 +131,15 @@ export function Viewport3D({
   selectedOpeningId = null,
   selectedStandaloneOpeningId = null,
   selectedFloorZoneId = null,
+  selectedSurfaces = [],
+  draggedTextureId = null,
   selectedWallVertex = null,
   linkedVertexJoint = true,
   autoStraightenVertices = true,
   onSelectWall,
+  onSelectSurface,
+  onClearSurfaceSelection,
+  onDropTextureOnSurface,
   onSelectOpening,
   onSelectStandaloneOpening,
   onSelectFloorZone,
@@ -138,9 +159,11 @@ export function Viewport3D({
   onCalibFloorClick,
   sceneObjects,
   models,
+  textures = [],
   selectedInstanceId,
   transformTool,
   onSelectObject,
+  onMaterialsDiscovered,
   onTransformChange,
 }: Viewport3DProps) {
   const orbitRef = useRef<OrbitControlsImpl | null>(null);
@@ -155,7 +178,6 @@ export function Viewport3D({
     const labelY = Math.max(0.25, room.ceilingHeightM + 0.15);
 
     if (isDrawingWalls && draftPoints.length > 0) {
-      // Вече кликнатите сегменти от текущата верига
       for (let i = 0; i < draftPoints.length - 1; i++) {
         const b = computeSegmentBadge(
           draftPoints[i],
@@ -167,7 +189,6 @@ export function Viewport3D({
         if (b) badges.push(b);
       }
 
-      // Активният сегмент, който се влачи в момента към курсора
       if (hoverPoint) {
         const lastPt = draftPoints[draftPoints.length - 1];
         const previewBadge = computeSegmentBadge(
@@ -223,6 +244,7 @@ export function Viewport3D({
           onSelectStandaloneOpening?.(null);
           onSelectFloorZone?.(null);
           onSelectWallVertex?.(null);
+          onClearSurfaceSelection?.();
         }
       }}
     >
@@ -303,15 +325,20 @@ export function Viewport3D({
       <RoomMesh
         room={room}
         models={models}
+        textures={textures}
         transformTool={transformTool}
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
         selectedStandaloneOpeningId={selectedStandaloneOpeningId}
         selectedFloorZoneId={selectedFloorZoneId}
+        selectedSurfaces={selectedSurfaces}
+        draggedTextureId={draggedTextureId}
         selectedWallVertex={selectedWallVertex}
         linkedVertexJoint={linkedVertexJoint}
         autoStraightenVertices={autoStraightenVertices}
         onSelectWall={(wallId) => onSelectWall?.(wallId)}
+        onSelectSurface={onSelectSurface}
+        onDropTextureOnSurface={onDropTextureOnSurface}
         onSelectOpening={(wallId, openingId) => onSelectOpening?.(wallId, openingId)}
         onSelectStandaloneOpening={(openingId) =>
           onSelectStandaloneOpening?.(openingId)
@@ -336,7 +363,6 @@ export function Viewport3D({
         onCalibFloorClick={onCalibFloorClick}
       />
 
-      {/* Живи CAD размери до чертаните стени */}
       {liveDimensionBadges.map((badge) => {
         const cm = Math.round(badge.lengthM * 100);
         return (
@@ -382,6 +408,7 @@ export function Viewport3D({
             key={obj.instanceId}
             item={obj}
             model={model}
+            textures={textures}
             isSelected={!isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId}
             transformTool={transformTool}
             onSelect={(id) => {
@@ -391,8 +418,10 @@ export function Viewport3D({
                 onSelectStandaloneOpening?.(null);
                 onSelectFloorZone?.(null);
                 onSelectWallVertex?.(null);
+                onClearSurfaceSelection?.();
               }
             }}
+            onMaterialsDiscovered={onMaterialsDiscovered}
             onTransformChange={onTransformChange}
             onDraggingChange={setIsDraggingObject}
           />

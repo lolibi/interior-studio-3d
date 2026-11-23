@@ -2,20 +2,28 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { useGLTF, TransformControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
-import type { CatalogModel, TransformTool } from '../types/editor';
+import type {
+  CatalogModel,
+  CatalogTexture,
+  TransformTool,
+} from '../types/editor';
 import {
   applyVertexMoveToWalls,
   findClosedRoomPolygons,
   getOpeningJambPoints,
   getWallJointExtensions,
+  isSameSurface,
   snapDrawingPoint,
   snapOpeningToWalls,
+  surfaceKey,
 } from '../types/room';
 import type {
+  CustomUvwSettings,
   FloorZone,
   RoomConfig,
   SelectedWallVertex,
   StandaloneOpening,
+  SurfaceTarget,
   WallOpening,
   WallSegment,
 } from '../types/room';
@@ -23,14 +31,19 @@ import type {
 interface RoomMeshProps {
   room: RoomConfig;
   models: CatalogModel[];
+  textures?: CatalogTexture[];
   selectedWallId: string | null;
   selectedOpeningId: string | null;
   selectedStandaloneOpeningId: string | null;
   selectedFloorZoneId?: string | null;
+  selectedSurfaces?: SurfaceTarget[];
+  draggedTextureId?: string | null;
   selectedWallVertex?: SelectedWallVertex | null;
   linkedVertexJoint?: boolean;
   autoStraightenVertices?: boolean;
   onSelectWall: (wallId: string | null) => void;
+  onSelectSurface?: (target: SurfaceTarget, additive: boolean) => void;
+  onDropTextureOnSurface?: (target: SurfaceTarget, textureId: string) => void;
   onSelectOpening: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
@@ -53,6 +66,116 @@ interface RoomMeshProps {
   onCalibFloorClick?: (pt: [number, number]) => void;
   transformTool: TransformTool;
   onDraggingChange: (dragging: boolean) => void;
+}
+
+const baseTextureCache = new Map<string, THREE.Texture>();
+const pendingTextureLoads = new Map<string, Promise<THREE.Texture | null>>();
+
+function loadBaseTexture(url: string): Promise<THREE.Texture | null> {
+  const existing = baseTextureCache.get(url);
+  if (existing) {
+    return Promise.resolve(existing);
+  }
+  const inflight = pendingTextureLoads.get(url);
+  if (inflight) {
+    return inflight;
+  }
+
+  const promise = new Promise<THREE.Texture | null>((resolve) => {
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    loader.load(
+      url,
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.anisotropy = 8;
+        tex.needsUpdate = true;
+        baseTextureCache.set(url, tex);
+        pendingTextureLoads.delete(url);
+        resolve(tex);
+      },
+      undefined,
+      () => {
+        pendingTextureLoads.delete(url);
+        resolve(null);
+      }
+    );
+  });
+
+  pendingTextureLoads.set(url, promise);
+  return promise;
+}
+
+function useScaledCatalogTexture(
+  textureMeta: CatalogTexture | null | undefined,
+  repeatX: number,
+  repeatY: number,
+  rotationDeg = 0,
+  offsetU = 0,
+  offsetV = 0
+): THREE.Texture | null {
+  const [baseTex, setBaseTex] = useState<THREE.Texture | null>(() =>
+    textureMeta?.mapUrl ? baseTextureCache.get(textureMeta.mapUrl) ?? null : null
+  );
+
+  useEffect(() => {
+    if (!textureMeta?.mapUrl) {
+      setBaseTex(null);
+      return;
+    }
+    let cancelled = false;
+    loadBaseTexture(textureMeta.mapUrl).then((loaded) => {
+      if (!cancelled) {
+        setBaseTex(loaded);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [textureMeta?.mapUrl]);
+
+  const clonedTex = useMemo(() => {
+    if (!baseTex || !textureMeta) return null;
+    const clone = baseTex.clone();
+    clone.wrapS = THREE.RepeatWrapping;
+    clone.wrapT = THREE.RepeatWrapping;
+    clone.repeat.set(Math.max(0.01, repeatX), Math.max(0.01, repeatY));
+    clone.offset.set(offsetU, offsetV);
+    clone.center.set(0.5, 0.5);
+    clone.rotation = (rotationDeg * Math.PI) / 180;
+    clone.needsUpdate = true;
+    return clone;
+  }, [baseTex, textureMeta, repeatX, repeatY, rotationDeg, offsetU, offsetV]);
+
+  useEffect(() => {
+    return () => {
+      if (clonedTex) clonedTex.dispose();
+    };
+  }, [clonedTex]);
+
+  return clonedTex;
+}
+
+function resolveEffectiveTileMeters(
+  textureMeta: CatalogTexture | null | undefined,
+  uvw?: CustomUvwSettings
+): { tileWM: number; tileHM: number; rotDeg: number; offU: number; offV: number } {
+  const baseWM = textureMeta ? Math.max(0.05, textureMeta.tileWidthM) : 0.6;
+  const baseHM = textureMeta ? Math.max(0.05, textureMeta.tileHeightM) : 0.6;
+
+  const tileWM =
+    uvw?.tileWidthCm && uvw.tileWidthCm > 1 ? uvw.tileWidthCm / 100 : baseWM;
+  const tileHM =
+    uvw?.tileHeightCm && uvw.tileHeightCm > 1 ? uvw.tileHeightCm / 100 : baseHM;
+  const rotDeg = uvw?.rotationDeg ?? 0;
+
+  // Изместване в брой плочки спрямо зададените сантиметри
+  const offU = uvw?.offsetXCm ? uvw.offsetXCm / 100 / tileWM : 0;
+  const offV = uvw?.offsetYCm ? uvw.offsetYCm / 100 / tileHM : 0;
+
+  return { tileWM, tileHM, rotDeg, offU, offV };
 }
 
 function OpeningGlbModel({
@@ -102,6 +225,7 @@ function renderStandardOpeningGeometry(
   heightM: number,
   thicknessM: number,
   swing: string | undefined,
+  frameColor: string | undefined,
   isSelected: boolean
 ) {
   const frameThickness = 0.045;
@@ -110,15 +234,18 @@ function renderStandardOpeningGeometry(
   if (type === 'window') {
     const sashThickness = 0.03;
     const glassThickness = 0.012;
+    const winFrameColor = isSelected ? '#38bdf8' : frameColor || '#e2e8f0';
+    const sillColor = isSelected ? '#38bdf8' : frameColor || '#f1f5f9';
+
     return (
       <group position={[0, heightM / 2, 0]}>
         <mesh position={[0, heightM / 2 - frameThickness / 2, 0]} castShadow receiveShadow>
           <boxGeometry args={[widthM, frameThickness, frameDepth]} />
-          <meshStandardMaterial color={isSelected ? '#38bdf8' : '#e2e8f0'} roughness={0.5} />
+          <meshStandardMaterial color={winFrameColor} roughness={0.45} />
         </mesh>
         <mesh position={[0, -heightM / 2 + frameThickness / 2, 0]} castShadow receiveShadow>
           <boxGeometry args={[widthM, frameThickness, frameDepth + 0.03]} />
-          <meshStandardMaterial color={isSelected ? '#38bdf8' : '#f1f5f9'} roughness={0.45} />
+          <meshStandardMaterial color={sillColor} roughness={0.45} />
         </mesh>
         <mesh
           position={[-widthM / 2 + frameThickness / 2, 0, 0]}
@@ -126,7 +253,7 @@ function renderStandardOpeningGeometry(
           receiveShadow
         >
           <boxGeometry args={[frameThickness, heightM - frameThickness * 2, frameDepth]} />
-          <meshStandardMaterial color={isSelected ? '#38bdf8' : '#e2e8f0'} roughness={0.5} />
+          <meshStandardMaterial color={winFrameColor} roughness={0.45} />
         </mesh>
         <mesh
           position={[widthM / 2 - frameThickness / 2, 0, 0]}
@@ -134,11 +261,11 @@ function renderStandardOpeningGeometry(
           receiveShadow
         >
           <boxGeometry args={[frameThickness, heightM - frameThickness * 2, frameDepth]} />
-          <meshStandardMaterial color={isSelected ? '#38bdf8' : '#e2e8f0'} roughness={0.5} />
+          <meshStandardMaterial color={winFrameColor} roughness={0.45} />
         </mesh>
         <mesh position={[0, 0, 0]} castShadow receiveShadow>
           <boxGeometry args={[sashThickness, heightM - frameThickness * 2, sashThickness]} />
-          <meshStandardMaterial color="#cbd5e1" roughness={0.5} />
+          <meshStandardMaterial color={winFrameColor} roughness={0.45} />
         </mesh>
         <mesh position={[0, 0, 0]}>
           <boxGeometry
@@ -171,6 +298,9 @@ function renderStandardOpeningGeometry(
   const leafCenterOffsetX = isRightHinge ? -leafWidth / 2 : leafWidth / 2;
   const swingAngle = (isOutward ? -1 : 1) * (isRightHinge ? -0.42 : 0.42);
 
+  const doorJambColor = isSelected ? '#38bdf8' : frameColor || '#94a3b8';
+  const doorLeafColor = isSelected ? '#38bdf8' : frameColor || '#cbd5e1';
+
   return (
     <group>
       <mesh
@@ -179,7 +309,7 @@ function renderStandardOpeningGeometry(
         receiveShadow
       >
         <boxGeometry args={[frameThickness, heightM, frameDepth]} />
-        <meshStandardMaterial color={isSelected ? '#38bdf8' : '#94a3b8'} roughness={0.6} />
+        <meshStandardMaterial color={doorJambColor} roughness={0.55} />
       </mesh>
       <mesh
         position={[widthM / 2 - frameThickness / 2, heightM / 2, 0]}
@@ -187,7 +317,7 @@ function renderStandardOpeningGeometry(
         receiveShadow
       >
         <boxGeometry args={[frameThickness, heightM, frameDepth]} />
-        <meshStandardMaterial color={isSelected ? '#38bdf8' : '#94a3b8'} roughness={0.6} />
+        <meshStandardMaterial color={doorJambColor} roughness={0.55} />
       </mesh>
       <mesh
         position={[0, heightM - frameThickness / 2, 0]}
@@ -195,15 +325,12 @@ function renderStandardOpeningGeometry(
         receiveShadow
       >
         <boxGeometry args={[widthM, frameThickness, frameDepth]} />
-        <meshStandardMaterial color={isSelected ? '#38bdf8' : '#94a3b8'} roughness={0.6} />
+        <meshStandardMaterial color={doorJambColor} roughness={0.55} />
       </mesh>
       <group position={[hingeX, 0.01, 0]} rotation={[0, swingAngle, 0]}>
         <mesh position={[leafCenterOffsetX, leafHeight / 2, 0]} castShadow receiveShadow>
           <boxGeometry args={[leafWidth, leafHeight, leafThickness]} />
-          <meshStandardMaterial
-            color={isSelected ? '#38bdf8' : '#cbd5e1'}
-            roughness={0.55}
-          />
+          <meshStandardMaterial color={doorLeafColor} roughness={0.5} />
         </mesh>
       </group>
     </group>
@@ -246,6 +373,7 @@ function projectStandaloneOpeningOntoWall(
     heightM: op.heightM,
     sillHeightM: op.type === 'window' ? op.sillHeightM : 0,
     swing: op.swing,
+    frameColor: op.frameColor,
     modelId: op.modelId,
   };
 }
@@ -317,6 +445,7 @@ function StandaloneOpeningItem({
             opening.heightM,
             opening.thicknessM,
             opening.swing,
+            opening.frameColor,
             isSelected
           )
         )}
@@ -692,8 +821,15 @@ function FloorZonePolygonMesh({
   opacity,
   yOffset,
   polygonOffsetFactor = -1,
+  textureMeta = null,
+  uvw,
+  legacyRotationDeg = 0,
   isSelected,
+  isDropHovered = false,
   onClick,
+  onPointerOver,
+  onPointerOut,
+  onPointerUp,
 }: {
   points: [number, number][];
   color: string;
@@ -702,9 +838,40 @@ function FloorZonePolygonMesh({
   opacity: number;
   yOffset: number;
   polygonOffsetFactor?: number;
+  textureMeta?: CatalogTexture | null;
+  uvw?: CustomUvwSettings;
+  legacyRotationDeg?: number;
   isSelected: boolean;
+  isDropHovered?: boolean;
   onClick?: (e: ThreeEvent<MouseEvent>) => void;
+  onPointerOver?: (e: ThreeEvent<PointerEvent>) => void;
+  onPointerOut?: (e: ThreeEvent<PointerEvent>) => void;
+  onPointerUp?: (e: ThreeEvent<PointerEvent>) => void;
 }) {
+  const mergedUvw: CustomUvwSettings = useMemo(
+    () => ({
+      ...uvw,
+      rotationDeg: uvw?.rotationDeg ?? legacyRotationDeg,
+    }),
+    [uvw, legacyRotationDeg]
+  );
+
+  const { tileWM, tileHM, rotDeg, offU, offV } = resolveEffectiveTileMeters(
+    textureMeta,
+    mergedUvw
+  );
+
+  const repeatX = textureMeta ? 1 / tileWM : 1;
+  const repeatY = textureMeta ? 1 / tileHM : 1;
+  const mappedTexture = useScaledCatalogTexture(
+    textureMeta,
+    repeatX,
+    repeatY,
+    rotDeg,
+    offU,
+    offV
+  );
+
   const geometry = useMemo(() => {
     if (points.length < 3) return null;
     const shape = new THREE.Shape();
@@ -727,17 +894,33 @@ function FloorZonePolygonMesh({
 
   if (!geometry) return null;
 
+  const effectiveRoughness = textureMeta ? textureMeta.roughness : roughness;
+  const effectiveMetalness = textureMeta ? textureMeta.metalness : metalness;
+
+  const highlightColor = isDropHovered
+    ? '#34d399'
+    : isSelected
+      ? '#38bdf8'
+      : mappedTexture
+        ? '#ffffff'
+        : color;
+
   return (
     <mesh
       geometry={geometry}
       position={[0, yOffset, 0]}
       receiveShadow
       onClick={onClick}
+      onPointerOver={onPointerOver}
+      onPointerOut={onPointerOut}
+      onPointerUp={onPointerUp}
     >
       <meshStandardMaterial
-        color={isSelected ? '#38bdf8' : color}
-        roughness={roughness}
-        metalness={metalness}
+        key={mappedTexture ? `tex-${textureMeta?.id}` : 'solid-floor'}
+        map={mappedTexture ?? undefined}
+        color={highlightColor}
+        roughness={effectiveRoughness}
+        metalness={effectiveMetalness}
         transparent={opacity < 1}
         opacity={opacity}
         polygonOffset
@@ -749,18 +932,207 @@ function FloorZonePolygonMesh({
   );
 }
 
+type SolidSpan = {
+  startM: number;
+  endM: number;
+  bottomY: number;
+  topY: number;
+};
+
+function WallFaceSpanMesh({
+  segLen,
+  segHeight,
+  localX,
+  localY,
+  zOffset,
+  rotY,
+  color,
+  textureMeta,
+  uvw,
+  isSelected,
+  isDropHovered,
+}: {
+  segLen: number;
+  segHeight: number;
+  localX: number;
+  localY: number;
+  zOffset: number;
+  rotY: number;
+  color: string;
+  textureMeta: CatalogTexture | null;
+  uvw?: CustomUvwSettings;
+  isSelected: boolean;
+  isDropHovered: boolean;
+}) {
+  const { tileWM, tileHM, rotDeg, offU, offV } = resolveEffectiveTileMeters(
+    textureMeta,
+    uvw
+  );
+  const repeatX = textureMeta ? segLen / tileWM : 1;
+  const repeatY = textureMeta ? segHeight / tileHM : 1;
+  const tex = useScaledCatalogTexture(
+    textureMeta,
+    repeatX,
+    repeatY,
+    rotDeg,
+    offU,
+    offV
+  );
+
+  const tintColor = isDropHovered
+    ? '#34d399'
+    : isSelected
+      ? '#7dd3fc'
+      : tex
+        ? '#ffffff'
+        : color;
+
+  return (
+    <mesh
+      position={[localX, localY, zOffset]}
+      rotation={[0, rotY, 0]}
+      receiveShadow
+    >
+      <planeGeometry args={[segLen, segHeight]} />
+      <meshStandardMaterial
+        key={tex ? `wtex-${textureMeta?.id}` : 'wsolid'}
+        map={tex ?? undefined}
+        color={tintColor}
+        roughness={textureMeta ? textureMeta.roughness : 0.78}
+        metalness={textureMeta ? textureMeta.metalness : 0.04}
+        polygonOffset
+        polygonOffsetFactor={isSelected || isDropHovered ? -4 : -1}
+        polygonOffsetUnits={-1}
+      />
+    </mesh>
+  );
+}
+
+function WallFaceOverlay({
+  spans,
+  length,
+  zOffset,
+  rotY,
+  baseColor,
+  textureMeta,
+  tileHeightM,
+  uvw,
+  isSelected,
+  isDropHovered,
+  onClick,
+  onPointerOver,
+  onPointerOut,
+  onPointerUp,
+}: {
+  spans: SolidSpan[];
+  length: number;
+  zOffset: number;
+  rotY: number;
+  baseColor: string;
+  textureMeta: CatalogTexture | null;
+  tileHeightM?: number | null;
+  uvw?: CustomUvwSettings;
+  isSelected: boolean;
+  isDropHovered: boolean;
+  onClick: (e: ThreeEvent<MouseEvent>) => void;
+  onPointerOver?: (e: ThreeEvent<PointerEvent>) => void;
+  onPointerOut?: (e: ThreeEvent<PointerEvent>) => void;
+  onPointerUp?: (e: ThreeEvent<PointerEvent>) => void;
+}) {
+  const splitHeight =
+    textureMeta && tileHeightM && tileHeightM > 0.05 ? tileHeightM : null;
+
+  return (
+    <group
+      onClick={onClick}
+      onPointerOver={onPointerOver}
+      onPointerOut={onPointerOut}
+      onPointerUp={onPointerUp}
+    >
+      {spans.map((sp, idx) => {
+        const segLen = sp.endM - sp.startM;
+        const localX = (sp.startM + sp.endM) / 2 - length / 2;
+
+        if (splitHeight !== null && sp.bottomY < splitHeight && sp.topY > splitHeight) {
+          const lowerH = splitHeight - sp.bottomY;
+          const upperH = sp.topY - splitHeight;
+          return (
+            <group key={`face-split-${idx}`}>
+              <WallFaceSpanMesh
+                segLen={segLen}
+                segHeight={lowerH}
+                localX={localX}
+                localY={sp.bottomY + lowerH / 2}
+                zOffset={zOffset}
+                rotY={rotY}
+                color={baseColor}
+                textureMeta={textureMeta}
+                uvw={uvw}
+                isSelected={isSelected}
+                isDropHovered={isDropHovered}
+              />
+              <WallFaceSpanMesh
+                segLen={segLen}
+                segHeight={upperH}
+                localX={localX}
+                localY={splitHeight + upperH / 2}
+                zOffset={zOffset}
+                rotY={rotY}
+                color={baseColor}
+                textureMeta={null}
+                isSelected={isSelected}
+                isDropHovered={isDropHovered}
+              />
+            </group>
+          );
+        }
+
+        const isBelowTileLimit =
+          splitHeight === null ? true : sp.topY <= splitHeight + 0.005;
+
+        const segHeight = sp.topY - sp.bottomY;
+        const localY = sp.bottomY + segHeight / 2;
+
+        return (
+          <WallFaceSpanMesh
+            key={`face-span-${idx}`}
+            segLen={segLen}
+            segHeight={segHeight}
+            localX={localX}
+            localY={localY}
+            zOffset={zOffset}
+            rotY={rotY}
+            color={baseColor}
+            textureMeta={isBelowTileLimit ? textureMeta : null}
+            uvw={isBelowTileLimit ? uvw : undefined}
+            isSelected={isSelected}
+            isDropHovered={isDropHovered}
+          />
+        );
+      })}
+    </group>
+  );
+}
+
 function WallSegmentItem({
   wall,
   allWalls,
   standaloneOpenings,
   ceilingHeightM,
   models,
-  isSelected,
+  texturesById,
+  isWallSelected,
+  isFrontFaceSelected,
+  isBackFaceSelected,
+  hoveredDropKey,
+  draggedTextureId,
   selectedOpeningId,
   isDrawingWalls,
   isDrawingFloorZone,
   isCalibratingPlan,
-  onSelectWall,
+  onSelectWallFace,
+  onHoverDropTarget,
+  onDropTextureOnTarget,
   onSelectOpening,
 }: {
   wall: WallSegment;
@@ -768,12 +1140,19 @@ function WallSegmentItem({
   standaloneOpenings: StandaloneOpening[];
   ceilingHeightM: number;
   models: CatalogModel[];
-  isSelected: boolean;
+  texturesById: Map<string, CatalogTexture>;
+  isWallSelected: boolean;
+  isFrontFaceSelected: boolean;
+  isBackFaceSelected: boolean;
+  hoveredDropKey: string | null;
+  draggedTextureId: string | null;
   selectedOpeningId: string | null;
   isDrawingWalls: boolean;
   isDrawingFloorZone: boolean;
   isCalibratingPlan: boolean;
-  onSelectWall: () => void;
+  onSelectWallFace: (side: 'front' | 'back', additive: boolean) => void;
+  onHoverDropTarget: (key: string | null) => void;
+  onDropTextureOnTarget: (target: SurfaceTarget) => void;
   onSelectOpening: (openingId: string) => void;
 }) {
   const dx = wall.end[0] - wall.start[0];
@@ -832,14 +1211,19 @@ function WallSegmentItem({
     .filter((op) => op.widthM > 0.02)
     .sort((a, b) => a.offsetFromStartM - b.offsetFromStartM);
 
-  const wallColor = isSelected ? '#38bdf8' : '#e2e8f0';
+  const coreColor =
+    isWallSelected && !isFrontFaceSelected && !isBackFaceSelected
+      ? '#93c5fd'
+      : '#e2e8f0';
 
-  type SolidSpan = {
-    startM: number;
-    endM: number;
-    bottomY: number;
-    topY: number;
-  };
+  const frontColor = wall.frontColor || '#f1f5f9';
+  const backColor = wall.backColor || '#f1f5f9';
+  const frontTex = wall.frontTextureId
+    ? texturesById.get(wall.frontTextureId) ?? null
+    : null;
+  const backTex = wall.backTextureId
+    ? texturesById.get(wall.backTextureId) ?? null
+    : null;
 
   const spans: SolidSpan[] = [];
   let cursorM = 0;
@@ -885,16 +1269,24 @@ function WallSegmentItem({
     });
   }
 
+  const frontTarget: SurfaceTarget = {
+    kind: 'wall',
+    wallId: wall.id,
+    side: 'front',
+  };
+  const backTarget: SurfaceTarget = {
+    kind: 'wall',
+    wallId: wall.id,
+    side: 'back',
+  };
+  const frontKey = surfaceKey(frontTarget);
+  const backKey = surfaceKey(backTarget);
+
+  const isBusy = isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
+
   return (
-    <group
-      position={[centerX, 0, centerZ]}
-      rotation={[0, -angleRad, 0]}
-      onClick={(e: ThreeEvent<MouseEvent>) => {
-        if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
-        e.stopPropagation();
-        onSelectWall();
-      }}
-    >
+    <group position={[centerX, 0, centerZ]} rotation={[0, -angleRad, 0]}>
+      {/* Сърцевина на стената (ръбове и дебелина) */}
       {spans.map((sp, idx) => {
         const segLen = sp.endM - sp.startM;
         const segHeight = sp.topY - sp.bottomY;
@@ -907,19 +1299,92 @@ function WallSegmentItem({
             position={[localX, localY, 0]}
             castShadow
             receiveShadow
+            onClick={(e: ThreeEvent<MouseEvent>) => {
+              if (isBusy) return;
+              e.stopPropagation();
+              // Определяме от коя страна на стената е кликнал потребителят по нормалата
+              const nz = e.face?.normal?.z ?? 1;
+              const side: 'front' | 'back' = nz < 0 ? 'back' : 'front';
+              onSelectWallFace(side, Boolean(e.shiftKey));
+            }}
           >
             <boxGeometry args={[segLen, segHeight, thickness]} />
             <meshStandardMaterial
-              color={wallColor}
+              color={coreColor}
               roughness={0.75}
               metalness={0.05}
-              polygonOffset={isSelected}
-              polygonOffsetFactor={isSelected ? -3 : 0}
-              polygonOffsetUnits={isSelected ? -3 : 0}
             />
           </mesh>
         );
       })}
+
+      {/* Лице А (+Z) — директно кликаемо и приемащо Drag & Drop */}
+      <WallFaceOverlay
+        spans={spans}
+        length={length}
+        zOffset={thickness / 2 + 0.002}
+        rotY={0}
+        baseColor={frontColor}
+        textureMeta={frontTex}
+        tileHeightM={wall.frontTileHeightM}
+        uvw={wall.frontUvw}
+        isSelected={isFrontFaceSelected}
+        isDropHovered={hoveredDropKey === frontKey}
+        onClick={(e) => {
+          if (isBusy) return;
+          e.stopPropagation();
+          onSelectWallFace('front', Boolean(e.shiftKey));
+        }}
+        onPointerOver={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          onHoverDropTarget(frontKey);
+        }}
+        onPointerOut={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          if (hoveredDropKey === frontKey) onHoverDropTarget(null);
+        }}
+        onPointerUp={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          onDropTextureOnTarget(frontTarget);
+        }}
+      />
+
+      {/* Лице Б (-Z) — директно кликаемо и приемащо Drag & Drop */}
+      <WallFaceOverlay
+        spans={spans}
+        length={length}
+        zOffset={-(thickness / 2 + 0.002)}
+        rotY={Math.PI}
+        baseColor={backColor}
+        textureMeta={backTex}
+        tileHeightM={wall.backTileHeightM}
+        uvw={wall.backUvw}
+        isSelected={isBackFaceSelected}
+        isDropHovered={hoveredDropKey === backKey}
+        onClick={(e) => {
+          if (isBusy) return;
+          e.stopPropagation();
+          onSelectWallFace('back', Boolean(e.shiftKey));
+        }}
+        onPointerOver={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          onHoverDropTarget(backKey);
+        }}
+        onPointerOut={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          if (hoveredDropKey === backKey) onHoverDropTarget(null);
+        }}
+        onPointerUp={(e) => {
+          if (!draggedTextureId) return;
+          e.stopPropagation();
+          onDropTextureOnTarget(backTarget);
+        }}
+      />
 
       {(wall.openings ?? []).map((op) => {
         const localX = op.offsetFromStartM + op.widthM / 2 - length / 2;
@@ -933,7 +1398,7 @@ function WallSegmentItem({
             key={op.id}
             position={[localX, op.sillHeightM, 0]}
             onClick={(e: ThreeEvent<MouseEvent>) => {
-              if (isDrawingWalls || isDrawingFloorZone || isCalibratingPlan) return;
+              if (isBusy) return;
               e.stopPropagation();
               onSelectOpening(op.id);
             }}
@@ -952,6 +1417,7 @@ function WallSegmentItem({
                 op.heightM,
                 thickness,
                 op.swing,
+                op.frameColor,
                 isOpSelected
               )
             )}
@@ -965,14 +1431,19 @@ function WallSegmentItem({
 export function RoomMesh({
   room,
   models,
+  textures = [],
   selectedWallId,
   selectedOpeningId,
   selectedStandaloneOpeningId,
   selectedFloorZoneId,
+  selectedSurfaces = [],
+  draggedTextureId = null,
   selectedWallVertex = null,
   linkedVertexJoint = true,
   autoStraightenVertices = true,
   onSelectWall,
+  onSelectSurface,
+  onDropTextureOnSurface,
   onSelectOpening,
   onSelectStandaloneOpening,
   onSelectFloorZone,
@@ -995,6 +1466,18 @@ export function RoomMesh({
 }: RoomMeshProps) {
   const [liveOpening, setLiveOpening] = useState<StandaloneOpening | null>(null);
   const [liveWalls, setLiveWalls] = useState<WallSegment[] | null>(null);
+  const [hoveredDropKey, setHoveredDropKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!draggedTextureId) {
+      setHoveredDropKey(null);
+    }
+  }, [draggedTextureId]);
+
+  const texturesById = useMemo(
+    () => new Map(textures.map((t) => [t.id, t])),
+    [textures]
+  );
 
   useEffect(() => {
     setLiveOpening(null);
@@ -1168,45 +1651,120 @@ export function RoomMesh({
         />
       ))}
 
-      {floorZones.map((zone, idx) => (
-        <FloorZonePolygonMesh
-          key={zone.id}
-          points={zone.points}
-          color={zone.color || '#b08968'}
-          roughness={zone.roughness ?? 0.55}
-          metalness={zone.metalness ?? 0.05}
-          opacity={0.95}
-          yOffset={0.015 + idx * 0.0015}
-          polygonOffsetFactor={-10 - idx}
-          isSelected={selectedFloorZoneId === zone.id}
-          onClick={(e) => {
-            if (isAnyDrawMode || isCalibratingPlan) return;
-            e.stopPropagation();
-            onSelectFloorZone?.(zone.id);
-            onSelectWall(null);
-            onSelectStandaloneOpening(null);
-            onSelectWallVertex?.(null);
-          }}
-        />
-      ))}
+      {/* Таван над затворените помещения (активира се при изглед Отвътре / с таван) */}
+      {room.showCeiling &&
+        autoPolygons.map((poly, idx) => (
+          <FloorZonePolygonMesh
+            key={`ceiling-${idx}`}
+            points={poly}
+            color={room.ceilingColor || '#f8fafc'}
+            roughness={0.85}
+            metalness={0.02}
+            opacity={1}
+            yOffset={room.ceilingHeightM}
+            polygonOffsetFactor={-1}
+            isSelected={false}
+          />
+        ))}
 
-      {effectiveWalls.map((wall) => (
-        <WallSegmentItem
-          key={wall.id}
-          wall={wall}
-          allWalls={effectiveWalls}
-          standaloneOpenings={effectiveStandaloneOpenings}
-          ceilingHeightM={room.ceilingHeightM}
-          models={models}
-          isSelected={selectedWallId === wall.id}
-          selectedOpeningId={selectedOpeningId}
-          isDrawingWalls={isDrawingWalls}
-          isDrawingFloorZone={isDrawingFloorZone}
-          isCalibratingPlan={isCalibratingPlan}
-          onSelectWall={() => onSelectWall(wall.id)}
-          onSelectOpening={(opId) => onSelectOpening(wall.id, opId)}
-        />
-      ))}
+      {floorZones.map((zone, idx) => {
+        const texMeta = zone.textureId
+          ? texturesById.get(zone.textureId) ?? null
+          : null;
+        const zoneTarget: SurfaceTarget = { kind: 'floor', zoneId: zone.id };
+        const zoneKey = surfaceKey(zoneTarget);
+        const isZoneSelected =
+          selectedFloorZoneId === zone.id ||
+          selectedSurfaces.some((s) => isSameSurface(s, zoneTarget));
+
+        return (
+          <FloorZonePolygonMesh
+            key={zone.id}
+            points={zone.points}
+            color={zone.color || '#b08968'}
+            roughness={zone.roughness ?? 0.55}
+            metalness={zone.metalness ?? 0.05}
+            opacity={1}
+            yOffset={0.015 + idx * 0.0015}
+            polygonOffsetFactor={-10 - idx}
+            textureMeta={texMeta}
+            uvw={zone.uvw}
+            legacyRotationDeg={zone.textureRotationDeg ?? 0}
+            isSelected={isZoneSelected}
+            isDropHovered={hoveredDropKey === zoneKey}
+            onClick={(e) => {
+              if (isAnyDrawMode || isCalibratingPlan) return;
+              e.stopPropagation();
+              if (onSelectSurface) {
+                onSelectSurface(zoneTarget, Boolean(e.shiftKey));
+              } else {
+                onSelectFloorZone?.(zone.id);
+              }
+            }}
+            onPointerOver={(e) => {
+              if (!draggedTextureId) return;
+              e.stopPropagation();
+              setHoveredDropKey(zoneKey);
+            }}
+            onPointerOut={(e) => {
+              if (!draggedTextureId) return;
+              e.stopPropagation();
+              if (hoveredDropKey === zoneKey) setHoveredDropKey(null);
+            }}
+            onPointerUp={(e) => {
+              if (!draggedTextureId) return;
+              e.stopPropagation();
+              setHoveredDropKey(null);
+              onDropTextureOnSurface?.(zoneTarget, draggedTextureId);
+            }}
+          />
+        );
+      })}
+
+      {effectiveWalls.map((wall) => {
+        const isFrontSelected = selectedSurfaces.some((s) =>
+          isSameSurface(s, { kind: 'wall', wallId: wall.id, side: 'front' })
+        );
+        const isBackSelected = selectedSurfaces.some((s) =>
+          isSameSurface(s, { kind: 'wall', wallId: wall.id, side: 'back' })
+        );
+
+        return (
+          <WallSegmentItem
+            key={wall.id}
+            wall={wall}
+            allWalls={effectiveWalls}
+            standaloneOpenings={effectiveStandaloneOpenings}
+            ceilingHeightM={room.ceilingHeightM}
+            models={models}
+            texturesById={texturesById}
+            isWallSelected={selectedWallId === wall.id}
+            isFrontFaceSelected={isFrontSelected}
+            isBackFaceSelected={isBackSelected}
+            hoveredDropKey={hoveredDropKey}
+            draggedTextureId={draggedTextureId}
+            selectedOpeningId={selectedOpeningId}
+            isDrawingWalls={isDrawingWalls}
+            isDrawingFloorZone={isDrawingFloorZone}
+            isCalibratingPlan={isCalibratingPlan}
+            onSelectWallFace={(side, additive) => {
+              if (onSelectSurface) {
+                onSelectSurface({ kind: 'wall', wallId: wall.id, side }, additive);
+              } else {
+                onSelectWall(wall.id);
+              }
+            }}
+            onHoverDropTarget={setHoveredDropKey}
+            onDropTextureOnTarget={(target) => {
+              setHoveredDropKey(null);
+              if (draggedTextureId) {
+                onDropTextureOnSurface?.(target, draggedTextureId);
+              }
+            }}
+            onSelectOpening={(opId) => onSelectOpening(wall.id, opId)}
+          />
+        );
+      })}
 
       {!isAnyDrawMode && !isCalibratingPlan && (
         <WallVertexHandlesAndPivot

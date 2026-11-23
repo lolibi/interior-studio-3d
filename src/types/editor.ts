@@ -1,21 +1,36 @@
 import type { RoomConfig } from './room';
 
 export type ModelCategory =
-  | 'living_room'
   | 'sofas'
+  | 'armchairs'
   | 'chairs'
   | 'tables'
   | 'beds'
-  | 'storage'
+  | 'wardrobes'
+  | 'kitchen'
   | 'lighting'
-  | 'decor';
+  | 'bathroom'
+  | 'decor'
+  | 'doors'
+  | 'windows';
 
-export type TextureCategory = 'floor' | 'tiles' | 'wall' | 'furniture';
+export const CATEGORY_LABELS: Record<ModelCategory, string> = {
+  sofas: 'Дивани',
+  armchairs: 'Фотьойли',
+  chairs: 'Столове',
+  tables: 'Маси',
+  beds: 'Легла',
+  wardrobes: 'Гардероби и шкафове',
+  kitchen: 'Кухня',
+  lighting: 'Осветление',
+  bathroom: 'Баня',
+  decor: 'Декор',
+  doors: 'Врати',
+  windows: 'Прозорци',
+};
 
 export type ScaleMode = 'fixed' | 'constrained' | 'free';
-
 export type TransformTool = 'translate' | 'rotate' | 'scale';
-
 export type DisplayUnit = 'cm' | 'm';
 
 export interface DimensionsCm {
@@ -32,75 +47,92 @@ export interface ScaleConstraints {
   maxCm: DimensionsCm;
 }
 
+export interface MaterialOverride {
+  color: string;
+  textureId?: string | null;
+  roughness?: number;
+  metalness?: number;
+}
+
 export interface CatalogModel {
   id: string;
   name: string;
   category: ModelCategory;
+  glbUrl?: string;
+  glbFileKey?: string;
+  previewUrl?: string;
   dimensionsCm: DimensionsCm;
   scaleMode: ScaleMode;
   scaleConstraints: ScaleConstraints;
-  glbUrl?: string | null;
-  previewUrl?: string | null;
-  glbStorageKey?: string | null;
-  previewDataUrl?: string | null;
+  colorHex?: string;
   isActive: boolean;
+  isBuiltIn?: boolean;
+  isCustomPreset?: boolean;
+  defaultMaterialOverrides?: Record<string, MaterialOverride>;
 }
 
 export interface CreateModelInput {
   name: string;
   category: ModelCategory;
+  glbUrl?: string;
+  previewUrl?: string;
   dimensionsCm: DimensionsCm;
   scaleMode: ScaleMode;
   scaleConstraints: ScaleConstraints;
-  glbUrl: string;
-  previewUrl: string;
+  colorHex?: string;
   isActive: boolean;
 }
+
+export type TextureCategory = 'wall' | 'floor' | 'tiles' | 'furniture';
+
+export const TEXTURE_CATEGORY_LABELS: Record<TextureCategory, string> = {
+  wall: 'Стени / Тапети',
+  floor: 'Подове / Паркет',
+  tiles: 'Плочки / Гранитогрес',
+  furniture: 'Мебели / Текстил',
+};
 
 export interface CatalogTexture {
   id: string;
   name: string;
   category: TextureCategory;
   mapUrl: string;
+  normalUrl?: string;
+  roughnessUrl?: string;
   tileWidthM: number;
   tileHeightM: number;
-  roughness: number;
-  metalness: number;
-  isActive: boolean;
+  roughness?: number;
+  metalness?: number;
+  isActive?: boolean;
 }
 
 export interface CreateTextureInput {
   name: string;
   category: TextureCategory;
   mapUrl: string;
+  normalUrl?: string;
+  roughnessUrl?: string;
   tileWidthM: number;
   tileHeightM: number;
-  roughness: number;
-  metalness: number;
-  isActive: boolean;
-}
-
-export interface MaterialOverride {
-  color?: string;
-  textureId?: string | null;
+  roughness?: number;
+  metalness?: number;
+  isActive?: boolean;
 }
 
 export interface SceneObject {
   instanceId: string;
   modelId: string;
-  name: string;
+  name?: string;
   position: [number, number, number];
   rotation: [number, number, number];
   scale: [number, number, number];
   mirrored?: boolean;
-  materialOverrides?: Record<string, MaterialOverride>; // ключ = името на материала в .glb модела
+  materialOverrides?: Record<string, MaterialOverride>;
 }
 
 export interface SavedSceneSummary {
   id: string;
   title: string;
-  created_at?: string;
-  updated_at?: string;
   updatedAt?: string;
 }
 
@@ -109,25 +141,5 @@ export interface SavedScene {
   title: string;
   objects: SceneObject[];
   room?: RoomConfig;
-  created_at?: string;
-  updated_at?: string;
   updatedAt?: string;
 }
-
-export const CATEGORY_LABELS: Record<ModelCategory, string> = {
-  living_room: 'Хол и дневна',
-  sofas: 'Дивани и кресла',
-  chairs: 'Столове',
-  tables: 'Маси',
-  beds: 'Легла и спалня',
-  storage: 'Шкафове и гардероби',
-  lighting: 'Осветление',
-  decor: 'Декор и аксесоари',
-};
-
-export const TEXTURE_CATEGORY_LABELS: Record<TextureCategory, string> = {
-  floor: 'Паркет и подови настилки',
-  tiles: 'Плочки (баня / кухня / под)',
-  wall: 'Стени и мазилки',
-  furniture: 'Мебели, дърво и дамаски',
-};

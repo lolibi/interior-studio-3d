@@ -1,20 +1,42 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { TransformControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
 import type {
   CatalogModel,
+  CatalogTexture,
   SceneObject,
   TransformTool,
 } from '../types/editor';
 import { loadGlbFromUrl } from '../utils/gltfLoader';
 
+export interface DiscoveredMaterialSlot {
+  key: string;
+  label: string;
+  defaultColorHex: string;
+}
+
+interface OriginalMaterialBackup {
+  colorHex: string;
+  map: THREE.Texture | null;
+  roughness: number;
+  metalness: number;
+}
+
+type MaterialSlotMap = Map<string, THREE.MeshStandardMaterial[]>;
+type MaterialBackupMap = Map<string, OriginalMaterialBackup>;
+
 interface SceneItemMeshProps {
   item: SceneObject;
   model: CatalogModel;
+  textures?: CatalogTexture[];
   isSelected: boolean;
   transformTool: TransformTool;
   onSelect: (instanceId: string) => void;
+  onMaterialsDiscovered?: (
+    instanceId: string,
+    slots: DiscoveredMaterialSlot[]
+  ) => void;
   onTransformChange: (
     instanceId: string,
     position: [number, number, number],
@@ -24,18 +46,49 @@ interface SceneItemMeshProps {
   onDraggingChange: (isDragging: boolean) => void;
 }
 
+const itemTextureCache = new Map<string, THREE.Texture>();
+
+function getOrLoadItemTexture(url: string): Promise<THREE.Texture | null> {
+  const cached = itemTextureCache.get(url);
+  if (cached) return Promise.resolve(cached);
+
+  return new Promise((resolve) => {
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    loader.load(
+      url,
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.anisotropy = 8;
+        tex.needsUpdate = true;
+        itemTextureCache.set(url, tex);
+        resolve(tex);
+      },
+      undefined,
+      () => resolve(null)
+    );
+  });
+}
+
 export function SceneItemMesh({
   item,
   model,
+  textures = [],
   isSelected,
   transformTool,
   onSelect,
+  onMaterialsDiscovered,
   onTransformChange,
   onDraggingChange,
 }: SceneItemMeshProps) {
   const [groupObj, setGroupObj] = useState<THREE.Group | null>(null);
   const [loadedScene, setLoadedScene] = useState<THREE.Group | null>(null);
   const [loadError, setLoadError] = useState(false);
+
+  const materialsByKeyRef = useRef<MaterialSlotMap>(new Map());
+  const originalBackupRef = useRef<MaterialBackupMap>(new Map());
 
   const targetW = Math.max(0.01, model.dimensionsCm.width / 100);
   const targetH = Math.max(0.01, model.dimensionsCm.height / 100);
@@ -68,6 +121,64 @@ export function SceneItemMesh({
         const scaleY = size.y > 0.0001 ? targetH / size.y : 1;
         const scaleZ = size.z > 0.0001 ? targetD / size.z : 1;
 
+        const matMap: MaterialSlotMap = new Map();
+        const backupMap: MaterialBackupMap = new Map();
+        const discoveredSlots: DiscoveredMaterialSlot[] = [];
+
+        let unnamedCounter = 1;
+
+        rawScene.traverse((child) => {
+          const mesh = child as THREE.Mesh;
+          if (!mesh.isMesh) return;
+
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+
+          const origMats = Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material];
+
+          const clonedMats = origMats.map((m) => {
+            const cloned = m.clone() as THREE.MeshStandardMaterial;
+            const rawName = (cloned.name || mesh.name || '').trim();
+            const key = rawName || `part_${unnamedCounter++}`;
+            const label =
+              rawName && !rawName.startsWith('Material_')
+                ? rawName
+                : `Част ${discoveredSlots.length + 1}`;
+
+            if (!matMap.has(key)) {
+              matMap.set(key, []);
+              const colorHex = cloned.color
+                ? `#${cloned.color.getHexString()}`
+                : '#cccccc';
+              backupMap.set(key, {
+                colorHex,
+                map: cloned.map ?? null,
+                roughness:
+                  typeof cloned.roughness === 'number' ? cloned.roughness : 0.6,
+                metalness:
+                  typeof cloned.metalness === 'number' ? cloned.metalness : 0.05,
+              });
+              discoveredSlots.push({
+                key,
+                label,
+                defaultColorHex: colorHex,
+              });
+            }
+
+            matMap.get(key)!.push(cloned);
+            return cloned;
+          });
+
+          mesh.material = Array.isArray(mesh.material)
+            ? clonedMats
+            : clonedMats[0];
+        });
+
+        materialsByKeyRef.current = matMap;
+        originalBackupRef.current = backupMap;
+
         const wrapper = new THREE.Group();
         rawScene.scale.set(scaleX, scaleY, scaleZ);
         rawScene.position.set(
@@ -76,15 +187,12 @@ export function SceneItemMesh({
           -center.z * scaleZ
         );
 
-        rawScene.traverse((child) => {
-          if ((child as THREE.Mesh).isMesh) {
-            child.castShadow = true;
-            child.receiveShadow = true;
-          }
-        });
-
         wrapper.add(rawScene);
         setLoadedScene(wrapper);
+
+        if (onMaterialsDiscovered) {
+          onMaterialsDiscovered(item.instanceId, discoveredSlots);
+        }
       } catch {
         if (!cancelled) {
           setLoadError(true);
@@ -99,25 +207,84 @@ export function SceneItemMesh({
     };
   }, [model.glbUrl, targetW, targetH, targetD]);
 
+  // Прилагане на сменените цветове / PBR текстури по частите на модела
+  useEffect(() => {
+    if (!loadedScene) return;
+    let cancelled = false;
+
+    const overrides = item.materialOverrides ?? {};
+    const matMap = materialsByKeyRef.current;
+    const backupMap = originalBackupRef.current;
+
+    matMap.forEach((mats, key) => {
+      const ov = overrides[key];
+      const backup = backupMap.get(key);
+      if (!backup) return;
+
+      const texMeta = ov?.textureId
+        ? textures.find((t) => t.id === ov.textureId) ?? null
+        : null;
+
+      if (texMeta) {
+        getOrLoadItemTexture(texMeta.mapUrl).then((baseTex) => {
+          if (cancelled || !baseTex) return;
+          const texClone = baseTex.clone();
+          texClone.wrapS = THREE.RepeatWrapping;
+          texClone.wrapT = THREE.RepeatWrapping;
+          const repX = Math.max(0.25, 1 / Math.max(0.05, texMeta.tileWidthM));
+          const repY = Math.max(0.25, 1 / Math.max(0.05, texMeta.tileHeightM));
+          texClone.repeat.set(repX, repY);
+          texClone.needsUpdate = true;
+
+          for (const mat of mats) {
+            mat.map = texClone;
+            mat.color.set(ov?.color || '#ffffff');
+            mat.roughness = texMeta.roughness;
+            mat.metalness = texMeta.metalness;
+            mat.needsUpdate = true;
+          }
+        });
+      } else {
+        for (const mat of mats) {
+          mat.map = ov?.color ? null : backup.map;
+          mat.color.set(ov?.color || backup.colorHex);
+          mat.roughness = backup.roughness;
+          mat.metalness = backup.metalness;
+          mat.needsUpdate = true;
+        }
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadedScene, item.materialOverrides, textures]);
+
   // Синхронизиране на трансформацията от състоянието към 3D групата
   useEffect(() => {
     if (!groupObj) return;
+    const mirrorSign = item.mirrored ? -1 : 1;
     groupObj.position.set(item.position[0], item.position[1], item.position[2]);
     groupObj.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
-    groupObj.scale.set(item.scale[0], item.scale[1], item.scale[2]);
-  }, [groupObj, item.position, item.rotation, item.scale]);
+    groupObj.scale.set(
+      Math.abs(item.scale[0]) * mirrorSign,
+      item.scale[1],
+      item.scale[2]
+    );
+  }, [groupObj, item.position, item.rotation, item.scale, item.mirrored]);
 
   function clampObjectTransform() {
     if (!groupObj) return;
+    const mirrorSign = item.mirrored ? -1 : 1;
 
-    // Не позволяваме обектът да потъва под пода (Y = 0)
     if (groupObj.position.y < 0) {
       groupObj.position.y = 0;
     }
 
-    // Прилагане на правилата за мащабиране на модела
+    const absSx = Math.abs(groupObj.scale.x);
+
     if (model.scaleMode === 'fixed') {
-      groupObj.scale.set(1, 1, 1);
+      groupObj.scale.set(1 * mirrorSign, 1, 1);
     } else if (model.scaleMode === 'constrained') {
       const baseW = Math.max(1, model.dimensionsCm.width);
       const baseH = Math.max(1, model.dimensionsCm.height);
@@ -131,7 +298,7 @@ export function SceneItemMesh({
       const maxSz = Math.max(minSz, model.scaleConstraints.maxCm.depth / baseD);
 
       const sx = model.scaleConstraints.allowX
-        ? Math.min(maxSx, Math.max(minSx, groupObj.scale.x))
+        ? Math.min(maxSx, Math.max(minSx, absSx))
         : 1;
       const sy = model.scaleConstraints.allowY
         ? Math.min(maxSy, Math.max(minSy, groupObj.scale.y))
@@ -140,10 +307,10 @@ export function SceneItemMesh({
         ? Math.min(maxSz, Math.max(minSz, groupObj.scale.z))
         : 1;
 
-      groupObj.scale.set(sx, sy, sz);
+      groupObj.scale.set(sx * mirrorSign, sy, sz);
     } else {
       groupObj.scale.set(
-        Math.min(20, Math.max(0.05, groupObj.scale.x)),
+        Math.min(20, Math.max(0.05, absSx)) * mirrorSign,
         Math.min(20, Math.max(0.05, groupObj.scale.y)),
         Math.min(20, Math.max(0.05, groupObj.scale.z))
       );
@@ -165,7 +332,7 @@ export function SceneItemMesh({
       Number(groupObj.rotation.z.toFixed(4)),
     ];
     const nextScale: [number, number, number] = [
-      Number(groupObj.scale.x.toFixed(4)),
+      Number(Math.abs(groupObj.scale.x).toFixed(4)),
       Number(groupObj.scale.y.toFixed(4)),
       Number(groupObj.scale.z.toFixed(4)),
     ];
