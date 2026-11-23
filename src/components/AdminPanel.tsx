@@ -1,21 +1,29 @@
 import { useEffect, useState } from 'react';
-import { CATEGORY_LABELS } from '../types/editor';
+import { CATEGORY_LABELS, TEXTURE_CATEGORY_LABELS } from '../types/editor';
 import type {
   CatalogModel,
+  CatalogTexture,
   CreateModelInput,
+  CreateTextureInput,
   ModelCategory,
   ScaleMode,
+  TextureCategory,
 } from '../types/editor';
 import type { ApartmentTemplate, RoomConfig } from '../types/room';
 import {
   createModelOnServer,
+  createTextureOnServer,
   deleteApartmentTemplateOnServer,
   deleteModelOnServer,
+  deleteTextureOnServer,
   fetchApartmentTemplates,
+  fetchTextures,
   saveApartmentTemplateToServer,
   updateModelOnServer,
+  updateTextureOnServer,
   uploadGlbFile,
   uploadPreviewImage,
+  uploadTextureImage,
 } from '../utils/apiClient';
 
 interface AdminPanelProps {
@@ -44,6 +52,17 @@ const DEFAULT_MODEL_FORM: CreateModelInput = {
   isActive: true,
 };
 
+const DEFAULT_TEXTURE_FORM: CreateTextureInput = {
+  name: '',
+  category: 'floor',
+  mapUrl: '',
+  tileWidthM: 0.6,
+  tileHeightM: 0.6,
+  roughness: 0.5,
+  metalness: 0.05,
+  isActive: true,
+};
+
 export function AdminPanel({
   models,
   currentRoom,
@@ -64,6 +83,14 @@ export function AdminPanel({
   const [previewFile, setPreviewFile] = useState<File | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [busyModelId, setBusyModelId] = useState<string | null>(null);
+
+  // --- Каталог PBR текстури (подове, плочки, стени, мебели) ---
+  const [textures, setTextures] = useState<CatalogTexture[]>([]);
+  const [textureForm, setTextureForm] =
+    useState<CreateTextureInput>(DEFAULT_TEXTURE_FORM);
+  const [textureFile, setTextureFile] = useState<File | null>(null);
+  const [isSubmittingTexture, setIsSubmittingTexture] = useState(false);
+  const [busyTextureId, setBusyTextureId] = useState<string | null>(null);
 
   // --- Шаблони за апартаменти (в MySQL базата данни) ---
   const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
@@ -91,14 +118,153 @@ export function AdminPanel({
       .then((list) => {
         if (active) setTemplates(list);
       })
-      .catch(() => {
-        // Ако таблицата в api.php още не е добавена, списъкът остава празен без срив
-      });
+      .catch(() => {});
+
+    fetchTextures()
+      .then((list) => {
+        if (active) setTextures(list);
+      })
+      .catch(() => {});
+
     return () => {
       active = false;
     };
   }, []);
 
+  // --- Текстури логика ---
+  async function handleCreateTexture(e: React.FormEvent) {
+    e.preventDefault();
+    setStatusMessage(null);
+
+    if (!adminPassword.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Въведете администраторска парола най-горе.',
+      });
+      return;
+    }
+
+    if (!textureForm.name.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Въведете име на текстурата (напр. „Паркет Дъб Натур“ или „Плочки Мрамор 60x60“).',
+      });
+      return;
+    }
+
+    setIsSubmittingTexture(true);
+    try {
+      const pass = adminPassword.trim();
+      let finalMapUrl = textureForm.mapUrl.trim();
+
+      if (textureFile) {
+        const uploaded = await uploadTextureImage(textureFile, pass);
+        finalMapUrl = uploaded.url;
+      }
+
+      if (!finalMapUrl) {
+        throw new Error('Качете файл (PNG/JPG/WEBP) или посочете валиден URL на текстурата.');
+      }
+
+      await createTextureOnServer(
+        {
+          ...textureForm,
+          name: textureForm.name.trim(),
+          mapUrl: finalMapUrl,
+          tileWidthM: Math.max(0.05, Number(textureForm.tileWidthM) || 0.6),
+          tileHeightM: Math.max(0.05, Number(textureForm.tileHeightM) || 0.6),
+          roughness: Math.min(1, Math.max(0, Number(textureForm.roughness) || 0.5)),
+          metalness: Math.min(1, Math.max(0, Number(textureForm.metalness) || 0.05)),
+        },
+        pass
+      );
+
+      const updatedTextures = await fetchTextures();
+      setTextures(updatedTextures);
+      setTextureForm(DEFAULT_TEXTURE_FORM);
+      setTextureFile(null);
+      await onModelsUpdated();
+
+      setStatusMessage({
+        type: 'success',
+        text: 'Текстурата е качена и записана успешно в каталога.',
+      });
+    } catch (err) {
+      setStatusMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Грешка при запис на текстурата.',
+      });
+    } finally {
+      setIsSubmittingTexture(false);
+    }
+  }
+
+  async function handleToggleTextureActive(tex: CatalogTexture) {
+    if (!adminPassword.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Въведете администраторска парола за промяна на статуса.',
+      });
+      return;
+    }
+
+    setBusyTextureId(tex.id);
+    setStatusMessage(null);
+    try {
+      await updateTextureOnServer(
+        tex.id,
+        { isActive: !tex.isActive },
+        adminPassword.trim()
+      );
+      const updatedTextures = await fetchTextures();
+      setTextures(updatedTextures);
+      await onModelsUpdated();
+    } catch (err) {
+      setStatusMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Грешка при актуализация на текстурата.',
+      });
+    } finally {
+      setBusyTextureId(null);
+    }
+  }
+
+  async function handleDeleteTexture(tex: CatalogTexture) {
+    if (!adminPassword.trim()) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Въведете администраторска парола за изтриване на текстура.',
+      });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Сигурни ли сте, че искате да изтриете текстурата „${tex.name}“?`
+    );
+    if (!confirmed) return;
+
+    setBusyTextureId(tex.id);
+    setStatusMessage(null);
+    try {
+      await deleteTextureOnServer(tex.id, adminPassword.trim());
+      const updatedTextures = await fetchTextures();
+      setTextures(updatedTextures);
+      await onModelsUpdated();
+      setStatusMessage({
+        type: 'success',
+        text: `Текстурата „${tex.name}“ беше изтрита.`,
+      });
+    } catch (err) {
+      setStatusMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Грешка при изтриване на текстурата.',
+      });
+    } finally {
+      setBusyTextureId(null);
+    }
+  }
+
+  // --- Шаблони за апартаменти логика ---
   async function handleSaveCurrentPlanAsTemplate(e: React.FormEvent) {
     e.preventDefault();
     setStatusMessage(null);
@@ -137,11 +303,13 @@ export function AdminPanel({
         ceilingHeightM: currentRoom.ceilingHeightM,
         defaultThicknessM: currentRoom.defaultThicknessM,
         walls: currentRoom.walls.map((w, idx) => ({
+          ...w,
           id: `tpl-wall-${idx + 1}`,
           start: [w.start[0], w.start[1]],
           end: [w.end[0], w.end[1]],
-          thicknessM: w.thicknessM,
         })),
+        openings: currentRoom.openings ?? [],
+        floorZones: currentRoom.floorZones ?? [],
         updatedAt: new Date().toISOString(),
       };
 
@@ -380,10 +548,10 @@ export function AdminPanel({
         >
           <div>
             <h2 style={{ margin: 0, fontSize: '18px', color: '#f8fafc' }}>
-              Административен панел — Каталог и Шаблони на апартаменти
+              Административен панел — Модели, Текстури и Шаблони
             </h2>
             <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
-              Всички шаблони и 3D модели се записват директно в базата данни на studio.glb3d.com
+              Всички текстури, шаблони и 3D модели се записват директно в базата данни на studio.glb3d.com
             </div>
           </div>
 
@@ -419,6 +587,323 @@ export function AdminPanel({
             {statusMessage.text}
           </div>
         )}
+
+        {/* Секция Каталог PBR Текстури (Подове, Плочки, Стени, Мебели) */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+            gap: '20px',
+            alignItems: 'start',
+          }}
+        >
+          <form
+            onSubmit={handleCreateTexture}
+            style={{
+              backgroundColor: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: '8px',
+              padding: '18px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+            }}
+          >
+            <h3 style={{ margin: 0, fontSize: '15px', color: '#f8fafc' }}>
+              Добавяне на текстура / плочки / настилка
+            </h3>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div>
+                <label className="section-label" style={{ display: 'block' }}>
+                  Име на материала *
+                </label>
+                <input
+                  type="text"
+                  className="input-control"
+                  placeholder="Напр. Плочки Мрамор 60x60"
+                  value={textureForm.name}
+                  onChange={(e) =>
+                    setTextureForm((prev) => ({ ...prev, name: e.target.value }))
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="section-label" style={{ display: 'block' }}>
+                  Категория
+                </label>
+                <select
+                  className="select-control"
+                  value={textureForm.category}
+                  onChange={(e) =>
+                    setTextureForm((prev) => ({
+                      ...prev,
+                      category: e.target.value as TextureCategory,
+                    }))
+                  }
+                >
+                  {Object.entries(TEXTURE_CATEGORY_LABELS).map(([key, label]) => (
+                    <option key={key} value={key}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="section-label" style={{ display: 'block' }}>
+                Снимка на текстурата (seamless PNG / JPG / WEBP)
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                className="input-control"
+                onChange={(e) => setTextureFile(e.target.files?.[0] ?? null)}
+              />
+              <input
+                type="text"
+                className="input-control"
+                style={{ marginTop: '6px' }}
+                placeholder="...или директно URL към текстура"
+                value={textureForm.mapUrl}
+                onChange={(e) =>
+                  setTextureForm((prev) => ({ ...prev, mapUrl: e.target.value }))
+                }
+              />
+            </div>
+
+            <div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '6px',
+                }}
+              >
+                <span className="section-label" style={{ marginBottom: 0 }}>
+                  Реален размер на 1 плочка / шарка (м)
+                </span>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  {[
+                    { label: '30×30', w: 0.3, h: 0.3 },
+                    { label: '60×60', w: 0.6, h: 0.6 },
+                    { label: '120×60', w: 1.2, h: 0.6 },
+                    { label: 'Паркет 1.2×1.2', w: 1.2, h: 1.2 },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      className="btn"
+                      style={{ padding: '2px 6px', fontSize: '10px' }}
+                      onClick={() =>
+                        setTextureForm((prev) => ({
+                          ...prev,
+                          tileWidthM: preset.w,
+                          tileHeightM: preset.h,
+                        }))
+                      }
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <div className="axis-field">
+                  <span>Ширина (м)</span>
+                  <input
+                    type="number"
+                    step={0.05}
+                    min={0.05}
+                    className="input-control"
+                    value={textureForm.tileWidthM}
+                    onChange={(e) =>
+                      setTextureForm((prev) => ({
+                        ...prev,
+                        tileWidthM: parseFloat(e.target.value) || 0.6,
+                      }))
+                    }
+                  />
+                </div>
+                <div className="axis-field">
+                  <span>Височина (м)</span>
+                  <input
+                    type="number"
+                    step={0.05}
+                    min={0.05}
+                    className="input-control"
+                    value={textureForm.tileHeightM}
+                    onChange={(e) =>
+                      setTextureForm((prev) => ({
+                        ...prev,
+                        tileHeightM: parseFloat(e.target.value) || 0.6,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+              <div className="axis-field">
+                <span>Грапавост (0 = гланц, 1 = мат)</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  className="input-control"
+                  value={textureForm.roughness}
+                  onChange={(e) =>
+                    setTextureForm((prev) => ({
+                      ...prev,
+                      roughness: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+              </div>
+              <div className="axis-field">
+                <span>Отражателност / Метал (0 – 1)</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  className="input-control"
+                  value={textureForm.metalness}
+                  onChange={(e) =>
+                    setTextureForm((prev) => ({
+                      ...prev,
+                      metalness: parseFloat(e.target.value) || 0,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="btn btn-active"
+              disabled={isSubmittingTexture}
+              style={{ padding: '9px 14px', fontSize: '13px' }}
+            >
+              {isSubmittingTexture ? 'Качване в базата...' : '+ Запази текстурата в каталога'}
+            </button>
+          </form>
+
+          <div
+            style={{
+              backgroundColor: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: '8px',
+              padding: '18px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+            }}
+          >
+            <h3 style={{ margin: 0, fontSize: '15px', color: '#f8fafc' }}>
+              Текстури в базата данни ({textures.length})
+            </h3>
+
+            {textures.length === 0 ? (
+              <div className="empty-state-box">
+                Няма качени текстури. Качете паркет, плочки за баня или декоративна мазилка отляво.
+              </div>
+            ) : (
+              <div
+                style={{
+                  maxHeight: '340px',
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}
+              >
+                {textures.map((tex) => {
+                  const isBusy = busyTextureId === tex.id;
+                  return (
+                    <div
+                      key={tex.id}
+                      style={{
+                        backgroundColor: '#0f172a',
+                        border: '1px solid #334155',
+                        borderRadius: '6px',
+                        padding: '8px 10px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '10px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                        <img
+                          src={tex.mapUrl}
+                          alt={tex.name}
+                          style={{
+                            width: '40px',
+                            height: '40px',
+                            objectFit: 'cover',
+                            borderRadius: '4px',
+                            border: '1px solid #475569',
+                            flexShrink: 0,
+                          }}
+                        />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: '12px', color: '#f8fafc' }}>
+                            {tex.name}{' '}
+                            <span
+                              style={{
+                                fontSize: '10px',
+                                padding: '1px 5px',
+                                borderRadius: '4px',
+                                marginLeft: '4px',
+                                backgroundColor: tex.isActive
+                                  ? 'rgba(16, 185, 129, 0.2)'
+                                  : 'rgba(100, 116, 139, 0.25)',
+                                color: tex.isActive ? '#34d399' : '#94a3b8',
+                              }}
+                            >
+                              {tex.isActive ? 'Активна' : 'Скрита'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                            {TEXTURE_CATEGORY_LABELS[tex.category]} • {tex.tileWidthM}×{tex.tileHeightM} м
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ fontSize: '11px', padding: '4px 8px' }}
+                          disabled={isBusy}
+                          onClick={() => handleToggleTextureActive(tex)}
+                        >
+                          {tex.isActive ? 'Скрий' : 'Активирай'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-danger"
+                          style={{ fontSize: '11px', padding: '4px 8px' }}
+                          disabled={isBusy}
+                          onClick={() => handleDeleteTexture(tex)}
+                        >
+                          Изтрий
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Секция Шаблони за апартаменти */}
         <div

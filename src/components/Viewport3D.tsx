@@ -1,9 +1,10 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
 import {
   Environment,
   Grid,
+  Html,
   Lightformer,
   OrbitControls,
   OrthographicCamera,
@@ -67,6 +68,46 @@ interface Viewport3DProps {
   ) => void;
 }
 
+interface SegmentDimensionBadge {
+  key: string;
+  position: [number, number, number];
+  lengthM: number;
+  angleDeg: number;
+  isActivePreview: boolean;
+}
+
+function computeSegmentBadge(
+  p1: [number, number],
+  p2: [number, number],
+  key: string,
+  isActivePreview: boolean,
+  yHeight: number
+): SegmentDimensionBadge | null {
+  const dx = p2[0] - p1[0];
+  const dz = p2[1] - p1[1];
+  const lengthM = Math.hypot(dx, dz);
+  if (lengthM < 0.02) return null;
+
+  const midX = (p1[0] + p2[0]) / 2;
+  const midZ = (p1[1] + p2[1]) / 2;
+
+  // Перпендикулярно отместване встрани от линията, за да не закрива стената
+  const nx = -dz / lengthM;
+  const nz = dx / lengthM;
+  const offset = 0.28;
+
+  let angleDeg = Math.round(((Math.atan2(dz, dx) * 180) / Math.PI) * 10) / 10;
+  if (angleDeg < 0) angleDeg += 360;
+
+  return {
+    key,
+    position: [midX + nx * offset, yHeight, midZ + nz * offset],
+    lengthM: Math.round(lengthM * 100) / 100,
+    angleDeg,
+    isActivePreview,
+  };
+}
+
 export function Viewport3D({
   room,
   viewMode = '3d',
@@ -108,6 +149,68 @@ export function Viewport3D({
   const isTopOrtho = viewMode === 'top';
   const isBusyDrawingOrCalib =
     isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
+
+  const liveDimensionBadges = useMemo(() => {
+    const badges: SegmentDimensionBadge[] = [];
+    const labelY = Math.max(0.25, room.ceilingHeightM + 0.15);
+
+    if (isDrawingWalls && draftPoints.length > 0) {
+      // Вече кликнатите сегменти от текущата верига
+      for (let i = 0; i < draftPoints.length - 1; i++) {
+        const b = computeSegmentBadge(
+          draftPoints[i],
+          draftPoints[i + 1],
+          `chain-${i}`,
+          false,
+          labelY
+        );
+        if (b) badges.push(b);
+      }
+
+      // Активният сегмент, който се влачи в момента към курсора
+      if (hoverPoint) {
+        const lastPt = draftPoints[draftPoints.length - 1];
+        const previewBadge = computeSegmentBadge(
+          lastPt,
+          hoverPoint,
+          'active-preview',
+          true,
+          labelY
+        );
+        if (previewBadge) badges.push(previewBadge);
+      }
+    } else if (isDrawingFloorZone && zoneDraftPoints.length > 0 && hoverPoint) {
+      const lastPt = zoneDraftPoints[zoneDraftPoints.length - 1];
+      const zonePreview = computeSegmentBadge(
+        lastPt,
+        hoverPoint,
+        'zone-preview',
+        true,
+        0.25
+      );
+      if (zonePreview) badges.push(zonePreview);
+    } else if (isCalibratingPlan && calibPoints.length === 1 && hoverPoint) {
+      const calibPreview = computeSegmentBadge(
+        calibPoints[0],
+        hoverPoint,
+        'calib-preview',
+        true,
+        0.25
+      );
+      if (calibPreview) badges.push(calibPreview);
+    }
+
+    return badges;
+  }, [
+    isDrawingWalls,
+    draftPoints,
+    hoverPoint,
+    isDrawingFloorZone,
+    zoneDraftPoints,
+    isCalibratingPlan,
+    calibPoints,
+    room.ceilingHeightM,
+  ]);
 
   return (
     <Canvas
@@ -232,6 +335,43 @@ export function Viewport3D({
         calibPoints={calibPoints}
         onCalibFloorClick={onCalibFloorClick}
       />
+
+      {/* Живи CAD размери до чертаните стени */}
+      {liveDimensionBadges.map((badge) => {
+        const cm = Math.round(badge.lengthM * 100);
+        return (
+          <Html
+            key={badge.key}
+            position={badge.position}
+            center
+            zIndexRange={[20, 0]}
+            style={{ pointerEvents: 'none', userSelect: 'none' }}
+          >
+            <div
+              style={{
+                backgroundColor: badge.isActivePreview
+                  ? 'rgba(14, 116, 144, 0.95)'
+                  : 'rgba(15, 23, 42, 0.88)',
+                border: badge.isActivePreview
+                  ? '1.5px solid #38bdf8'
+                  : '1px solid #475569',
+                color: badge.isActivePreview ? '#f0f9ff' : '#cbd5e1',
+                padding: badge.isActivePreview ? '3px 8px' : '2px 6px',
+                borderRadius: '5px',
+                fontSize: badge.isActivePreview ? '12px' : '10px',
+                fontWeight: badge.isActivePreview ? 700 : 500,
+                whiteSpace: 'nowrap',
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.45)',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              }}
+            >
+              {badge.isActivePreview
+                ? `${badge.lengthM.toFixed(2)} м (${cm} см) • ${badge.angleDeg}°`
+                : `${badge.lengthM.toFixed(2)} м`}
+            </div>
+          </Html>
+        );
+      })}
 
       {sceneObjects.map((obj) => {
         const model = models.find((m) => m.id === obj.modelId);

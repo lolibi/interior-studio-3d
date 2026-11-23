@@ -1,45 +1,64 @@
 export type OpeningType = 'door' | 'window';
 export type DoorSwing = 'left-in' | 'right-in' | 'left-out' | 'right-out';
 
+export interface SavedCamera {
+  id: string;
+  name: string;
+  position: [number, number, number];
+  target: [number, number, number];
+  fov?: number;
+  isInterior?: boolean; // при true включва тавана автоматично
+}
+
 export interface WallOpening {
   id: string;
   type: OpeningType;
-  offsetFromStartM: number; // разстояние от началото на стената до левия ръб на отвора (м)
-  widthM: number;           // ширина на отвора (м)
-  heightM: number;          // височина на отвора (м)
-  sillHeightM: number;      // височина от пода до долния ръб (0 за врати, напр. 0.90 за прозорци)
-  swing?: DoorSwing;        // посока на отваряне за врати
-  modelId?: string | null;  // опционален .glb модел от каталога
+  offsetFromStartM: number;
+  widthM: number;
+  heightM: number;
+  sillHeightM: number;
+  swing?: DoorSwing;
+  frameColor?: string;      // цвят на дограмата / касата (напр. #ffffff, #383e42 антрацит)
+  modelId?: string | null;
 }
 
 export interface StandaloneOpening {
   id: string;
   type: OpeningType;
-  position: [number, number]; // център [x, z] в метри на плана
-  rotationDeg: number;        // завъртане в градуси (0° = хоризонтално по X)
-  widthM: number;             // ширина на отвора (м)
-  heightM: number;            // височина на отвора (м)
-  sillHeightM: number;      // отстояние от земята / пода (0 за врати, напр. 0.90 за прозорци)
-  thicknessM: number;         // дълбочина / дебелина на касата (м)
-  swing?: DoorSwing;          // посока на отваряне за врати
-  modelId?: string | null;    // опционален .glb модел от каталога
+  position: [number, number];
+  rotationDeg: number;
+  widthM: number;
+  heightM: number;
+  sillHeightM: number;
+  thicknessM: number;
+  swing?: DoorSwing;
+  frameColor?: string;      // цвят на дограмата / касата
+  modelId?: string | null;
 }
 
 export interface FloorZone {
   id: string;
   name: string;
-  points: [number, number][]; // многоъгълник [x, z] в метри
-  color: string;              // цвят на настилката (напр. #b08968 паркет, #cbd5e1 плочки)
+  points: [number, number][];
+  color: string;
   roughness: number;
   metalness: number;
+  textureId?: string | null;       // ID на текстура от каталога (паркет, плочки и др.)
+  textureRotationDeg?: number;     // завъртане на шарката (0°, 45°, 90°)
 }
 
 export interface WallSegment {
   id: string;
-  start: [number, number]; // [x, z] в метри
-  end: [number, number];   // [x, z] в метри
-  thicknessM: number;      // дебелина в метри (напр. 0.12 или 0.25)
+  start: [number, number];
+  end: [number, number];
+  thicknessM: number;
   openings?: WallOpening[];
+  frontColor?: string;             // цвят на лице А (напр. #f8fafc)
+  frontTextureId?: string | null;  // текстура/плочки на лице А
+  frontTileHeightM?: number | null;// височина на плочките на лице А (напр. 2.40 м в баня)
+  backColor?: string;              // цвят на лице Б
+  backTextureId?: string | null;   // текстура/плочки на лице Б
+  backTileHeightM?: number | null; // височина на плочките на лице Б
 }
 
 export interface SelectedWallVertex {
@@ -51,7 +70,7 @@ export interface FloorplanUnderlay {
   imageUrl: string;
   widthM: number;
   depthM: number;
-  aspectRatio: number; // naturalWidth / naturalHeight
+  aspectRatio: number;
   offsetX: number;
   offsetZ: number;
   rotationDeg: number;
@@ -64,9 +83,12 @@ export interface RoomConfig {
   templateName: string | null;
   ceilingHeightM: number;
   defaultThicknessM: number;
+  ceilingColor?: string;
+  showCeiling?: boolean;
   walls: WallSegment[];
   openings?: StandaloneOpening[];
   floorZones?: FloorZone[];
+  savedCameras?: SavedCamera[];
   floorplan: FloorplanUnderlay | null;
 }
 
@@ -96,10 +118,6 @@ export function getWallAngleDeg(wall: WallSegment): number {
   return Number(deg.toFixed(1));
 }
 
-/**
- * Изправя стена към най-близкия ортогонален ъгъл (0° / 90° / 180° / 270°), като запазва дължината ѝ
- * и премества избрания край (или края на стената по подразбиране).
- */
 export function straightenWallOrthogonal(
   wall: WallSegment,
   movingEnd: 'start' | 'end' = 'end'
@@ -142,12 +160,6 @@ export function straightenWallOrthogonal(
   };
 }
 
-/**
- * Прилага движение на въртекс върху масива от стени с независим двуосов CAD snap (X и Z):
- * - при linkedJoint = true мести всички краища на стени, намиращи се в същия ъгъл (възел);
- * - при autoStraighten = true изправя поотделно X и Z спрямо всички свързани стени и ъгли в стаята,
- *   така че и червената (X), и синята (Z) стрелка на пивота прихващат правите ъгли (90°).
- */
 export function applyVertexMoveToWalls(
   walls: WallSegment[],
   wallId: string,
@@ -170,7 +182,6 @@ export function applyVertexMoveToWalls(
 
   const jointTol = 0.04;
 
-  // Събираме противоположните краища на ВСИЧКИ стени, които участват в този ъгъл
   const connectedAnchors: [number, number][] = [primaryAnchorPt];
   if (options.linkedJoint) {
     for (const w of walls) {
@@ -187,7 +198,6 @@ export function applyVertexMoveToWalls(
     (pt) => Math.hypot(pt[0] - originPt[0], pt[1] - originPt[1]) > 0.01
   );
 
-  // 1. Директен точков snap (ако пуснем въртекса директно върху друга съществуваща точка)
   let exactPointSnap: [number, number] | null = null;
   let bestPointDist = 0.16;
   for (const t of filteredSnapTargets) {
@@ -203,14 +213,12 @@ export function applyVertexMoveToWalls(
   if (exactPointSnap) {
     nextPt = exactPointSnap;
   } else {
-    // Базова стъпка 5 см по мрежата
     let snappedX = Number((Math.round(rawPoint[0] * 20) / 20).toFixed(3));
     let snappedZ = Number((Math.round(rawPoint[1] * 20) / 20).toFixed(3));
 
     const tolRad = ((options.orthoToleranceDeg ?? 7) * Math.PI) / 180;
     const maxAxisAlignDist = 0.22;
 
-    // 2. Независимо подравняване по ос X (червена стрелка -> вертикални стени 90°/270°)
     let bestDx = maxAxisAlignDist;
     for (const anchor of connectedAnchors) {
       const dx = Math.abs(rawPoint[0] - anchor[0]);
@@ -233,7 +241,6 @@ export function applyVertexMoveToWalls(
       }
     }
 
-    // 3. Независимо подравняване по ос Z (синя стрелка -> хоризонтални стени 0°/180°)
     let bestDz = maxAxisAlignDist;
     for (const anchor of connectedAnchors) {
       const dx = Math.abs(rawPoint[0] - anchor[0]);
@@ -287,10 +294,6 @@ export function applyVertexMoveToWalls(
   });
 }
 
-/**
- * Връща точните координати [x, z] на левия и десния край (каса) на самостоятелна врата/прозорец,
- * за да могат стените да се прихващат (snap) директно към тях.
- */
 export function getOpeningJambPoints(
   op: StandaloneOpening
 ): [[number, number], [number, number]] {
@@ -322,10 +325,6 @@ function angleDiffDeg(a: number, b: number): number {
   return Math.abs(diff);
 }
 
-/**
- * Прихваща (snap) врата или прозорец по дължината и наклона на най-близката стена,
- * когато се мести с 3D пивота.
- */
 export function snapOpeningToWalls(
   rawPos: [number, number],
   currentRotationDeg: number,
@@ -420,9 +419,6 @@ export function updateWallGeometry(
   };
 }
 
-/**
- * Пропорционално скалиране на подложката по 2 кликнати точки и известен реален размер в метри.
- */
 export function calibrateFloorplanByTwoPoints(
   floorplan: FloorplanUnderlay,
   p1: [number, number],
@@ -447,10 +443,6 @@ export function calibrateFloorplanByTwoPoints(
   };
 }
 
-/**
- * Изчислява челни ъглови сглобки без припокриване (Z-fighting):
- * водещата стена минава до външния ръб (+halfT), а прилежащата спира плътно в лицето ѝ (-halfT).
- */
 export function getWallJointExtensions(
   wall: WallSegment,
   allWalls: WallSegment[]
@@ -502,10 +494,6 @@ export function getWallJointExtensions(
   return { startExt, endExt };
 }
 
-/**
- * Открива затворени контури (стаи) от графа на стените с толеранс на сглобките (до 12 см),
- * за да не пропада подът при леки разминавания при чертане.
- */
 export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][][] {
   if (walls.length < 3) return [];
 
@@ -691,9 +679,12 @@ export function createDefaultRoomConfig(): RoomConfig {
     templateName: null,
     ceilingHeightM: 2.65,
     defaultThicknessM: 0.15,
+    ceilingColor: '#f8fafc',
+    showCeiling: false,
     walls: createStarterWalls(0.15),
     openings: [],
     floorZones: [],
+    savedCameras: [],
     floorplan: null,
   };
 }

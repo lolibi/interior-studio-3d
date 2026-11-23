@@ -1,6 +1,8 @@
 import type {
   CatalogModel,
+  CatalogTexture,
   CreateModelInput,
+  CreateTextureInput,
   SavedScene,
   SavedSceneSummary,
   SceneObject,
@@ -15,6 +17,8 @@ interface RawApiResponse {
   data?: unknown;
   models?: CatalogModel[];
   model?: CatalogModel;
+  textures?: CatalogTexture[];
+  texture?: CatalogTexture;
   scenes?: SavedSceneSummary[];
   scene?: SavedScene;
   templates?: ApartmentTemplate[];
@@ -39,6 +43,23 @@ function normalizeModel(raw: CatalogModel): CatalogModel {
     ...raw,
     isActive: Boolean(raw.isActive),
     scaleConstraints: raw.scaleConstraints ?? DEFAULT_SCALE_CONSTRAINTS,
+  };
+}
+
+function normalizeTexture(raw: CatalogTexture): CatalogTexture {
+  return {
+    ...raw,
+    tileWidthM: Math.max(0.05, Number(raw.tileWidthM) || 0.6),
+    tileHeightM: Math.max(0.05, Number(raw.tileHeightM) || 0.6),
+    roughness:
+      typeof raw.roughness === 'number'
+        ? raw.roughness
+        : Number(raw.roughness ?? 0.5),
+    metalness:
+      typeof raw.metalness === 'number'
+        ? raw.metalness
+        : Number(raw.metalness ?? 0.05),
+    isActive: Boolean(raw.isActive),
   };
 }
 
@@ -190,6 +211,110 @@ export async function uploadPreviewImage(
   return { url, fileName };
 }
 
+// --- PBR Текстури ---
+
+export async function fetchTextures(): Promise<CatalogTexture[]> {
+  const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_textures`, {
+    method: 'GET',
+    cache: 'no-store',
+  });
+
+  const list = Array.isArray(payload.textures)
+    ? payload.textures
+    : Array.isArray(payload.data)
+      ? (payload.data as CatalogTexture[])
+      : [];
+
+  return list.map(normalizeTexture);
+}
+
+export async function uploadTextureImage(
+  file: File,
+  adminPassword: string
+): Promise<{ url: string; fileName: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const payload = await fetchApiRaw(`${API_BASE_URL}?action=upload_texture`, {
+    method: 'POST',
+    headers: {
+      'X-Admin-Password': adminPassword,
+    },
+    body: formData,
+  });
+
+  const dataObj = payload.data as { url?: string; fileName?: string } | undefined;
+  const url = payload.url ?? dataObj?.url;
+  const fileName = payload.fileName ?? dataObj?.fileName ?? file.name;
+
+  if (!url) {
+    throw new Error('Сървърът не върна URL на качената текстура.');
+  }
+
+  return { url, fileName };
+}
+
+export async function createTextureOnServer(
+  input: CreateTextureInput,
+  adminPassword: string
+): Promise<CatalogTexture> {
+  const payload = await fetchApiRaw(`${API_BASE_URL}?action=create_texture`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Password': adminPassword,
+    },
+    body: JSON.stringify(input),
+  });
+
+  const tex =
+    payload.texture ?? (payload.data as CatalogTexture | undefined);
+  if (!tex) {
+    throw new Error('Сървърът не върна създадената текстура.');
+  }
+  return normalizeTexture(tex);
+}
+
+export async function updateTextureOnServer(
+  id: string,
+  patch: Partial<CatalogTexture>,
+  adminPassword: string
+): Promise<CatalogTexture> {
+  const payload = await fetchApiRaw(`${API_BASE_URL}?action=update_texture`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Password': adminPassword,
+    },
+    body: JSON.stringify({ id, ...patch }),
+  });
+
+  const tex =
+    payload.texture ?? (payload.data as CatalogTexture | undefined);
+  if (!tex) {
+    throw new Error('Сървърът не върна обновената текстура.');
+  }
+  return normalizeTexture(tex);
+}
+
+export async function deleteTextureOnServer(
+  id: string,
+  adminPassword: string
+): Promise<{ deletedId: string }> {
+  const payload = await fetchApiRaw(`${API_BASE_URL}?action=delete_texture`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Password': adminPassword,
+    },
+    body: JSON.stringify({ id }),
+  });
+
+  return { deletedId: payload.deletedId ?? id };
+}
+
+// --- Подложка план ---
+
 export async function uploadFloorplanImage(
   file: File
 ): Promise<{ url: string; fileName: string }> {
@@ -211,6 +336,8 @@ export async function uploadFloorplanImage(
 
   return { url, fileName };
 }
+
+// --- Сцени и шаблони ---
 
 export async function fetchScenes(): Promise<SavedSceneSummary[]> {
   const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_scenes`, {

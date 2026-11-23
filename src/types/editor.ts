@@ -10,6 +10,8 @@ export type ModelCategory =
   | 'lighting'
   | 'decor';
 
+export type TextureCategory = 'floor' | 'tiles' | 'wall' | 'furniture';
+
 export type ScaleMode = 'fixed' | 'constrained' | 'free';
 
 export type TransformTool = 'translate' | 'rotate' | 'scale';
@@ -55,6 +57,34 @@ export interface CreateModelInput {
   isActive: boolean;
 }
 
+export interface CatalogTexture {
+  id: string;
+  name: string;
+  category: TextureCategory;
+  mapUrl: string;
+  tileWidthM: number;
+  tileHeightM: number;
+  roughness: number;
+  metalness: number;
+  isActive: boolean;
+}
+
+export interface CreateTextureInput {
+  name: string;
+  category: TextureCategory;
+  mapUrl: string;
+  tileWidthM: number;
+  tileHeightM: number;
+  roughness: number;
+  metalness: number;
+  isActive: boolean;
+}
+
+export interface MaterialOverride {
+  color?: string;
+  textureId?: string | null;
+}
+
 export interface SceneObject {
   instanceId: string;
   modelId: string;
@@ -63,6 +93,7 @@ export interface SceneObject {
   rotation: [number, number, number];
   scale: [number, number, number];
   mirrored?: boolean;
+  materialOverrides?: Record<string, MaterialOverride>; // ключ = името на материала в .glb модела
 }
 
 export interface SavedSceneSummary {
@@ -92,4 +123,11 @@ export const CATEGORY_LABELS: Record<ModelCategory, string> = {
   storage: 'Шкафове и гардероби',
   lighting: 'Осветление',
   decor: 'Декор и аксесоари',
+};
+
+export const TEXTURE_CATEGORY_LABELS: Record<TextureCategory, string> = {
+  floor: 'Паркет и подови настилки',
+  tiles: 'Плочки (баня / кухня / под)',
+  wall: 'Стени и мазилки',
+  furniture: 'Мебели, дърво и дамаски',
 };
