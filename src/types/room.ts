@@ -114,6 +114,11 @@ export interface SelectedWallVertex {
   endKey: 'start' | 'end';
 }
 
+export interface SelectedFloorVertex {
+  zoneId: string;
+  pointIndex: number;
+}
+
 export interface FloorplanUnderlay {
   imageUrl: string;
   widthM: number;
@@ -342,6 +347,75 @@ export function applyVertexMoveToWalls(
   });
 }
 
+export function applyVertexMoveToFloorZone(
+  zones: FloorZone[],
+  zoneId: string,
+  pointIndex: number,
+  rawPoint: [number, number],
+  snapTargets: [number, number][],
+  segmentTargets: SnapSegment[] = []
+): FloorZone[] {
+  const targetZone = zones.find((z) => z.id === zoneId);
+  if (!targetZone || pointIndex < 0 || pointIndex >= targetZone.points.length) {
+    return zones;
+  }
+
+  const originPt = targetZone.points[pointIndex];
+  const count = targetZone.points.length;
+  const prevPt = targetZone.points[(pointIndex - 1 + count) % count];
+  const nextPt = targetZone.points[(pointIndex + 1) % count];
+
+  const filteredSnapTargets = snapTargets.filter(
+    (pt) => Math.hypot(pt[0] - originPt[0], pt[1] - originPt[1]) > 0.01
+  );
+
+  let nextPtCoord: [number, number] | null = null;
+  let bestVertexDist = 0.22;
+  for (const t of filteredSnapTargets) {
+    const d = Math.hypot(rawPoint[0] - t[0], rawPoint[1] - t[1]);
+    if (d <= bestVertexDist) {
+      bestVertexDist = d;
+      nextPtCoord = [Number(t[0].toFixed(3)), Number(t[1].toFixed(3))];
+    }
+  }
+
+  if (!nextPtCoord) {
+    let bestEdgeDist = 0.16;
+    for (const seg of segmentTargets) {
+      const res = projectPointOntoSegment(rawPoint, seg.a, seg.b);
+      if (res.dist <= bestEdgeDist) {
+        bestEdgeDist = res.dist;
+        nextPtCoord = res.point;
+      }
+    }
+  }
+
+  if (!nextPtCoord) {
+    let snappedX = Number((Math.round(rawPoint[0] * 20) / 20).toFixed(3));
+    let snappedZ = Number((Math.round(rawPoint[1] * 20) / 20).toFixed(3));
+
+    const orthoAnchors = [prevPt, nextPt];
+    for (const anchor of orthoAnchors) {
+      if (Math.abs(rawPoint[0] - anchor[0]) <= 0.15) {
+        snappedX = Number(anchor[0].toFixed(3));
+      }
+      if (Math.abs(rawPoint[1] - anchor[1]) <= 0.15) {
+        snappedZ = Number(anchor[1].toFixed(3));
+      }
+    }
+
+    nextPtCoord = [snappedX, snappedZ];
+  }
+
+  return zones.map((z) => {
+    if (z.id !== zoneId) return z;
+    const nextPoints = z.points.map((pt, idx) =>
+      idx === pointIndex ? nextPtCoord! : pt
+    );
+    return { ...z, points: nextPoints };
+  });
+}
+
 export function getOpeningJambPoints(
   op: StandaloneOpening
 ): [[number, number], [number, number]] {
@@ -528,6 +602,14 @@ export function getWallJointExtensions(
 
     if (touchesStart) {
       startExt = isDominant ? otherHalfT : -otherHalfT;
+    } else {
+      const vx = wall.start[0] - other.start[0];
+      const vz = wall.start[1] - other.start[1];
+      const proj = vx * oUx + vz * oUz;
+      const perp = Math.abs(-vx * oUz + vz * oUx);
+      if (proj > 0.04 && proj < oLen - 0.04 && perp <= otherHalfT + 0.04) {
+        startExt = -otherHalfT;
+      }
     }
 
     const touchesEnd =
@@ -536,10 +618,75 @@ export function getWallJointExtensions(
 
     if (touchesEnd) {
       endExt = isDominant ? otherHalfT : -otherHalfT;
+    } else {
+      const vx = wall.end[0] - other.start[0];
+      const vz = wall.end[1] - other.start[1];
+      const proj = vx * oUx + vz * oUz;
+      const perp = Math.abs(-vx * oUz + vz * oUx);
+      if (proj > 0.04 && proj < oLen - 0.04 && perp <= otherHalfT + 0.04) {
+        endExt = -otherHalfT;
+      }
     }
   }
 
   return { startExt, endExt };
+}
+
+export function getWallEndCapColors(
+  wall: WallSegment,
+  allWalls: WallSegment[]
+): { startCapColor: string; endCapColor: string } {
+  const defaultWallColor = wall.frontColor || wall.backColor || '#f1f5f9';
+  let startCapColor = defaultWallColor;
+  let endCapColor = defaultWallColor;
+
+  const eps = 0.06;
+  const wDx = wall.end[0] - wall.start[0];
+  const wDz = wall.end[1] - wall.start[1];
+  const wLen = Math.hypot(wDx, wDz) || 1;
+  const wUx = wDx / wLen;
+  const wUz = wDz / wLen;
+
+  for (const other of allWalls) {
+    if (other.id === wall.id) continue;
+    const oDx = other.end[0] - other.start[0];
+    const oDz = other.end[1] - other.start[1];
+    const oLen = Math.hypot(oDx, oDz) || 1;
+    const oUx = oDx / oLen;
+    const oUz = oDz / oLen;
+
+    const cross = Math.abs(wUx * oUz - wUz * oUx);
+    if (cross < 0.15) continue;
+
+    const frontNx = -oUz;
+    const frontNz = oUx;
+
+    const touchesStart =
+      Math.hypot(wall.start[0] - other.start[0], wall.start[1] - other.start[1]) < eps ||
+      Math.hypot(wall.start[0] - other.end[0], wall.start[1] - other.end[1]) < eps;
+
+    if (touchesStart) {
+      const dot = frontNx * wUx + frontNz * wUz;
+      startCapColor =
+        dot >= 0
+          ? other.frontColor || '#f1f5f9'
+          : other.backColor || '#f1f5f9';
+    }
+
+    const touchesEnd =
+      Math.hypot(wall.end[0] - other.start[0], wall.end[1] - other.start[1]) < eps ||
+      Math.hypot(wall.end[0] - other.end[0], wall.end[1] - other.end[1]) < eps;
+
+    if (touchesEnd) {
+      const dot = frontNx * -wUx + frontNz * -wUz;
+      endCapColor =
+        dot >= 0
+          ? other.frontColor || '#f1f5f9'
+          : other.backColor || '#f1f5f9';
+    }
+  }
+
+  return { startCapColor, endCapColor };
 }
 
 export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][][] {
@@ -575,7 +722,7 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
 
   const byId = new Map(clusters.map((c) => [c.id, c]));
   const visitedDirected = new Set<string>();
-  const polygons: [number, number][][] = [];
+  const rawPolygons: { points: [number, number][]; area: number }[] = [];
 
   for (const uNode of clusters) {
     for (const vKey of uNode.neighbors) {
@@ -645,13 +792,163 @@ export function findClosedRoomPolygons(walls: WallSegment[]): [number, number][]
         signedArea *= 0.5;
 
         if (signedArea > 0.15) {
-          polygons.push(polyPoints);
+          rawPolygons.push({ points: polyPoints, area: signedArea });
         }
       }
     }
   }
 
-  return polygons;
+  if (rawPolygons.length > 1) {
+    const sorted = [...rawPolygons].sort((a, b) => a.area - b.area);
+    const largest = sorted[sorted.length - 1];
+    const sumOfOthers = sorted
+      .slice(0, -1)
+      .reduce((acc, item) => acc + item.area, 0);
+    if (Math.abs(largest.area - sumOfOthers) < 0.35) {
+      return sorted.slice(0, -1).map((p) => p.points);
+    }
+  }
+
+  return rawPolygons.map((p) => p.points);
+}
+
+export interface SnapSegment {
+  a: [number, number];
+  b: [number, number];
+}
+
+export function buildRoomSnapData(
+  walls: WallSegment[],
+  floorZones: FloorZone[] = [],
+  standaloneOpenings: StandaloneOpening[] = []
+): {
+  pointTargets: [number, number][];
+  segmentTargets: SnapSegment[];
+} {
+  const pointTargets: [number, number][] = [];
+  const segmentTargets: SnapSegment[] = [];
+
+  for (const w of walls) {
+    pointTargets.push(w.start, w.end);
+    segmentTargets.push({ a: w.start, b: w.end });
+
+    const dx = w.end[0] - w.start[0];
+    const dz = w.end[1] - w.start[1];
+    const len = Math.hypot(dx, dz);
+    if (len > 0.02) {
+      const halfT = Math.max(0.05, w.thicknessM) / 2;
+      const nx = (-dz / len) * halfT;
+      const nz = (dx / len) * halfT;
+
+      const sFront: [number, number] = [
+        Number((w.start[0] + nx).toFixed(3)),
+        Number((w.start[1] + nz).toFixed(3)),
+      ];
+      const eFront: [number, number] = [
+        Number((w.end[0] + nx).toFixed(3)),
+        Number((w.end[1] + nz).toFixed(3)),
+      ];
+      const sBack: [number, number] = [
+        Number((w.start[0] - nx).toFixed(3)),
+        Number((w.start[1] - nz).toFixed(3)),
+      ];
+      const eBack: [number, number] = [
+        Number((w.end[0] - nx).toFixed(3)),
+        Number((w.end[1] - nz).toFixed(3)),
+      ];
+
+      pointTargets.push(sFront, eFront, sBack, eBack);
+      segmentTargets.push({ a: sFront, b: eFront }, { a: sBack, b: eBack });
+    }
+  }
+
+  for (let i = 0; i < walls.length; i++) {
+    for (let j = i + 1; j < walls.length; j++) {
+      const w1 = walls[i];
+      const w2 = walls[j];
+      const sharesVertex =
+        Math.hypot(w1.start[0] - w2.start[0], w1.start[1] - w2.start[1]) < 0.06 ||
+        Math.hypot(w1.start[0] - w2.end[0], w1.start[1] - w2.end[1]) < 0.06 ||
+        Math.hypot(w1.end[0] - w2.start[0], w1.end[1] - w2.start[1]) < 0.06 ||
+        Math.hypot(w1.end[0] - w2.end[0], w1.end[1] - w2.end[1]) < 0.06;
+      if (!sharesVertex) continue;
+
+      const d1x = w1.end[0] - w1.start[0];
+      const d1z = w1.end[1] - w1.start[1];
+      const l1 = Math.hypot(d1x, d1z);
+      const d2x = w2.end[0] - w2.start[0];
+      const d2z = w2.end[1] - w2.start[1];
+      const l2 = Math.hypot(d2x, d2z);
+      if (l1 < 0.05 || l2 < 0.05) continue;
+
+      const denom = d1x * d2z - d1z * d2x;
+      if (Math.abs(denom) < 0.01) continue;
+
+      const n1x = (-d1z / l1) * (w1.thicknessM / 2);
+      const n1z = (d1x / l1) * (w1.thicknessM / 2);
+      const n2x = (-d2z / l2) * (w2.thicknessM / 2);
+      const n2z = (d2x / l2) * (w2.thicknessM / 2);
+
+      for (const s1 of [-1, 1]) {
+        for (const s2 of [-1, 1]) {
+          const p1x = w1.start[0] + n1x * s1;
+          const p1z = w1.start[1] + n1z * s1;
+          const p2x = w2.start[0] + n2x * s2;
+          const p2z = w2.start[1] + n2z * s2;
+
+          const t = ((p2x - p1x) * d2z - (p2z - p1z) * d2x) / denom;
+          const ix = p1x + t * d1x;
+          const iz = p1z + t * d1z;
+          pointTargets.push([Number(ix.toFixed(3)), Number(iz.toFixed(3))]);
+        }
+      }
+    }
+  }
+
+  for (const zone of floorZones) {
+    const pts = zone.points;
+    for (let i = 0; i < pts.length; i++) {
+      pointTargets.push(pts[i]);
+      if (pts.length >= 2) {
+        segmentTargets.push({
+          a: pts[i],
+          b: pts[(i + 1) % pts.length],
+        });
+      }
+    }
+  }
+
+  for (const op of standaloneOpenings) {
+    const [left, right] = getOpeningJambPoints(op);
+    pointTargets.push(left, right);
+  }
+
+  return { pointTargets, segmentTargets };
+}
+
+function projectPointOntoSegment(
+  p: [number, number],
+  a: [number, number],
+  b: [number, number]
+): { point: [number, number]; dist: number } {
+  const dx = b[0] - a[0];
+  const dz = b[1] - a[1];
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq < 0.0001) {
+    return { point: a, dist: Math.hypot(p[0] - a[0], p[1] - a[1]) };
+  }
+  const t = Math.max(
+    0,
+    Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / lenSq)
+  );
+  const proj: [number, number] = [
+    Number((a[0] + t * dx).toFixed(3)),
+    Number((a[1] + t * dz).toFixed(3)),
+  ];
+  return {
+    point: proj,
+    dist: Math.hypot(p[0] - proj[0], p[1] - proj[1]),
+  };
 }
 
 export function snapDrawingPoint(
@@ -659,19 +956,44 @@ export function snapDrawingPoint(
   anchorPoint: [number, number] | null,
   snapTargets: [number, number][],
   angleStepDeg = 45,
-  disableAngleSnap = false
+  disableAngleSnap = false,
+  segmentTargets: SnapSegment[] = [],
+  alignmentPoints: [number, number][] = []
 ): [number, number] {
+  let bestVertex: [number, number] | null = null;
+  let bestVertexDist = 0.24;
   for (const target of snapTargets) {
-    if (Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]) <= 0.22) {
-      return [Number(target[0].toFixed(3)), Number(target[1].toFixed(3))];
+    const d = Math.hypot(rawPoint[0] - target[0], rawPoint[1] - target[1]);
+    if (d <= bestVertexDist) {
+      bestVertexDist = d;
+      bestVertex = [Number(target[0].toFixed(3)), Number(target[1].toFixed(3))];
     }
+  }
+  if (bestVertex) {
+    return bestVertex;
+  }
+
+  let bestEdgePoint: [number, number] | null = null;
+  let bestEdgeDist = 0.18;
+  for (const seg of segmentTargets) {
+    const res = projectPointOntoSegment(rawPoint, seg.a, seg.b);
+    if (res.dist <= bestEdgeDist) {
+      bestEdgeDist = res.dist;
+      bestEdgePoint = res.point;
+    }
+  }
+  if (bestEdgePoint) {
+    return bestEdgePoint;
   }
 
   if (!anchorPoint || disableAngleSnap) {
-    return [
-      Number((Math.round(rawPoint[0] * 20) / 20).toFixed(2)),
-      Number((Math.round(rawPoint[1] * 20) / 20).toFixed(2)),
-    ];
+    let x = Number((Math.round(rawPoint[0] * 20) / 20).toFixed(2));
+    let z = Number((Math.round(rawPoint[1] * 20) / 20).toFixed(2));
+    for (const ap of alignmentPoints) {
+      if (Math.abs(rawPoint[0] - ap[0]) <= 0.14) x = Number(ap[0].toFixed(3));
+      if (Math.abs(rawPoint[1] - ap[1]) <= 0.14) z = Number(ap[1].toFixed(3));
+    }
+    return [x, z];
   }
 
   const dx = rawPoint[0] - anchorPoint[0];
@@ -685,7 +1007,22 @@ export function snapDrawingPoint(
   const snappedDeg = Math.round(rawDeg / angleStepDeg) * angleStepDeg;
   const snappedDist = Math.max(0.05, Math.round(rawDist * 20) / 20);
 
-  return computeEndpointFromAngleAndLength(anchorPoint, snappedDist, snappedDeg);
+  let candidate = computeEndpointFromAngleAndLength(
+    anchorPoint,
+    snappedDist,
+    snappedDeg
+  );
+
+  for (const ap of alignmentPoints) {
+    if (Math.abs(candidate[0] - ap[0]) <= 0.14 && Math.abs(dx) > 0.05) {
+      candidate = [Number(ap[0].toFixed(3)), candidate[1]];
+    }
+    if (Math.abs(candidate[1] - ap[1]) <= 0.14 && Math.abs(dz) > 0.05) {
+      candidate = [candidate[0], Number(ap[1].toFixed(3))];
+    }
+  }
+
+  return candidate;
 }
 
 export function createStarterWalls(defaultThicknessM = 0.15): WallSegment[] {

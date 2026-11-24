@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { CATEGORY_LABELS } from '../types/editor';
 import type {
   CatalogModel,
@@ -16,6 +17,7 @@ import type {
   FloorZone,
   OpeningType,
   RoomConfig,
+  SelectedFloorVertex,
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
@@ -61,6 +63,96 @@ function degToRad(deg: number): number {
   return (deg * Math.PI) / 180;
 }
 
+function BufferedNumberInput({
+  value,
+  onCommit,
+  min,
+  max,
+  step = 1,
+  style,
+  className = 'input-control',
+}: {
+  value: number;
+  onCommit: (nextVal: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  style?: CSSProperties;
+  className?: string;
+}) {
+  const [text, setText] = useState<string>(() => String(value));
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      setText(String(value));
+    }
+  }, [value, isFocused]);
+
+  const clampVal = (num: number): number => {
+    let res = num;
+    if (min !== undefined) res = Math.max(min, res);
+    if (max !== undefined) res = Math.min(max, res);
+    return res;
+  };
+
+  const commitCurrentText = () => {
+    const normalized = text.trim().replace(',', '.');
+    if (normalized === '' || normalized === '-' || normalized === '.') {
+      setText(String(value));
+      return;
+    }
+    const parsed = parseFloat(normalized);
+    if (Number.isNaN(parsed)) {
+      setText(String(value));
+      return;
+    }
+    const clamped = clampVal(parsed);
+    setText(String(clamped));
+    if (clamped !== value) {
+      onCommit(clamped);
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      step={step}
+      min={min}
+      max={max}
+      className={className}
+      style={style}
+      value={text}
+      onFocus={() => setIsFocused(true)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setText(raw);
+        const normalized = raw.trim().replace(',', '.');
+        if (normalized === '' || normalized === '-' || normalized === '.') {
+          return;
+        }
+        const parsed = parseFloat(normalized);
+        if (Number.isNaN(parsed)) return;
+        if (min !== undefined && parsed < min) return;
+        if (max !== undefined && parsed > max) return;
+        onCommit(parsed);
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        commitCurrentText();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+          setText(String(value));
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 export interface SurfaceBatchPatch {
   color?: string;
   textureId?: string | null;
@@ -88,6 +180,7 @@ export interface RightInspectorProps {
   discoveredMaterialSlots: DiscoveredMaterialSlot[];
 
   selectedWallVertex: SelectedWallVertex | null;
+  selectedFloorVertex: SelectedFloorVertex | null;
   linkedVertexJoint: boolean;
   autoStraightenVertices: boolean;
   wallLengthInput: string;
@@ -119,6 +212,14 @@ export interface RightInspectorProps {
   onDeleteStandaloneOpening: (id: string) => void;
 
   onSelectFloorZone: (id: string | null) => void;
+  onSelectFloorVertex: (v: SelectedFloorVertex | null) => void;
+  onUpdateFloorZoneVertex: (
+    zoneId: string,
+    pointIndex: number,
+    nextPoint: [number, number]
+  ) => void;
+  onInsertFloorZoneVertexAfter: (zoneId: string, pointIndex: number) => void;
+  onDeleteFloorZoneVertex: (zoneId: string, pointIndex: number) => void;
   onUpdateFloorZone: (id: string, patch: Partial<FloorZone>) => void;
   onDuplicateFloorZone: (id: string) => void;
   onDeleteFloorZone: (id: string) => void;
@@ -159,6 +260,7 @@ export function RightInspector({
   selectedModel,
   discoveredMaterialSlots,
   selectedWallVertex,
+  selectedFloorVertex,
   linkedVertexJoint,
   autoStraightenVertices,
   wallLengthInput,
@@ -184,6 +286,10 @@ export function RightInspector({
   onDuplicateStandaloneOpening,
   onDeleteStandaloneOpening,
   onSelectFloorZone,
+  onSelectFloorVertex,
+  onUpdateFloorZoneVertex,
+  onInsertFloorZoneVertexAfter,
+  onDeleteFloorZoneVertex,
   onUpdateFloorZone,
   onDuplicateFloorZone,
   onDeleteFloorZone,
@@ -219,7 +325,6 @@ export function RightInspector({
     [textures]
   );
 
-  // Анализираме първата селектирана повърхност, за да покажем текущите ѝ стойности за UVW / текстура / цвят
   const primarySurfaceInfo = useMemo(() => {
     const first = selectedSurfaces[0];
     if (!first) return null;
@@ -364,6 +469,16 @@ export function RightInspector({
     ? Math.round(primarySurfaceInfo.textureMeta.tileHeightM * 100)
     : 60;
 
+  const activeFloorVertexPoint =
+    selectedFloorZone &&
+    selectedFloorVertex?.zoneId === selectedFloorZone.id &&
+    selectedFloorZone.points[selectedFloorVertex.pointIndex]
+      ? {
+          index: selectedFloorVertex.pointIndex,
+          point: selectedFloorZone.points[selectedFloorVertex.pointIndex],
+        }
+      : null;
+
   return (
     <aside className="sidebar-right">
       <div className="panel-header">
@@ -390,7 +505,7 @@ export function RightInspector({
       </div>
 
       <div className="panel-body">
-        {/* 1. ОБЩ ПАНЕЛ ЗА МАТЕРИАЛ + CUSTOM UVW НА СЕЛЕКТИРАНИТЕ ПОЛИГОНИ (1 или много със Shift) */}
+        {/* 1. ОБЩ ПАНЕЛ ЗА МАТЕРИАЛ + CUSTOM UVW НА СЕЛЕКТИРАНИТЕ ПОЛИГОНИ */}
         {primarySurfaceInfo && selectedSurfaces.length > 0 && (
           <div
             style={{
@@ -490,7 +605,7 @@ export function RightInspector({
               </select>
             </div>
 
-            {/* Височина на плочките на стената (напр. за баня) */}
+            {/* Височина на плочките на стената */}
             {primarySurfaceInfo.hasWalls && primarySurfaceInfo.textureId && (
               <div className="axis-field">
                 <span>Височина на облицовката (м) — празно = до тавана</span>
@@ -549,36 +664,28 @@ export function RightInspector({
                 <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
                   <div className="axis-field">
                     <span>Ширина плочка (см)</span>
-                    <input
-                      type="number"
+                    <BufferedNumberInput
                       step={5}
                       min={5}
                       max={1000}
-                      className="input-control"
                       value={primarySurfaceInfo.uvw.tileWidthCm ?? defaultTileWCm}
-                      onChange={(e) =>
+                      onCommit={(val) =>
                         onApplySurfaceBatch({
-                          uvwPatch: {
-                            tileWidthCm: Math.max(5, parseFloat(e.target.value) || defaultTileWCm),
-                          },
+                          uvwPatch: { tileWidthCm: val },
                         })
                       }
                     />
                   </div>
                   <div className="axis-field">
                     <span>Височина плочка (см)</span>
-                    <input
-                      type="number"
+                    <BufferedNumberInput
                       step={5}
                       min={5}
                       max={1000}
-                      className="input-control"
                       value={primarySurfaceInfo.uvw.tileHeightCm ?? defaultTileHCm}
-                      onChange={(e) =>
+                      onCommit={(val) =>
                         onApplySurfaceBatch({
-                          uvwPatch: {
-                            tileHeightCm: Math.max(5, parseFloat(e.target.value) || defaultTileHCm),
-                          },
+                          uvwPatch: { tileHeightCm: val },
                         })
                       }
                     />
@@ -601,15 +708,13 @@ export function RightInspector({
                         {deg}°
                       </button>
                     ))}
-                    <input
-                      type="number"
+                    <BufferedNumberInput
                       step={15}
-                      className="input-control"
                       style={{ width: '58px', padding: '3px 5px', fontSize: '11px' }}
                       value={primarySurfaceInfo.uvw.rotationDeg ?? 0}
-                      onChange={(e) =>
+                      onCommit={(val) =>
                         onApplySurfaceBatch({
-                          uvwPatch: { rotationDeg: parseFloat(e.target.value) || 0 },
+                          uvwPatch: { rotationDeg: val },
                         })
                       }
                     />
@@ -619,28 +724,24 @@ export function RightInspector({
                 <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
                   <div className="axis-field">
                     <span>Отместване U (см)</span>
-                    <input
-                      type="number"
+                    <BufferedNumberInput
                       step={5}
-                      className="input-control"
                       value={primarySurfaceInfo.uvw.offsetXCm ?? 0}
-                      onChange={(e) =>
+                      onCommit={(val) =>
                         onApplySurfaceBatch({
-                          uvwPatch: { offsetXCm: parseFloat(e.target.value) || 0 },
+                          uvwPatch: { offsetXCm: val },
                         })
                       }
                     />
                   </div>
                   <div className="axis-field">
                     <span>Отместване V (см)</span>
-                    <input
-                      type="number"
+                    <BufferedNumberInput
                       step={5}
-                      className="input-control"
                       value={primarySurfaceInfo.uvw.offsetYCm ?? 0}
-                      onChange={(e) =>
+                      onCommit={(val) =>
                         onApplySurfaceBatch({
-                          uvwPatch: { offsetYCm: parseFloat(e.target.value) || 0 },
+                          uvwPatch: { offsetYCm: val },
                         })
                       }
                     />
@@ -695,7 +796,7 @@ export function RightInspector({
           </div>
         )}
 
-        {/* 2. ДОПЪЛНИТЕЛНИ НАСТРОЙКИ ЗА ЕДИНИЧНА ПОДОВА ЗОНА (име, дублиране, изтриване) */}
+        {/* 2. ДОПЪЛНИТЕЛНИ НАСТРОЙКИ И ВЪРТЕКСИ ЗА ЕДИНИЧНА ПОДОВА ЗОНА */}
         {selectedFloorZone && selectedSurfaces.length <= 1 && (
           <div
             style={{
@@ -718,6 +819,139 @@ export function RightInspector({
                   onUpdateFloorZone(selectedFloorZone.id, { name: e.target.value })
                 }
               />
+            </div>
+
+            {/* Въртекси (ъгли) на подовата зона */}
+            <div
+              style={{
+                backgroundColor: '#1e293b',
+                border: '1px solid #334155',
+                borderRadius: '6px',
+                padding: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}
+            >
+              <div className="section-label" style={{ marginBottom: 0 }}>
+                Въртекси (ъгли) на пода ({selectedFloorZone.points.length})
+              </div>
+              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
+                Избери ъгъл от списъка или кликни зеления маркер в 3D, за да го преместиш със Snap.
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: '4px',
+                }}
+              >
+                {selectedFloorZone.points.map((pt, idx) => {
+                  const isActiveV =
+                    selectedFloorVertex?.zoneId === selectedFloorZone.id &&
+                    selectedFloorVertex?.pointIndex === idx;
+                  return (
+                    <button
+                      key={`fz-v-${idx}`}
+                      type="button"
+                      className={`btn ${isActiveV ? 'btn-active' : ''}`}
+                      style={{ fontSize: '10px', padding: '4px 6px' }}
+                      onClick={() =>
+                        onSelectFloorVertex(
+                          isActiveV
+                            ? null
+                            : { zoneId: selectedFloorZone.id, pointIndex: idx }
+                        )
+                      }
+                    >
+                      #{idx + 1} ({pt[0]}, {pt[1]})
+                    </button>
+                  );
+                })}
+              </div>
+
+              {activeFloorVertexPoint && (
+                <div
+                  style={{
+                    backgroundColor: '#0f172a',
+                    border: '1px solid #475569',
+                    borderRadius: '5px',
+                    padding: '6px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                    <div className="axis-field">
+                      <span>Ъгъл #{activeFloorVertexPoint.index + 1} X (м)</span>
+                      <BufferedNumberInput
+                        step={0.05}
+                        value={activeFloorVertexPoint.point[0]}
+                        onCommit={(val) =>
+                          onUpdateFloorZoneVertex(
+                            selectedFloorZone.id,
+                            activeFloorVertexPoint.index,
+                            [
+                              Number(val.toFixed(3)),
+                              activeFloorVertexPoint.point[1],
+                            ]
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="axis-field">
+                      <span>Ъгъл #{activeFloorVertexPoint.index + 1} Z (м)</span>
+                      <BufferedNumberInput
+                        step={0.05}
+                        value={activeFloorVertexPoint.point[1]}
+                        onCommit={(val) =>
+                          onUpdateFloorZoneVertex(
+                            selectedFloorZone.id,
+                            activeFloorVertexPoint.index,
+                            [
+                              activeFloorVertexPoint.point[0],
+                              Number(val.toFixed(3)),
+                            ]
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
+                      onClick={() =>
+                        onInsertFloorZoneVertexAfter(
+                          selectedFloorZone.id,
+                          activeFloorVertexPoint.index
+                        )
+                      }
+                    >
+                      + Нов връх след #{activeFloorVertexPoint.index + 1}
+                    </button>
+                    {selectedFloorZone.points.length > 3 && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        style={{ fontSize: '10px', padding: '4px 6px' }}
+                        onClick={() =>
+                          onDeleteFloorZoneVertex(
+                            selectedFloorZone.id,
+                            activeFloorVertexPoint.index
+                          )
+                        }
+                      >
+                        Изтрий връх
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'flex', gap: '6px' }}>
@@ -1373,7 +1607,7 @@ export function RightInspector({
           </>
         ) : selectedSurfaces.length === 0 && (!selectedObject || !selectedModel) ? (
           <>
-            {/* 5. ОБЩИ НАСТРОЙКИ НА СЦЕНАТА (когато няма нищо селектирано) */}
+            {/* 5. ОБЩИ НАСТРОЙКИ НА СЦЕНАТА */}
             <div
               style={{
                 backgroundColor: '#0f172a',

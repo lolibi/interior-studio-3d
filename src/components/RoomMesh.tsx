@@ -8,9 +8,11 @@ import type {
   TransformTool,
 } from '../types/editor';
 import {
+  applyVertexMoveToFloorZone,
   applyVertexMoveToWalls,
+  buildRoomSnapData,
   findClosedRoomPolygons,
-  getOpeningJambPoints,
+  getWallEndCapColors,
   getWallJointExtensions,
   isSameSurface,
   snapDrawingPoint,
@@ -21,7 +23,9 @@ import type {
   CustomUvwSettings,
   FloorZone,
   RoomConfig,
+  SelectedFloorVertex,
   SelectedWallVertex,
+  SnapSegment,
   StandaloneOpening,
   SurfaceTarget,
   WallOpening,
@@ -39,6 +43,7 @@ interface RoomMeshProps {
   selectedSurfaces?: SurfaceTarget[];
   draggedTextureId?: string | null;
   selectedWallVertex?: SelectedWallVertex | null;
+  selectedFloorVertex?: SelectedFloorVertex | null;
   linkedVertexJoint?: boolean;
   autoStraightenVertices?: boolean;
   onSelectWall: (wallId: string | null) => void;
@@ -48,11 +53,13 @@ interface RoomMeshProps {
   onSelectStandaloneOpening: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
   onSelectWallVertex?: (vertex: SelectedWallVertex | null) => void;
+  onSelectFloorVertex?: (vertex: SelectedFloorVertex | null) => void;
   onUpdateStandaloneOpening: (
     openingId: string,
     patch: Partial<StandaloneOpening>
   ) => void;
   onCommitWallsFromVertex?: (nextWalls: WallSegment[]) => void;
+  onCommitFloorZonesFromVertex?: (nextZones: FloorZone[]) => void;
   isDrawingWalls: boolean;
   draftPoints: [number, number][];
   hoverPoint: [number, number] | null;
@@ -171,7 +178,6 @@ function resolveEffectiveTileMeters(
     uvw?.tileHeightCm && uvw.tileHeightCm > 1 ? uvw.tileHeightCm / 100 : baseHM;
   const rotDeg = uvw?.rotationDeg ?? 0;
 
-  // Изместване в брой плочки спрямо зададените сантиметри
   const offU = uvw?.offsetXCm ? uvw.offsetXCm / 100 / tileWM : 0;
   const offV = uvw?.offsetYCm ? uvw.offsetYCm / 100 / tileHM : 0;
 
@@ -575,7 +581,7 @@ function WallVertexHandlesAndPivot({
   onCommitWalls: (nextWalls: WallSegment[]) => void;
   onDraggingChange: (dragging: boolean) => void;
 }) {
-  const pivotRef = useRef<THREE.Object3D | null>(null);
+  const [pivotObj, setPivotObj] = useState<THREE.Object3D | null>(null);
   const latestWallsRef = useRef<WallSegment[]>(walls);
   latestWallsRef.current = walls;
 
@@ -650,25 +656,25 @@ function WallVertexHandlesAndPivot({
       {activeVertex && (
         <>
           <object3D
-            ref={pivotRef}
+            ref={setPivotObj}
             position={[activeVertex.point[0], gizmoY, activeVertex.point[1]]}
           />
-          {pivotRef.current && (
+          {pivotObj && (
             <TransformControls
-              object={pivotRef.current}
+              object={pivotObj}
               mode="translate"
               size={0.8}
               showY={false}
               onMouseDown={() => onDraggingChange(true)}
               onObjectChange={() => {
-                const obj = pivotRef.current;
-                if (!obj) return;
-
                 const nextWalls = applyVertexMoveToWalls(
                   walls,
                   activeVertex.wallId,
                   activeVertex.endKey,
-                  [Number(obj.position.x.toFixed(3)), Number(obj.position.z.toFixed(3))],
+                  [
+                    Number(pivotObj.position.x.toFixed(3)),
+                    Number(pivotObj.position.z.toFixed(3)),
+                  ],
                   snapTargets,
                   {
                     linkedJoint: linkedVertexJoint,
@@ -684,7 +690,7 @@ function WallVertexHandlesAndPivot({
                     activeVertex.endKey === 'start'
                       ? updatedW.start
                       : updatedW.end;
-                  obj.position.set(syncedPt[0], gizmoY, syncedPt[1]);
+                  pivotObj.position.set(syncedPt[0], gizmoY, syncedPt[1]);
                 }
 
                 latestWallsRef.current = nextWalls;
@@ -695,6 +701,147 @@ function WallVertexHandlesAndPivot({
                 const finalWalls = latestWallsRef.current;
                 onLiveWallsChange(null);
                 onCommitWalls(finalWalls);
+              }}
+            />
+          )}
+        </>
+      )}
+    </group>
+  );
+}
+
+function FloorZoneVertexHandlesAndPivot({
+  floorZones,
+  selectedFloorZoneId,
+  selectedFloorVertex,
+  snapTargets,
+  segmentTargets,
+  onSelectFloorVertex,
+  onLiveFloorZonesChange,
+  onCommitFloorZones,
+  onDraggingChange,
+}: {
+  floorZones: FloorZone[];
+  selectedFloorZoneId: string | null;
+  selectedFloorVertex: SelectedFloorVertex | null;
+  snapTargets: [number, number][];
+  segmentTargets: SnapSegment[];
+  onSelectFloorVertex: (vertex: SelectedFloorVertex | null) => void;
+  onLiveFloorZonesChange: (nextZones: FloorZone[] | null) => void;
+  onCommitFloorZones: (nextZones: FloorZone[]) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const [pivotObj, setPivotObj] = useState<THREE.Object3D | null>(null);
+  const latestZonesRef = useRef<FloorZone[]>(floorZones);
+  latestZonesRef.current = floorZones;
+
+  const focusedZoneId = selectedFloorVertex?.zoneId ?? selectedFloorZoneId;
+
+  const activeVertex = useMemo(() => {
+    if (!selectedFloorVertex) return null;
+    const zone = floorZones.find((z) => z.id === selectedFloorVertex.zoneId);
+    if (!zone) return null;
+    const pt = zone.points[selectedFloorVertex.pointIndex];
+    if (!pt) return null;
+    return {
+      zoneId: zone.id,
+      pointIndex: selectedFloorVertex.pointIndex,
+      point: pt,
+    };
+  }, [floorZones, selectedFloorVertex]);
+
+  const pinHeightM = 0.28;
+  const gizmoY = 0.22;
+
+  return (
+    <group>
+      {floorZones.map((zone) => {
+        if (zone.id !== focusedZoneId) return null;
+
+        return (
+          <group key={`floor-handles-${zone.id}`}>
+            {zone.points.map((pt, idx) => {
+              const isSelected =
+                selectedFloorVertex?.zoneId === zone.id &&
+                selectedFloorVertex?.pointIndex === idx;
+              const radius = isSelected ? 0.095 : 0.075;
+
+              return (
+                <group
+                  key={`${zone.id}-v-${idx}`}
+                  position={[pt[0], 0, pt[1]]}
+                  onClick={(e: ThreeEvent<MouseEvent>) => {
+                    e.stopPropagation();
+                    onSelectFloorVertex({ zoneId: zone.id, pointIndex: idx });
+                  }}
+                >
+                  <mesh position={[0, pinHeightM / 2, 0]}>
+                    <cylinderGeometry args={[radius * 0.65, radius * 0.65, pinHeightM, 16]} />
+                    <meshStandardMaterial
+                      color={isSelected ? '#f59e0b' : '#10b981'}
+                      emissive={isSelected ? '#d97706' : '#059669'}
+                      emissiveIntensity={0.45}
+                      roughness={0.3}
+                    />
+                  </mesh>
+                  <mesh position={[0, pinHeightM + 0.03, 0]}>
+                    <sphereGeometry args={[radius, 18, 18]} />
+                    <meshStandardMaterial
+                      color={isSelected ? '#fbbf24' : '#34d399'}
+                      emissive={isSelected ? '#b45309' : '#059669'}
+                      emissiveIntensity={0.45}
+                      roughness={0.25}
+                    />
+                  </mesh>
+                </group>
+              );
+            })}
+          </group>
+        );
+      })}
+
+      {activeVertex && (
+        <>
+          <object3D
+            ref={setPivotObj}
+            position={[activeVertex.point[0], gizmoY, activeVertex.point[1]]}
+          />
+          {pivotObj && (
+            <TransformControls
+              object={pivotObj}
+              mode="translate"
+              size={0.75}
+              showY={false}
+              onMouseDown={() => onDraggingChange(true)}
+              onObjectChange={() => {
+                const nextZones = applyVertexMoveToFloorZone(
+                  floorZones,
+                  activeVertex.zoneId,
+                  activeVertex.pointIndex,
+                  [
+                    Number(pivotObj.position.x.toFixed(3)),
+                    Number(pivotObj.position.z.toFixed(3)),
+                  ],
+                  snapTargets,
+                  segmentTargets
+                );
+
+                const updatedZone = nextZones.find(
+                  (z) => z.id === activeVertex.zoneId
+                );
+                const syncedPt = updatedZone?.points[activeVertex.pointIndex];
+                if (syncedPt) {
+                  pivotObj.position.set(syncedPt[0], gizmoY, syncedPt[1]);
+                }
+
+                latestZonesRef.current = nextZones;
+                onLiveFloorZonesChange(nextZones);
+              }}
+              onMouseUp={() => {
+                onDraggingChange(false);
+                const finalZones = latestZonesRef.current;
+                onLiveFloorZonesChange(null);
+                onCommitFloorZones(finalZones);
               }}
             />
           )}
@@ -766,7 +913,7 @@ function FloorplanOverlay({
 
   return (
     <group
-      position={[fp.offsetX, 0.002, fp.offsetZ]}
+      position={[fp.offsetX, 0.0005, fp.offsetZ]}
       rotation={[-Math.PI / 2, 0, -rotRad]}
     >
       <mesh
@@ -894,8 +1041,12 @@ function FloorZonePolygonMesh({
 
   if (!geometry) return null;
 
-  const effectiveRoughness = textureMeta ? textureMeta.roughness : roughness;
-  const effectiveMetalness = textureMeta ? textureMeta.metalness : metalness;
+  const effectiveRoughness = textureMeta
+    ? textureMeta.roughness ?? roughness
+    : roughness;
+  const effectiveMetalness = textureMeta
+    ? textureMeta.metalness ?? metalness
+    : metalness;
 
   const highlightColor = isDropHovered
     ? '#34d399'
@@ -998,8 +1149,8 @@ function WallFaceSpanMesh({
         key={tex ? `wtex-${textureMeta?.id}` : 'wsolid'}
         map={tex ?? undefined}
         color={tintColor}
-        roughness={textureMeta ? textureMeta.roughness : 0.78}
-        metalness={textureMeta ? textureMeta.metalness : 0.04}
+        roughness={textureMeta ? textureMeta.roughness ?? 0.78 : 0.78}
+        metalness={textureMeta ? textureMeta.metalness ?? 0.04 : 0.04}
         polygonOffset
         polygonOffsetFactor={isSelected || isDropHovered ? -4 : -1}
         polygonOffsetUnits={-1}
@@ -1211,19 +1362,25 @@ function WallSegmentItem({
     .filter((op) => op.widthM > 0.02)
     .sort((a, b) => a.offsetFromStartM - b.offsetFromStartM);
 
-  const coreColor =
-    isWallSelected && !isFrontFaceSelected && !isBackFaceSelected
-      ? '#93c5fd'
-      : '#e2e8f0';
-
   const frontColor = wall.frontColor || '#f1f5f9';
   const backColor = wall.backColor || '#f1f5f9';
+  const { startCapColor, endCapColor } = getWallEndCapColors(wall, allWalls);
+
+  const isNeutralSelected =
+    isWallSelected && !isFrontFaceSelected && !isBackFaceSelected;
+
+  const topRimColor = isNeutralSelected ? '#93c5fd' : '#f1f5f9';
+  const leftCapColor = isNeutralSelected ? '#93c5fd' : startCapColor;
+  const rightCapColor = isNeutralSelected ? '#93c5fd' : endCapColor;
+
   const frontTex = wall.frontTextureId
     ? texturesById.get(wall.frontTextureId) ?? null
     : null;
   const backTex = wall.backTextureId
     ? texturesById.get(wall.backTextureId) ?? null
     : null;
+
+  const wallBaseY = -0.004;
 
   const spans: SolidSpan[] = [];
   let cursorM = 0;
@@ -1233,7 +1390,7 @@ function WallSegmentItem({
       spans.push({
         startM: cursorM,
         endM: op.offsetFromStartM,
-        bottomY: 0,
+        bottomY: wallBaseY,
         topY: ceilingHeightM,
       });
     }
@@ -1242,7 +1399,7 @@ function WallSegmentItem({
       spans.push({
         startM: op.offsetFromStartM,
         endM: op.offsetFromStartM + op.widthM,
-        bottomY: 0,
+        bottomY: wallBaseY,
         topY: op.sillHeightM,
       });
     }
@@ -1264,7 +1421,7 @@ function WallSegmentItem({
     spans.push({
       startM: cursorM,
       endM: length,
-      bottomY: 0,
+      bottomY: wallBaseY,
       topY: ceilingHeightM,
     });
   }
@@ -1286,7 +1443,6 @@ function WallSegmentItem({
 
   return (
     <group position={[centerX, 0, centerZ]} rotation={[0, -angleRad, 0]}>
-      {/* Сърцевина на стената (ръбове и дебелина) */}
       {spans.map((sp, idx) => {
         const segLen = sp.endM - sp.startM;
         const segHeight = sp.topY - sp.bottomY;
@@ -1302,7 +1458,6 @@ function WallSegmentItem({
             onClick={(e: ThreeEvent<MouseEvent>) => {
               if (isBusy) return;
               e.stopPropagation();
-              // Определяме от коя страна на стената е кликнал потребителят по нормалата
               const nz = e.face?.normal?.z ?? 1;
               const side: 'front' | 'back' = nz < 0 ? 'back' : 'front';
               onSelectWallFace(side, Boolean(e.shiftKey));
@@ -1310,15 +1465,45 @@ function WallSegmentItem({
           >
             <boxGeometry args={[segLen, segHeight, thickness]} />
             <meshStandardMaterial
-              color={coreColor}
-              roughness={0.75}
-              metalness={0.05}
+              attach="material-0"
+              color={rightCapColor}
+              roughness={0.78}
+              metalness={0.04}
+            />
+            <meshStandardMaterial
+              attach="material-1"
+              color={leftCapColor}
+              roughness={0.78}
+              metalness={0.04}
+            />
+            <meshStandardMaterial
+              attach="material-2"
+              color={topRimColor}
+              roughness={0.78}
+              metalness={0.04}
+            />
+            <meshStandardMaterial
+              attach="material-3"
+              color={topRimColor}
+              roughness={0.78}
+              metalness={0.04}
+            />
+            <meshStandardMaterial
+              attach="material-4"
+              color={frontColor}
+              roughness={0.78}
+              metalness={0.04}
+            />
+            <meshStandardMaterial
+              attach="material-5"
+              color={backColor}
+              roughness={0.78}
+              metalness={0.04}
             />
           </mesh>
         );
       })}
 
-      {/* Лице А (+Z) — директно кликаемо и приемащо Drag & Drop */}
       <WallFaceOverlay
         spans={spans}
         length={length}
@@ -1352,7 +1537,6 @@ function WallSegmentItem({
         }}
       />
 
-      {/* Лице Б (-Z) — директно кликаемо и приемащо Drag & Drop */}
       <WallFaceOverlay
         spans={spans}
         length={length}
@@ -1435,10 +1619,11 @@ export function RoomMesh({
   selectedWallId,
   selectedOpeningId,
   selectedStandaloneOpeningId,
-  selectedFloorZoneId,
+  selectedFloorZoneId = null,
   selectedSurfaces = [],
   draggedTextureId = null,
   selectedWallVertex = null,
+  selectedFloorVertex = null,
   linkedVertexJoint = true,
   autoStraightenVertices = true,
   onSelectWall,
@@ -1448,8 +1633,10 @@ export function RoomMesh({
   onSelectStandaloneOpening,
   onSelectFloorZone,
   onSelectWallVertex,
+  onSelectFloorVertex,
   onUpdateStandaloneOpening,
   onCommitWallsFromVertex,
+  onCommitFloorZonesFromVertex,
   isDrawingWalls,
   draftPoints,
   hoverPoint,
@@ -1466,6 +1653,7 @@ export function RoomMesh({
 }: RoomMeshProps) {
   const [liveOpening, setLiveOpening] = useState<StandaloneOpening | null>(null);
   const [liveWalls, setLiveWalls] = useState<WallSegment[] | null>(null);
+  const [liveFloorZones, setLiveFloorZones] = useState<FloorZone[] | null>(null);
   const [hoveredDropKey, setHoveredDropKey] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1486,6 +1674,10 @@ export function RoomMesh({
   useEffect(() => {
     setLiveWalls(null);
   }, [room.walls]);
+
+  useEffect(() => {
+    setLiveFloorZones(null);
+  }, [room.floorZones]);
 
   const effectiveWalls = useMemo(() => {
     const base = liveWalls ?? room.walls;
@@ -1519,7 +1711,10 @@ export function RoomMesh({
     });
   }, [effectiveWalls]);
 
-  const floorZones: FloorZone[] = room.floorZones ?? [];
+  const floorZones: FloorZone[] = useMemo(
+    () => liveFloorZones ?? (room.floorZones ?? []),
+    [liveFloorZones, room.floorZones]
+  );
 
   const effectiveStandaloneOpenings = useMemo(() => {
     const base = room.openings ?? [];
@@ -1527,17 +1722,15 @@ export function RoomMesh({
     return base.map((op) => (op.id === liveOpening.id ? liveOpening : op));
   }, [room.openings, liveOpening]);
 
-  const snapTargets = useMemo<[number, number][]>(() => {
-    const pts: [number, number][] = [];
-    for (const w of effectiveWalls) {
-      pts.push(w.start, w.end);
-    }
-    for (const op of effectiveStandaloneOpenings) {
-      const [left, right] = getOpeningJambPoints(op);
-      pts.push(left, right);
-    }
-    return pts;
-  }, [effectiveWalls, effectiveStandaloneOpenings]);
+  const { pointTargets: snapTargets, segmentTargets } = useMemo(
+    () =>
+      buildRoomSnapData(
+        effectiveWalls,
+        floorZones,
+        effectiveStandaloneOpenings
+      ),
+    [effectiveWalls, floorZones, effectiveStandaloneOpenings]
+  );
 
   const activeDraftPts = isDrawingFloorZone ? zoneDraftPoints : draftPoints;
   const anchorPoint =
@@ -1551,7 +1744,15 @@ export function RoomMesh({
         return [first[0], first[1]];
       }
     }
-    return snapDrawingPoint(hoverPoint, anchorPoint, snapTargets, 45, false);
+    return snapDrawingPoint(
+      hoverPoint,
+      anchorPoint,
+      snapTargets,
+      45,
+      false,
+      segmentTargets,
+      activeDraftPts
+    );
   }, [
     isDrawingWalls,
     isDrawingFloorZone,
@@ -1559,9 +1760,28 @@ export function RoomMesh({
     activeDraftPts,
     anchorPoint,
     snapTargets,
+    segmentTargets,
   ]);
 
   const isAnyDrawMode = isDrawingWalls || isDrawingFloorZone;
+
+  const computeSnappedPoint = (raw: [number, number]): [number, number] => {
+    if (activeDraftPts.length >= 3) {
+      const first = activeDraftPts[0];
+      if (Math.hypot(raw[0] - first[0], raw[1] - first[1]) <= 0.25) {
+        return [first[0], first[1]];
+      }
+    }
+    return snapDrawingPoint(
+      raw,
+      anchorPoint,
+      snapTargets,
+      45,
+      false,
+      segmentTargets,
+      activeDraftPts
+    );
+  };
 
   return (
     <group>
@@ -1572,10 +1792,15 @@ export function RoomMesh({
         onPointerMove={(e: ThreeEvent<PointerEvent>) => {
           if (!isAnyDrawMode && !isCalibratingPlan) return;
           e.stopPropagation();
-          onHoverPointChange([
+          const raw: [number, number] = [
             Number(e.point.x.toFixed(3)),
             Number(e.point.z.toFixed(3)),
-          ]);
+          ];
+          if (isCalibratingPlan) {
+            onHoverPointChange(raw);
+          } else {
+            onHoverPointChange(computeSnappedPoint(raw));
+          }
         }}
         onClick={(e: ThreeEvent<MouseEvent>) => {
           if (e.button !== 0) return;
@@ -1596,20 +1821,8 @@ export function RoomMesh({
             Number(e.point.x.toFixed(3)),
             Number(e.point.z.toFixed(3)),
           ];
+          const snapped = computeSnappedPoint(raw);
 
-          if (activeDraftPts.length >= 3) {
-            const first = activeDraftPts[0];
-            if (Math.hypot(raw[0] - first[0], raw[1] - first[1]) <= 0.25) {
-              if (isDrawingFloorZone && onFloorZoneDrawClick) {
-                onFloorZoneDrawClick([first[0], first[1]]);
-              } else {
-                onFloorDrawClick([first[0], first[1]]);
-              }
-              return;
-            }
-          }
-
-          const snapped = snapDrawingPoint(raw, anchorPoint, snapTargets, 45, false);
           if (isDrawingFloorZone && onFloorZoneDrawClick) {
             onFloorZoneDrawClick(snapped);
           } else {
@@ -1636,22 +1849,36 @@ export function RoomMesh({
           color="#cbd5e1"
           roughness={0.7}
           metalness={0.05}
-          opacity={0.42}
-          yOffset={0.003 + idx * 0.001}
+          opacity={0.35}
+          yOffset={0.001 + idx * 0.0005}
           polygonOffsetFactor={-1 - idx}
           isSelected={false}
           onClick={(e) => {
-            if (isAnyDrawMode || isCalibratingPlan) return;
+            if (isCalibratingPlan) return;
+            if (isAnyDrawMode) {
+              e.stopPropagation();
+              const raw: [number, number] = [
+                Number(e.point.x.toFixed(3)),
+                Number(e.point.z.toFixed(3)),
+              ];
+              const snapped = computeSnappedPoint(raw);
+              if (isDrawingFloorZone && onFloorZoneDrawClick) {
+                onFloorZoneDrawClick(snapped);
+              } else {
+                onFloorDrawClick(snapped);
+              }
+              return;
+            }
             e.stopPropagation();
             onSelectWall(null);
             onSelectStandaloneOpening(null);
             onSelectFloorZone?.(null);
             onSelectWallVertex?.(null);
+            onSelectFloorVertex?.(null);
           }}
         />
       ))}
 
-      {/* Таван над затворените помещения (активира се при изглед Отвътре / с таван) */}
       {room.showCeiling &&
         autoPolygons.map((poly, idx) => (
           <FloorZonePolygonMesh
@@ -1685,15 +1912,29 @@ export function RoomMesh({
             roughness={zone.roughness ?? 0.55}
             metalness={zone.metalness ?? 0.05}
             opacity={1}
-            yOffset={0.015 + idx * 0.0015}
-            polygonOffsetFactor={-10 - idx}
+            yOffset={0.003 + idx * 0.001}
+            polygonOffsetFactor={-6 - idx}
             textureMeta={texMeta}
             uvw={zone.uvw}
             legacyRotationDeg={zone.textureRotationDeg ?? 0}
             isSelected={isZoneSelected}
             isDropHovered={hoveredDropKey === zoneKey}
             onClick={(e) => {
-              if (isAnyDrawMode || isCalibratingPlan) return;
+              if (isCalibratingPlan) return;
+              if (isAnyDrawMode) {
+                e.stopPropagation();
+                const raw: [number, number] = [
+                  Number(e.point.x.toFixed(3)),
+                  Number(e.point.z.toFixed(3)),
+                ];
+                const snapped = computeSnappedPoint(raw);
+                if (isDrawingFloorZone && onFloorZoneDrawClick) {
+                  onFloorZoneDrawClick(snapped);
+                } else {
+                  onFloorDrawClick(snapped);
+                }
+                return;
+              }
               e.stopPropagation();
               if (onSelectSurface) {
                 onSelectSurface(zoneTarget, Boolean(e.shiftKey));
@@ -1782,6 +2023,22 @@ export function RoomMesh({
         />
       )}
 
+      {!isAnyDrawMode && !isCalibratingPlan && (
+        <FloorZoneVertexHandlesAndPivot
+          floorZones={floorZones}
+          selectedFloorZoneId={selectedFloorZoneId}
+          selectedFloorVertex={selectedFloorVertex}
+          snapTargets={snapTargets}
+          segmentTargets={segmentTargets}
+          onSelectFloorVertex={(v) => onSelectFloorVertex?.(v)}
+          onLiveFloorZonesChange={setLiveFloorZones}
+          onCommitFloorZones={(nextZones) =>
+            onCommitFloorZonesFromVertex?.(nextZones)
+          }
+          onDraggingChange={onDraggingChange}
+        />
+      )}
+
       {effectiveStandaloneOpenings.map((op) => (
         <StandaloneOpeningItem
           key={op.id}
@@ -1810,7 +2067,9 @@ export function RoomMesh({
             <meshBasicMaterial
               color={
                 isDrawingFloorZone
-                  ? '#f59e0b'
+                  ? idx === 0
+                    ? '#22c55e'
+                    : '#f59e0b'
                   : idx === 0
                     ? '#22c55e'
                     : '#38bdf8'
@@ -1850,6 +2109,13 @@ export function RoomMesh({
           );
         })}
 
+      {isAnyDrawMode && !anchorPoint && snappedHover && (
+        <mesh position={[snappedHover[0], 0.045, snappedHover[1]]}>
+          <sphereGeometry args={[0.075, 16, 16]} />
+          <meshBasicMaterial color={isDrawingFloorZone ? '#fbbf24' : '#38bdf8'} />
+        </mesh>
+      )}
+
       {isAnyDrawMode && anchorPoint && snappedHover && (() => {
         const segDx = snappedHover[0] - anchorPoint[0];
         const segDz = snappedHover[1] - anchorPoint[1];
@@ -1879,8 +2145,8 @@ export function RoomMesh({
                 opacity={0.45}
               />
             </mesh>
-            <mesh position={[snappedHover[0], 0.04, snappedHover[1]]}>
-              <sphereGeometry args={[0.06, 14, 14]} />
+            <mesh position={[snappedHover[0], 0.045, snappedHover[1]]}>
+              <sphereGeometry args={[0.075, 16, 16]} />
               <meshBasicMaterial color={isDrawingFloorZone ? '#fbbf24' : '#38bdf8'} />
             </mesh>
           </group>

@@ -18,7 +18,9 @@ import type {
   TransformTool,
 } from '../types/editor';
 import type {
+  FloorZone,
   RoomConfig,
+  SelectedFloorVertex,
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
@@ -40,6 +42,7 @@ interface Viewport3DProps {
   selectedSurfaces?: SurfaceTarget[];
   draggedTextureId?: string | null;
   selectedWallVertex?: SelectedWallVertex | null;
+  selectedFloorVertex?: SelectedFloorVertex | null;
   linkedVertexJoint?: boolean;
   autoStraightenVertices?: boolean;
   onSelectWall?: (wallId: string | null) => void;
@@ -50,11 +53,13 @@ interface Viewport3DProps {
   onSelectStandaloneOpening?: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
   onSelectWallVertex?: (vertex: SelectedWallVertex | null) => void;
+  onSelectFloorVertex?: (vertex: SelectedFloorVertex | null) => void;
   onUpdateStandaloneOpening?: (
     openingId: string,
     patch: Partial<StandaloneOpening>
   ) => void;
   onCommitWallsFromVertex?: (nextWalls: WallSegment[]) => void;
+  onCommitFloorZonesFromVertex?: (nextZones: FloorZone[]) => void;
   isDrawingWalls?: boolean;
   draftPoints?: [number, number][];
   hoverPoint?: [number, number] | null;
@@ -134,6 +139,7 @@ export function Viewport3D({
   selectedSurfaces = [],
   draggedTextureId = null,
   selectedWallVertex = null,
+  selectedFloorVertex = null,
   linkedVertexJoint = true,
   autoStraightenVertices = true,
   onSelectWall,
@@ -144,8 +150,10 @@ export function Viewport3D({
   onSelectStandaloneOpening,
   onSelectFloorZone,
   onSelectWallVertex,
+  onSelectFloorVertex,
   onUpdateStandaloneOpening,
   onCommitWallsFromVertex,
+  onCommitFloorZonesFromVertex,
   isDrawingWalls = false,
   draftPoints = [],
   hoverPoint = null,
@@ -244,6 +252,7 @@ export function Viewport3D({
           onSelectStandaloneOpening?.(null);
           onSelectFloorZone?.(null);
           onSelectWallVertex?.(null);
+          onSelectFloorVertex?.(null);
           onClearSurfaceSelection?.();
         }
       }}
@@ -334,6 +343,7 @@ export function Viewport3D({
         selectedSurfaces={selectedSurfaces}
         draggedTextureId={draggedTextureId}
         selectedWallVertex={selectedWallVertex}
+        selectedFloorVertex={selectedFloorVertex}
         linkedVertexJoint={linkedVertexJoint}
         autoStraightenVertices={autoStraightenVertices}
         onSelectWall={(wallId) => onSelectWall?.(wallId)}
@@ -345,10 +355,12 @@ export function Viewport3D({
         }
         onSelectFloorZone={onSelectFloorZone}
         onSelectWallVertex={onSelectWallVertex}
+        onSelectFloorVertex={onSelectFloorVertex}
         onUpdateStandaloneOpening={(openingId, patch) =>
           onUpdateStandaloneOpening?.(openingId, patch)
         }
         onCommitWallsFromVertex={onCommitWallsFromVertex}
+        onCommitFloorZonesFromVertex={onCommitFloorZonesFromVertex}
         onDraggingChange={setIsDraggingObject}
         isDrawingWalls={isDrawingWalls}
         draftPoints={draftPoints}
@@ -418,6 +430,7 @@ export function Viewport3D({
                 onSelectStandaloneOpening?.(null);
                 onSelectFloorZone?.(null);
                 onSelectWallVertex?.(null);
+                onSelectFloorVertex?.(null);
                 onClearSurfaceSelection?.();
               }
             }}

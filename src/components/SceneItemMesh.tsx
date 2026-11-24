@@ -239,8 +239,8 @@ export function SceneItemMesh({
           for (const mat of mats) {
             mat.map = texClone;
             mat.color.set(ov?.color || '#ffffff');
-            mat.roughness = texMeta.roughness;
-            mat.metalness = texMeta.metalness;
+            mat.roughness = ov?.roughness ?? texMeta.roughness ?? backup.roughness;
+            mat.metalness = ov?.metalness ?? texMeta.metalness ?? backup.metalness;
             mat.needsUpdate = true;
           }
         });

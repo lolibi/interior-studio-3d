@@ -37,7 +37,7 @@ const ADMIN_PASS_STORAGE_KEY = 'interior_studio_3d_admin_pass_v1';
 
 const DEFAULT_MODEL_FORM: CreateModelInput = {
   name: '',
-  category: 'living_room',
+  category: 'sofas',
   glbUrl: '',
   previewUrl: '',
   dimensionsCm: { width: 200, height: 85, depth: 95 },
@@ -423,8 +423,8 @@ export function AdminPanel({
     setIsSubmitting(true);
     try {
       const pass = adminPassword.trim();
-      let finalGlbUrl = form.glbUrl.trim();
-      let finalPreviewUrl = form.previewUrl.trim();
+      let finalGlbUrl = (form.glbUrl ?? '').trim();
+      let finalPreviewUrl = (form.previewUrl ?? '').trim();
 
       if (glbFile) {
         const uploadedGlb = await uploadGlbFile(glbFile, pass);
@@ -1139,7 +1139,7 @@ export function AdminPanel({
                 className="input-control"
                 style={{ marginTop: '6px' }}
                 placeholder="...или директно URL към .glb файл"
-                value={form.glbUrl}
+                value={form.glbUrl ?? ''}
                 onChange={(e) => setForm((prev) => ({ ...prev, glbUrl: e.target.value }))}
               />
             </div>
@@ -1159,7 +1159,7 @@ export function AdminPanel({
                 className="input-control"
                 style={{ marginTop: '6px' }}
                 placeholder="...или URL към превю снимка"
-                value={form.previewUrl}
+                value={form.previewUrl ?? ''}
                 onChange={(e) => setForm((prev) => ({ ...prev, previewUrl: e.target.value }))}
               />
             </div>
