@@ -341,6 +341,7 @@ export function Viewport3D({
         models={models}
         textures={textures}
         transformTool={transformTool}
+        isTopView={isTopOrtho}
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
         selectedStandaloneOpeningId={selectedStandaloneOpeningId}

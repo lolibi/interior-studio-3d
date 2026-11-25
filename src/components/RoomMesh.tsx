@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import type { ThreeEvent } from '@react-three/fiber';
+import { TransformControls } from '@react-three/drei';
 import type {
   CatalogModel,
   CatalogTexture,
@@ -94,6 +95,63 @@ interface ResolvedSurfaceMaterial {
   map: THREE.Texture | null;
   normalMap: THREE.Texture | null;
   roughnessMap: THREE.Texture | null;
+}
+
+function snapCoord(val: number, step = 0.05): number {
+  return Math.round(val / step) * step;
+}
+
+function snapPointToRoom(
+  rawX: number,
+  rawZ: number,
+  walls: WallSegment[],
+  ignoreWallId?: string,
+  ignoreEndKey?: 'start' | 'end'
+): [number, number] {
+  let x = snapCoord(rawX, 0.05);
+  let z = snapCoord(rawZ, 0.05);
+
+  let bestDist = 0.14;
+  for (const w of walls) {
+    const endpoints: Array<{ key: 'start' | 'end'; pt: [number, number] }> = [
+      { key: 'start', pt: w.start },
+      { key: 'end', pt: w.end },
+    ];
+    for (const ep of endpoints) {
+      if (w.id === ignoreWallId && ep.key === ignoreEndKey) continue;
+      const d = Math.hypot(rawX - ep.pt[0], rawZ - ep.pt[1]);
+      if (d < bestDist) {
+        bestDist = d;
+        x = ep.pt[0];
+        z = ep.pt[1];
+      }
+    }
+  }
+
+  return [Number(x.toFixed(3)), Number(z.toFixed(3))];
+}
+
+function applyOrthogonalSnap(
+  fixedPt: [number, number],
+  movingPt: [number, number]
+): [number, number] {
+  const dx = movingPt[0] - fixedPt[0];
+  const dz = movingPt[1] - fixedPt[1];
+  const len = Math.hypot(dx, dz);
+  if (len < 0.05) return movingPt;
+
+  const angleDeg = (Math.atan2(dz, dx) * 180) / Math.PI;
+  const targets = [0, 90, 180, -180, -90];
+  for (const t of targets) {
+    if (Math.abs(angleDeg - t) <= 3.5) {
+      const rad = (t * Math.PI) / 180;
+      return [
+        Number((fixedPt[0] + Math.cos(rad) * len).toFixed(3)),
+        Number((fixedPt[1] + Math.sin(rad) * len).toFixed(3)),
+      ];
+    }
+  }
+  return movingPt;
 }
 
 function loadTextureWithFallback(
@@ -773,7 +831,7 @@ function WallSegmentItem({
           ))}
       </group>
 
-      {(isWallSelected || isTopView) && (
+      {(isWallSelected || isTopView || isStartVertexSelected || isEndVertexSelected) && (
         <>
           <mesh
             position={[
@@ -1237,6 +1295,8 @@ export function RoomMesh({
   draggedTextureId,
   selectedWallVertex,
   selectedFloorVertex = null,
+  linkedVertexJoint = true,
+  autoStraightenVertices = true,
   onSelectWall,
   onSelectSurface,
   onClearSurfaceSelection,
@@ -1247,13 +1307,20 @@ export function RoomMesh({
   onSelectFloorZone,
   onSelectWallVertex,
   onSelectFloorVertex,
+  onUpdateStandaloneOpening,
+  onCommitWallsFromVertex,
+  onCommitFloorZonesFromVertex,
+  onDraggingChange,
   isDrawingWalls = false,
+  draftPoints = [],
   hoverPoint = null,
   onHoverPointChange,
   onFloorDrawClick,
   isDrawingFloorZone = false,
+  zoneDraftPoints = [],
   onFloorZoneDrawClick,
   isCalibratingPlan = false,
+  calibPoints = [],
   onCalibFloorClick,
   onStartDragVertex,
   onStartDragStandaloneOpening,
@@ -1261,25 +1328,244 @@ export function RoomMesh({
   const isInteractiveFloorMode =
     isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
 
+  // Локално състояние при влачене с пивота (за плавно 60fps движение)
+  const [liveWalls, setLiveWalls] = useState<WallSegment[] | null>(null);
+  const [liveZones, setLiveZones] = useState<FloorZone[] | null>(null);
+  const [liveOpeningPos, setLiveOpeningPos] = useState<{
+    id: string;
+    pos: [number, number];
+  } | null>(null);
+
+  const [pivotTarget, setPivotTarget] = useState<THREE.Object3D | null>(null);
+  const isDraggingPivotRef = useRef(false);
+  const dragOriginWallsRef = useRef<WallSegment[] | null>(null);
+  const dragOriginVertexPtRef = useRef<[number, number] | null>(null);
+
+  const activeWalls = liveWalls ?? room.walls;
+  const activeZones = liveZones ?? room.floorZones ?? [];
+  const activeOpenings = useMemo(() => {
+    const base = room.openings ?? [];
+    if (!liveOpeningPos) return base;
+    return base.map((o) =>
+      o.id === liveOpeningPos.id ? { ...o, position: liveOpeningPos.pos } : o
+    );
+  }, [room.openings, liveOpeningPos]);
+
+  const pinY = isTopView ? 0.36 : Math.max(0.2, room.ceilingHeightM) + 0.08;
+
+  // Позиция на активния пивот (връх на стена, връх на под или отвор)
+  const activePivotInfo = useMemo(() => {
+    if (selectedWallVertex) {
+      const w = activeWalls.find((item) => item.id === selectedWallVertex.wallId);
+      if (!w) return null;
+      const pt =
+        selectedWallVertex.endKey === 'start' ? w.start : w.end;
+      return {
+        kind: 'wall-vertex' as const,
+        position: [pt[0], pinY, pt[1]] as [number, number, number],
+      };
+    }
+
+    if (selectedFloorVertex) {
+      const z = activeZones.find((item) => item.id === selectedFloorVertex.zoneId);
+      const pt = z?.points[selectedFloorVertex.pointIndex];
+      if (!z || !pt) return null;
+      return {
+        kind: 'floor-vertex' as const,
+        position: [pt[0], pinY, pt[1]] as [number, number, number],
+      };
+    }
+
+    if (selectedStandaloneOpeningId) {
+      const op = activeOpenings.find((o) => o.id === selectedStandaloneOpeningId);
+      if (!op) return null;
+      const y = isTopView ? 0.4 : op.sillHeightM + op.heightM / 2;
+      return {
+        kind: 'opening' as const,
+        position: [op.position[0], y, op.position[1]] as [number, number, number],
+      };
+    }
+
+    return null;
+  }, [
+    selectedWallVertex,
+    selectedFloorVertex,
+    selectedStandaloneOpeningId,
+    activeWalls,
+    activeZones,
+    activeOpenings,
+    pinY,
+    isTopView,
+  ]);
+
+  // Синхронизираме позицията на pivotTarget, когато не влачим
+  useEffect(() => {
+    if (!pivotTarget || !activePivotInfo || isDraggingPivotRef.current) return;
+    pivotTarget.position.set(
+      activePivotInfo.position[0],
+      activePivotInfo.position[1],
+      activePivotInfo.position[2]
+    );
+  }, [pivotTarget, activePivotInfo]);
+
+  const computeUpdatedWallsForVertex = (
+    baseWalls: WallSegment[],
+    origPt: [number, number] | null,
+    rawX: number,
+    rawZ: number
+  ): WallSegment[] => {
+    if (!selectedWallVertex) return baseWalls;
+    const targetWall = baseWalls.find((w) => w.id === selectedWallVertex.wallId);
+    if (!targetWall) return baseWalls;
+
+    let [nx, nz] = snapPointToRoom(
+      rawX,
+      rawZ,
+      baseWalls,
+      selectedWallVertex.wallId,
+      selectedWallVertex.endKey
+    );
+
+    if (autoStraightenVertices) {
+      const fixedPt =
+        selectedWallVertex.endKey === 'start'
+          ? targetWall.end
+          : targetWall.start;
+      [nx, nz] = applyOrthogonalSnap(fixedPt, [nx, nz]);
+    }
+
+    return baseWalls.map((w) => {
+      if (w.id === selectedWallVertex.wallId) {
+        return selectedWallVertex.endKey === 'start'
+          ? { ...w, start: [nx, nz] }
+          : { ...w, end: [nx, nz] };
+      }
+
+      if (linkedVertexJoint && origPt) {
+        const startMatches =
+          Math.hypot(w.start[0] - origPt[0], w.start[1] - origPt[1]) < 0.04;
+        const endMatches =
+          Math.hypot(w.end[0] - origPt[0], w.end[1] - origPt[1]) < 0.04;
+        if (startMatches || endMatches) {
+          return {
+            ...w,
+            start: startMatches ? [nx, nz] : w.start,
+            end: endMatches ? [nx, nz] : w.end,
+          };
+        }
+      }
+
+      return w;
+    });
+  };
+
+  const computeUpdatedZonesForVertex = (
+    baseZones: FloorZone[],
+    rawX: number,
+    rawZ: number
+  ): FloorZone[] => {
+    if (!selectedFloorVertex) return baseZones;
+    const [nx, nz] = snapPointToRoom(rawX, rawZ, room.walls);
+    return baseZones.map((z) => {
+      if (z.id !== selectedFloorVertex.zoneId) return z;
+      return {
+        ...z,
+        points: z.points.map((pt, idx) =>
+          idx === selectedFloorVertex.pointIndex ? [nx, nz] : pt
+        ),
+      };
+    });
+  };
+
+  const handlePivotMouseDown = () => {
+    isDraggingPivotRef.current = true;
+    onDraggingChange?.(true);
+
+    if (selectedWallVertex) {
+      dragOriginWallsRef.current = room.walls;
+      const w = room.walls.find((item) => item.id === selectedWallVertex.wallId);
+      dragOriginVertexPtRef.current = w
+        ? selectedWallVertex.endKey === 'start'
+          ? [...w.start]
+          : [...w.end]
+        : null;
+    }
+  };
+
+  const handlePivotChange = () => {
+    if (!isDraggingPivotRef.current || !pivotTarget || !activePivotInfo) return;
+    const { x, z } = pivotTarget.position;
+
+    if (activePivotInfo.kind === 'wall-vertex') {
+      const base = dragOriginWallsRef.current ?? room.walls;
+      const updated = computeUpdatedWallsForVertex(
+        base,
+        dragOriginVertexPtRef.current,
+        x,
+        z
+      );
+      setLiveWalls(updated);
+    } else if (activePivotInfo.kind === 'floor-vertex') {
+      const updated = computeUpdatedZonesForVertex(
+        room.floorZones ?? [],
+        x,
+        z
+      );
+      setLiveZones(updated);
+    } else if (
+      activePivotInfo.kind === 'opening' &&
+      selectedStandaloneOpeningId
+    ) {
+      setLiveOpeningPos({
+        id: selectedStandaloneOpeningId,
+        pos: [Number(snapCoord(x, 0.05).toFixed(3)), Number(snapCoord(z, 0.05).toFixed(3))],
+      });
+    }
+  };
+
+  const handlePivotMouseUp = () => {
+    if (!isDraggingPivotRef.current) return;
+    isDraggingPivotRef.current = false;
+    onDraggingChange?.(false);
+
+    if (liveWalls) {
+      onCommitWallsFromVertex?.(liveWalls);
+      setLiveWalls(null);
+    }
+    dragOriginWallsRef.current = null;
+    dragOriginVertexPtRef.current = null;
+
+    if (liveZones) {
+      onCommitFloorZonesFromVertex?.(liveZones);
+      setLiveZones(null);
+    }
+
+    if (liveOpeningPos && selectedStandaloneOpeningId) {
+      onUpdateStandaloneOpening?.(selectedStandaloneOpeningId, {
+        position: liveOpeningPos.pos,
+      });
+      setLiveOpeningPos(null);
+    }
+  };
+
   const closedRoomPolys = useMemo(
-    () => findClosedRoomPolygons(room.walls),
-    [room.walls]
+    () => findClosedRoomPolygons(activeWalls),
+    [activeWalls]
   );
 
   const uncoveredAutoPolys = useMemo(() => {
-    const zones = room.floorZones ?? [];
-    if (zones.length === 0) return closedRoomPolys;
+    if (activeZones.length === 0) return closedRoomPolys;
     return closedRoomPolys.filter((poly) => {
       const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length;
       const cz = poly.reduce((s, p) => s + p[1], 0) / poly.length;
-      return !zones.some((z) => {
+      return !activeZones.some((z) => {
         if (z.points.length < 3) return false;
         const zcx = z.points.reduce((s, p) => s + p[0], 0) / z.points.length;
         const zcz = z.points.reduce((s, p) => s + p[1], 0) / z.points.length;
         return Math.hypot(cx - zcx, cz - zcz) < 0.25;
       });
     });
-  }, [closedRoomPolys, room.floorZones]);
+  }, [closedRoomPolys, activeZones]);
 
   const ceilingGeometries = useMemo(() => {
     if (!room.showCeiling || isTopView) return [];
@@ -1302,8 +1588,34 @@ export function RoomMesh({
     };
   }, [ceilingGeometries]);
 
+  const activeDraftChain = isDrawingWalls
+    ? draftPoints
+    : isDrawingFloorZone
+      ? zoneDraftPoints
+      : isCalibratingPlan
+        ? calibPoints
+        : [];
+
   return (
     <group>
+      {/* 2D/3D ПИВОТ (TransformControls) за селектиран връх на стена, под или отвор */}
+      {activePivotInfo && !isInteractiveFloorMode && (
+        <>
+          <group ref={setPivotTarget} position={activePivotInfo.position} />
+          {pivotTarget && (
+            <TransformControls
+              object={pivotTarget}
+              mode="translate"
+              showY={false}
+              size={0.85}
+              onMouseDown={handlePivotMouseDown}
+              onChange={handlePivotChange}
+              onMouseUp={handlePivotMouseUp}
+            />
+          )}
+        </>
+      )}
+
       {/* Основна плоча на пода */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
@@ -1312,18 +1624,14 @@ export function RoomMesh({
         onPointerMove={(e) => {
           if (!isInteractiveFloorMode) return;
           e.stopPropagation();
-          onHoverPointChange?.([
-            Math.round(e.point.x * 20) / 20,
-            Math.round(e.point.z * 20) / 20,
-          ]);
+          const snapped = snapPointToRoom(e.point.x, e.point.z, activeWalls);
+          onHoverPointChange?.(snapped);
         }}
         onClick={(e) => {
           e.stopPropagation();
           if (e.delta > 4) return;
-          const pt: [number, number] = hoverPoint ?? [
-            Math.round(e.point.x * 20) / 20,
-            Math.round(e.point.z * 20) / 20,
-          ];
+          const pt: [number, number] =
+            hoverPoint ?? snapPointToRoom(e.point.x, e.point.z, activeWalls);
           if (isDrawingWalls) {
             onFloorDrawClick?.(pt);
             return;
@@ -1348,6 +1656,48 @@ export function RoomMesh({
         <meshStandardMaterial color="#1e293b" roughness={0.95} metalness={0.02} />
       </mesh>
 
+      {/* Визуализация на точките и линията при чертане / калибриране */}
+      {isInteractiveFloorMode && (
+        <>
+          {activeDraftChain.map((pt, idx) => (
+            <mesh key={`draft-pt-${idx}`} position={[pt[0], pinY, pt[1]]}>
+              <sphereGeometry args={[idx === 0 ? 0.13 : 0.09, 16, 16]} />
+              <meshStandardMaterial
+                color={idx === 0 ? '#10b981' : '#38bdf8'}
+                emissive={idx === 0 ? '#059669' : '#0284c7'}
+                emissiveIntensity={0.5}
+              />
+            </mesh>
+          ))}
+          {hoverPoint && (
+            <mesh position={[hoverPoint[0], pinY, hoverPoint[1]]}>
+              <sphereGeometry args={[0.09, 16, 16]} />
+              <meshStandardMaterial
+                color="#f59e0b"
+                emissive="#d97706"
+                emissiveIntensity={0.6}
+              />
+            </mesh>
+          )}
+          {activeDraftChain.length > 0 && hoverPoint && (() => {
+            const last = activeDraftChain[activeDraftChain.length - 1];
+            const dx = hoverPoint[0] - last[0];
+            const dz = hoverPoint[1] - last[1];
+            const len = Math.hypot(dx, dz);
+            if (len < 0.02) return null;
+            return (
+              <mesh
+                position={[(last[0] + hoverPoint[0]) / 2, pinY, (last[1] + hoverPoint[1]) / 2]}
+                rotation={[0, -Math.atan2(dz, dx), 0]}
+              >
+                <boxGeometry args={[len, 0.03, 0.03]} />
+                <meshBasicMaterial color="#38bdf8" />
+              </mesh>
+            );
+          })()}
+        </>
+      )}
+
       {/* 2D Архитектурна подложка */}
       {room.floorplan && <FloorplanUnderlayPlane floorplan={room.floorplan} />}
 
@@ -1362,7 +1712,7 @@ export function RoomMesh({
       ))}
 
       {/* Подови зони */}
-      {(room.floorZones ?? []).map((zone) => (
+      {activeZones.map((zone) => (
         <FloorZoneItem
           key={zone.id}
           zone={zone}
@@ -1383,11 +1733,11 @@ export function RoomMesh({
       ))}
 
       {/* Стени */}
-      {room.walls.map((wall) => (
+      {activeWalls.map((wall) => (
         <WallSegmentItem
           key={wall.id}
           wall={wall}
-          allWalls={room.walls}
+          allWalls={activeWalls}
           ceilingHeightM={room.ceilingHeightM}
           textures={textures}
           isTopView={isTopView}
@@ -1408,7 +1758,7 @@ export function RoomMesh({
       ))}
 
       {/* Свободни врати и прозорци */}
-      {(room.openings ?? []).map((op) => (
+      {activeOpenings.map((op) => (
         <StandaloneOpeningItem
           key={op.id}
           opening={op}
