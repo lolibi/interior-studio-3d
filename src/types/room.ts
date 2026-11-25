@@ -1,6 +1,6 @@
 export type OpeningType = 'door' | 'window';
 export type DoorSwing = 'left-in' | 'right-in' | 'left-out' | 'right-out';
-export type WallSide = 'front' | 'back';
+export type WallSide = 'front' | 'back' | 'start' | 'end';
 
 export type SurfaceTarget =
   | { kind: 'wall'; wallId: string; side: WallSide }
@@ -107,6 +107,14 @@ export interface WallSegment {
   backTextureId?: string | null;
   backTileHeightM?: number | null;
   backUvw?: CustomUvwSettings;
+  startColor?: string;
+  startTextureId?: string | null;
+  startTileHeightM?: number | null;
+  startUvw?: CustomUvwSettings;
+  endColor?: string;
+  endTextureId?: string | null;
+  endTileHeightM?: number | null;
+  endUvw?: CustomUvwSettings;
 }
 
 export interface SelectedWallVertex {

@@ -49,6 +49,10 @@ interface Viewport3DProps {
   onSelectSurface?: (target: SurfaceTarget, additive: boolean) => void;
   onClearSurfaceSelection?: () => void;
   onDropTextureOnSurface?: (target: SurfaceTarget, textureId: string) => void;
+  onMaterializeAutoFloorZone?: (
+    points: [number, number][],
+    options?: { textureId?: string | null; selectZone?: boolean; additive?: boolean }
+  ) => string | null;
   onSelectOpening?: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening?: (openingId: string | null) => void;
   onSelectFloorZone?: (zoneId: string | null) => void;
@@ -146,6 +150,7 @@ export function Viewport3D({
   onSelectSurface,
   onClearSurfaceSelection,
   onDropTextureOnSurface,
+  onMaterializeAutoFloorZone,
   onSelectOpening,
   onSelectStandaloneOpening,
   onSelectFloorZone,
@@ -349,6 +354,7 @@ export function Viewport3D({
         onSelectWall={(wallId) => onSelectWall?.(wallId)}
         onSelectSurface={onSelectSurface}
         onDropTextureOnSurface={onDropTextureOnSurface}
+        onMaterializeAutoFloorZone={onMaterializeAutoFloorZone}
         onSelectOpening={(wallId, openingId) => onSelectOpening?.(wallId, openingId)}
         onSelectStandaloneOpening={(openingId) =>
           onSelectStandaloneOpening?.(openingId)

@@ -389,7 +389,6 @@ export function App() {
           }
           return next;
         });
-        setSelectedFloorVertex(null);
       } else {
         setSelectedSurfaces([target]);
         if (target.kind === 'wall') {
@@ -399,10 +398,6 @@ export function App() {
         } else {
           setSelectedWallId(null);
           setSelectedFloorZoneId(target.zoneId);
-          setSelectedWallVertex(null);
-          setSelectedFloorVertex((prev) =>
-            prev?.zoneId === target.zoneId ? prev : null
-          );
         }
       }
     },
@@ -425,7 +420,13 @@ export function App() {
         const matchBack = targets.some((t) =>
           isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'back' })
         );
-        if (!matchFront && !matchBack) return w;
+        const matchStart = targets.some((t) =>
+          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'start' })
+        );
+        const matchEnd = targets.some((t) =>
+          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'end' })
+        );
+        if (!matchFront && !matchBack && !matchStart && !matchEnd) return w;
 
         const updated = { ...w };
 
@@ -452,6 +453,32 @@ export function App() {
             updated.backUvw = undefined;
           } else if (patch.uvwPatch) {
             updated.backUvw = { ...(updated.backUvw ?? {}), ...patch.uvwPatch };
+          }
+        }
+
+        if (matchStart) {
+          if (patch.color !== undefined) updated.startColor = patch.color;
+          if (patch.textureId !== undefined)
+            updated.startTextureId = patch.textureId;
+          if (patch.tileHeightM !== undefined)
+            updated.startTileHeightM = patch.tileHeightM;
+          if (patch.resetUvw) {
+            updated.startUvw = undefined;
+          } else if (patch.uvwPatch) {
+            updated.startUvw = { ...(updated.startUvw ?? {}), ...patch.uvwPatch };
+          }
+        }
+
+        if (matchEnd) {
+          if (patch.color !== undefined) updated.endColor = patch.color;
+          if (patch.textureId !== undefined)
+            updated.endTextureId = patch.textureId;
+          if (patch.tileHeightM !== undefined)
+            updated.endTileHeightM = patch.tileHeightM;
+          if (patch.resetUvw) {
+            updated.endUvw = undefined;
+          } else if (patch.uvwPatch) {
+            updated.endUvw = { ...(updated.endUvw ?? {}), ...patch.uvwPatch };
           }
         }
 
@@ -504,16 +531,66 @@ export function App() {
         if (target.kind === 'wall') {
           setSelectedWallId(target.wallId);
           setSelectedFloorZoneId(null);
-          setSelectedFloorVertex(null);
         } else {
           setSelectedWallId(null);
           setSelectedFloorZoneId(target.zoneId);
-          setSelectedWallVertex(null);
         }
       }
       setDraggedTextureId(null);
     },
     [selectedSurfaces, applyPatchToTargets]
+  );
+
+  // Редакция на върховете (ъглите) на подовата зона
+  const handleUpdateFloorZoneVertex = useCallback(
+    (zoneId: string, pointIndex: number, nextPoint: [number, number]) => {
+      const nextZones = (room.floorZones ?? []).map((z) => {
+        if (z.id !== zoneId) return z;
+        const pts = z.points.map((pt, idx) =>
+          idx === pointIndex ? nextPoint : pt
+        );
+        return { ...z, points: pts };
+      });
+      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
+    },
+    [room, sceneObjects, pushHistory]
+  );
+
+  const handleInsertFloorZoneVertexAfter = useCallback(
+    (zoneId: string, pointIndex: number) => {
+      const nextZones = (room.floorZones ?? []).map((z) => {
+        if (z.id !== zoneId || z.points.length < 2) return z;
+        const curr = z.points[pointIndex];
+        const next = z.points[(pointIndex + 1) % z.points.length];
+        if (!curr || !next) return z;
+
+        const mid: [number, number] = [
+          Number(((curr[0] + next[0]) / 2).toFixed(3)),
+          Number(((curr[1] + next[1]) / 2).toFixed(3)),
+        ];
+        const pts = [...z.points];
+        pts.splice(pointIndex + 1, 0, mid);
+        return { ...z, points: pts };
+      });
+      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
+      setSelectedFloorVertex({ zoneId, pointIndex: pointIndex + 1 });
+    },
+    [room, sceneObjects, pushHistory]
+  );
+
+  const handleDeleteFloorZoneVertex = useCallback(
+    (zoneId: string, pointIndex: number) => {
+      const nextZones = (room.floorZones ?? []).map((z) => {
+        if (z.id !== zoneId || z.points.length <= 3) return z;
+        return {
+          ...z,
+          points: z.points.filter((_, idx) => idx !== pointIndex),
+        };
+      });
+      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
+      setSelectedFloorVertex(null);
+    },
+    [room, sceneObjects, pushHistory]
   );
 
   // Чертане на стени
@@ -574,7 +651,6 @@ export function App() {
           setZoneDraftPoints([]);
           setIsDrawingFloorZone(false);
           setSelectedFloorZoneId(newZone.id);
-          setSelectedFloorVertex(null);
           setSelectedSurfaces([{ kind: 'floor', zoneId: newZone.id }]);
           return;
         }
@@ -767,40 +843,6 @@ export function App() {
             sceneObjects
           );
           setSelectedStandaloneOpeningId(null);
-        } else if (selectedFloorVertex) {
-          const targetZone = (room.floorZones ?? []).find(
-            (z) => z.id === selectedFloorVertex.zoneId
-          );
-          if (targetZone && targetZone.points.length > 3) {
-            const nextZones = (room.floorZones ?? []).map((z) =>
-              z.id === selectedFloorVertex.zoneId
-                ? {
-                    ...z,
-                    points: z.points.filter(
-                      (_, idx) => idx !== selectedFloorVertex.pointIndex
-                    ),
-                  }
-                : z
-            );
-            pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-            setSelectedFloorVertex(null);
-          }
-        } else if (selectedFloorZone) {
-          pushHistory(
-            {
-              ...room,
-              floorZones: (room.floorZones ?? []).filter(
-                (z) => z.id !== selectedFloorZone.id
-              ),
-            },
-            sceneObjects
-          );
-          setSelectedFloorZoneId(null);
-          setSelectedSurfaces((prev) =>
-            prev.filter(
-              (s) => !(s.kind === 'floor' && s.zoneId === selectedFloorZone.id)
-            )
-          );
         } else if (selectedWall) {
           pushHistory(
             {
@@ -820,8 +862,6 @@ export function App() {
   }, [
     selectedObject,
     selectedStandaloneOpening,
-    selectedFloorVertex,
-    selectedFloorZone,
     selectedWall,
     room,
     sceneObjects,
@@ -1845,7 +1885,6 @@ export function App() {
               setSelectedOpeningId(openingId);
               setSelectedInstanceId(null);
               setSelectedStandaloneOpeningId(null);
-              setSelectedFloorVertex(null);
             }}
             onSelectStandaloneOpening={(openingId) => {
               setSelectedStandaloneOpeningId(openingId);
@@ -1853,7 +1892,6 @@ export function App() {
                 setSelectedInstanceId(null);
                 setSelectedWallId(null);
                 setSelectedFloorZoneId(null);
-                setSelectedFloorVertex(null);
                 setSelectedSurfaces([]);
               }
             }}
@@ -1861,9 +1899,6 @@ export function App() {
               setSelectedFloorZoneId(zoneId);
               if (zoneId) {
                 setSelectedSurfaces([{ kind: 'floor', zoneId }]);
-                setSelectedFloorVertex((prev) =>
-                  prev?.zoneId === zoneId ? prev : null
-                );
               } else {
                 setSelectedFloorVertex(null);
               }
@@ -2093,74 +2128,18 @@ export function App() {
           }}
           onSelectFloorZone={(id) => {
             setSelectedFloorZoneId(id);
+            setSelectedFloorVertex(null);
             if (id) {
               setSelectedSurfaces([{ kind: 'floor', zoneId: id }]);
               setSelectedWallId(null);
               setSelectedInstanceId(null);
               setSelectedStandaloneOpeningId(null);
-              setSelectedFloorVertex((prev) =>
-                prev?.zoneId === id ? prev : null
-              );
-            } else {
-              setSelectedFloorVertex(null);
             }
           }}
           onSelectFloorVertex={setSelectedFloorVertex}
-          onUpdateFloorZoneVertex={(zoneId, pointIndex, nextPoint) => {
-            const nextZones = (room.floorZones ?? []).map((z) => {
-              if (z.id !== zoneId) return z;
-              const nextPoints = z.points.map((pt, idx) =>
-                idx === pointIndex ? nextPoint : pt
-              );
-              return { ...z, points: nextPoints };
-            });
-            pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-          }}
-          onInsertFloorZoneVertexAfter={(zoneId, pointIndex) => {
-            const targetZone = (room.floorZones ?? []).find(
-              (z) => z.id === zoneId
-            );
-            if (!targetZone || targetZone.points.length < 3) return;
-            const count = targetZone.points.length;
-            const currPt = targetZone.points[pointIndex];
-            const nextPt = targetZone.points[(pointIndex + 1) % count];
-            if (!currPt || !nextPt) return;
-
-            const midPt: [number, number] = [
-              Number(((currPt[0] + nextPt[0]) / 2).toFixed(3)),
-              Number(((currPt[1] + nextPt[1]) / 2).toFixed(3)),
-            ];
-
-            const nextPoints = [
-              ...targetZone.points.slice(0, pointIndex + 1),
-              midPt,
-              ...targetZone.points.slice(pointIndex + 1),
-            ];
-
-            const nextZones = (room.floorZones ?? []).map((z) =>
-              z.id === zoneId ? { ...z, points: nextPoints } : z
-            );
-            pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-            setSelectedFloorVertex({
-              zoneId,
-              pointIndex: pointIndex + 1,
-            });
-          }}
-          onDeleteFloorZoneVertex={(zoneId, pointIndex) => {
-            const targetZone = (room.floorZones ?? []).find(
-              (z) => z.id === zoneId
-            );
-            if (!targetZone || targetZone.points.length <= 3) return;
-
-            const nextPoints = targetZone.points.filter(
-              (_, idx) => idx !== pointIndex
-            );
-            const nextZones = (room.floorZones ?? []).map((z) =>
-              z.id === zoneId ? { ...z, points: nextPoints } : z
-            );
-            pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-            setSelectedFloorVertex(null);
-          }}
+          onUpdateFloorZoneVertex={handleUpdateFloorZoneVertex}
+          onInsertFloorZoneVertexAfter={handleInsertFloorZoneVertexAfter}
+          onDeleteFloorZoneVertex={handleDeleteFloorZoneVertex}
           onUpdateFloorZone={(id, patch) => {
             const nextZones = (room.floorZones ?? []).map((z) =>
               z.id === id ? { ...z, ...patch } : z
@@ -2181,7 +2160,6 @@ export function App() {
               sceneObjects
             );
             setSelectedFloorZoneId(copy.id);
-            setSelectedFloorVertex(null);
             setSelectedSurfaces([{ kind: 'floor', zoneId: copy.id }]);
           }}
           onDeleteFloorZone={(id) => {
@@ -2192,8 +2170,8 @@ export function App() {
               },
               sceneObjects
             );
-            if (selectedFloorZoneId === id) setSelectedFloorZoneId(null);
-            if (selectedFloorVertex?.zoneId === id) {
+            if (selectedFloorZoneId === id) {
+              setSelectedFloorZoneId(null);
               setSelectedFloorVertex(null);
             }
             setSelectedSurfaces((prev) =>
