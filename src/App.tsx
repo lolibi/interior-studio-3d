@@ -432,8 +432,8 @@ export function App() {
 
         if (matchFront) {
           if (patch.color !== undefined) updated.frontColor = patch.color;
-          if (patch.textureId !== undefined)
-            updated.frontTextureId = patch.textureId;
+          if ('textureId' in patch)
+            updated.frontTextureId = patch.textureId || undefined;
           if (patch.tileHeightM !== undefined)
             updated.frontTileHeightM = patch.tileHeightM;
           if (patch.resetUvw) {
@@ -445,8 +445,8 @@ export function App() {
 
         if (matchBack) {
           if (patch.color !== undefined) updated.backColor = patch.color;
-          if (patch.textureId !== undefined)
-            updated.backTextureId = patch.textureId;
+          if ('textureId' in patch)
+            updated.backTextureId = patch.textureId || undefined;
           if (patch.tileHeightM !== undefined)
             updated.backTileHeightM = patch.tileHeightM;
           if (patch.resetUvw) {
@@ -458,8 +458,8 @@ export function App() {
 
         if (matchStart) {
           if (patch.color !== undefined) updated.startColor = patch.color;
-          if (patch.textureId !== undefined)
-            updated.startTextureId = patch.textureId;
+          if ('textureId' in patch)
+            updated.startTextureId = patch.textureId || undefined;
           if (patch.tileHeightM !== undefined)
             updated.startTileHeightM = patch.tileHeightM;
           if (patch.resetUvw) {
@@ -471,8 +471,8 @@ export function App() {
 
         if (matchEnd) {
           if (patch.color !== undefined) updated.endColor = patch.color;
-          if (patch.textureId !== undefined)
-            updated.endTextureId = patch.textureId;
+          if ('textureId' in patch)
+            updated.endTextureId = patch.textureId || undefined;
           if (patch.tileHeightM !== undefined)
             updated.endTileHeightM = patch.tileHeightM;
           if (patch.resetUvw) {
@@ -493,7 +493,8 @@ export function App() {
 
         const updated: FloorZone = { ...z };
         if (patch.color !== undefined) updated.color = patch.color;
-        if (patch.textureId !== undefined) updated.textureId = patch.textureId;
+        if ('textureId' in patch)
+          updated.textureId = patch.textureId || undefined;
         if (patch.roughness !== undefined) updated.roughness = patch.roughness;
         if (patch.metalness !== undefined) updated.metalness = patch.metalness;
         if (patch.resetUvw) {

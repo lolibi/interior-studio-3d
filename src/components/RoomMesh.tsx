@@ -47,7 +47,11 @@ export interface RoomMeshProps {
   onDropTextureOnSurface?: (target: SurfaceTarget, textureId: string) => void;
   onMaterializeAutoFloorZone?: (
     points: [number, number][],
-    options?: { textureId?: string | null; selectZone?: boolean; additive?: boolean }
+    options?: {
+      textureId?: string | null;
+      selectZone?: boolean;
+      additive?: boolean;
+    }
   ) => string | null;
   onSelectOpening: (wallId: string, openingId: string) => void;
   onSelectStandaloneOpening: (openingId: string | null) => void;
@@ -92,6 +96,38 @@ interface ResolvedSurfaceMaterial {
   roughnessMap: THREE.Texture | null;
 }
 
+function loadTextureWithFallback(
+  url: string | undefined,
+  isColor: boolean
+): Promise<THREE.Texture | null> {
+  if (!url) return Promise.resolve(null);
+
+  const attempt = (crossOrigin: string | null): Promise<THREE.Texture | null> =>
+    new Promise((resolve) => {
+      const loader = new THREE.TextureLoader();
+      if (crossOrigin !== null) {
+        loader.setCrossOrigin(crossOrigin);
+      }
+      loader.load(
+        url,
+        (tex) => {
+          tex.wrapS = THREE.RepeatWrapping;
+          tex.wrapT = THREE.RepeatWrapping;
+          tex.anisotropy = 8;
+          if (isColor) {
+            tex.colorSpace = THREE.SRGBColorSpace;
+          }
+          tex.needsUpdate = true;
+          resolve(tex);
+        },
+        undefined,
+        () => resolve(null)
+      );
+    });
+
+  return attempt('anonymous').then((tex) => tex ?? attempt(null));
+}
+
 function usePbrSurfaceMaterial(params: {
   color?: string;
   texture?: CatalogTexture | null;
@@ -126,37 +162,16 @@ function usePbrSurfaceMaterial(params: {
     }
 
     let cancelled = false;
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin('anonymous');
-
-    const loadTex = (
-      url: string | undefined,
-      isColor: boolean
-    ): Promise<THREE.Texture | null> => {
-      if (!url) return Promise.resolve(null);
-      return new Promise((resolve) => {
-        loader.load(
-          url,
-          (tex) => {
-            tex.wrapS = THREE.RepeatWrapping;
-            tex.wrapT = THREE.RepeatWrapping;
-            tex.anisotropy = 8;
-            if (isColor) {
-              tex.colorSpace = THREE.SRGBColorSpace;
-            }
-            tex.needsUpdate = true;
-            resolve(tex);
-          },
-          undefined,
-          () => resolve(null)
-        );
-      });
-    };
+    let activeMaps: {
+      map: THREE.Texture | null;
+      normalMap: THREE.Texture | null;
+      roughnessMap: THREE.Texture | null;
+    } = { map: null, normalMap: null, roughnessMap: null };
 
     Promise.all([
-      loadTex(texture.mapUrl, true),
-      loadTex(texture.normalUrl, false),
-      loadTex(texture.roughnessUrl, false),
+      loadTextureWithFallback(texture.mapUrl, true),
+      loadTextureWithFallback(texture.normalUrl, false),
+      loadTextureWithFallback(texture.roughnessUrl, false),
     ]).then(([map, normalMap, roughnessMap]) => {
       if (cancelled) {
         map?.dispose();
@@ -164,21 +179,17 @@ function usePbrSurfaceMaterial(params: {
         roughnessMap?.dispose();
         return;
       }
-      setLoadedMaps({ map, normalMap, roughnessMap });
+      activeMaps = { map, normalMap, roughnessMap };
+      setLoadedMaps(activeMaps);
     });
 
     return () => {
       cancelled = true;
+      activeMaps.map?.dispose();
+      activeMaps.normalMap?.dispose();
+      activeMaps.roughnessMap?.dispose();
     };
   }, [texture?.mapUrl, texture?.normalUrl, texture?.roughnessUrl]);
-
-  useEffect(() => {
-    return () => {
-      loadedMaps.map?.dispose();
-      loadedMaps.normalMap?.dispose();
-      loadedMaps.roughnessMap?.dispose();
-    };
-  }, [loadedMaps]);
 
   const configured = useMemo<ResolvedSurfaceMaterial>(() => {
     if (!texture || !loadedMaps.map) {
@@ -207,8 +218,8 @@ function usePbrSurfaceMaterial(params: {
         ? uvw.tileHeightCm / 100
         : baseTileH;
 
-    const repeatX = Math.max(0.05, surfaceWidthM / tileW);
-    const repeatY = Math.max(0.05, surfaceHeightM / tileH);
+    const repeatX = Math.max(0.01, surfaceWidthM / tileW);
+    const repeatY = Math.max(0.01, surfaceHeightM / tileH);
     const rotRad = ((uvw?.rotationDeg ?? 0) * Math.PI) / 180;
     const offX = (uvw?.offsetXCm ?? 0) / 100 / tileW;
     const offY = (uvw?.offsetYCm ?? 0) / 100 / tileH;
@@ -374,6 +385,7 @@ function WallOpeningFrame({
       position={[xCenter, yCenter, 0]}
       onClick={(e) => {
         e.stopPropagation();
+        if (e.delta > 4) return;
         onSelect();
       }}
     >
@@ -568,6 +580,7 @@ function WallSegmentItem({
 
   const handleFaceClick = (side: WallSide, e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
+    if (e.delta > 4) return;
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
     if (onSelectSurface) {
       onSelectSurface({ kind: 'wall', wallId: wall.id, side }, additive);
@@ -619,6 +632,7 @@ function WallSegmentItem({
             <boxGeometry args={[p.width, p.height, thickness]} />
             {/* 0: +X (end) */}
             <meshStandardMaterial
+              key={`end-${endMat.map?.uuid ?? 'none'}`}
               attach="material-0"
               color={endMat.color}
               map={endMat.map}
@@ -631,6 +645,7 @@ function WallSegmentItem({
             />
             {/* 1: -X (start) */}
             <meshStandardMaterial
+              key={`start-${startMat.map?.uuid ?? 'none'}`}
               attach="material-1"
               color={startMat.color}
               map={startMat.map}
@@ -655,6 +670,7 @@ function WallSegmentItem({
             />
             {/* 4: +Z (front) */}
             <meshStandardMaterial
+              key={`front-${frontMat.map?.uuid ?? 'none'}`}
               attach="material-4"
               color={frontMat.color}
               map={frontMat.map}
@@ -667,6 +683,7 @@ function WallSegmentItem({
             />
             {/* 5: -Z (back) */}
             <meshStandardMaterial
+              key={`back-${backMat.map?.uuid ?? 'none'}`}
               attach="material-5"
               color={backMat.color}
               map={backMat.map}
@@ -766,6 +783,7 @@ function WallSegmentItem({
             ]}
             onClick={(e) => {
               e.stopPropagation();
+              if (e.delta > 4) return;
               onSelectWall(wall.id);
               onSelectWallVertex?.({ wallId: wall.id, endKey: 'start' });
             }}
@@ -776,7 +794,9 @@ function WallSegmentItem({
               onStartDragVertex?.(wall.id, 'start', e);
             }}
           >
-            <sphereGeometry args={[isStartVertexSelected ? 0.13 : 0.095, 16, 16]} />
+            <sphereGeometry
+              args={[isStartVertexSelected ? 0.13 : 0.095, 16, 16]}
+            />
             <meshStandardMaterial
               color={isStartVertexSelected ? '#f59e0b' : '#38bdf8'}
               emissive={isStartVertexSelected ? '#d97706' : '#0284c7'}
@@ -792,6 +812,7 @@ function WallSegmentItem({
             ]}
             onClick={(e) => {
               e.stopPropagation();
+              if (e.delta > 4) return;
               onSelectWall(wall.id);
               onSelectWallVertex?.({ wallId: wall.id, endKey: 'end' });
             }}
@@ -818,6 +839,8 @@ function WallSegmentItem({
 interface FloorZoneItemProps {
   zone: FloorZone;
   textures: CatalogTexture[];
+  ceilingHeightM: number;
+  isTopView: boolean;
   isSelected: boolean;
   isSurfaceSelected: boolean;
   draggedTextureId: string | null;
@@ -831,6 +854,8 @@ interface FloorZoneItemProps {
 function FloorZoneItem({
   zone,
   textures,
+  ceilingHeightM,
+  isTopView,
   isSelected,
   isSurfaceSelected,
   draggedTextureId,
@@ -927,6 +952,8 @@ function FloorZoneItem({
         ? 0.2
         : 0;
 
+  const pinY = isTopView ? 0.36 : Math.max(0.2, ceilingHeightM) + 0.08;
+
   return (
     <group>
       <mesh
@@ -935,6 +962,7 @@ function FloorZoneItem({
         receiveShadow
         onClick={(e) => {
           e.stopPropagation();
+          if (e.delta > 4) return;
           const additive = e.shiftKey || e.ctrlKey || e.metaKey;
           if (onSelectSurface) {
             onSelectSurface({ kind: 'floor', zoneId: zone.id }, additive);
@@ -957,6 +985,7 @@ function FloorZoneItem({
         }}
       >
         <meshStandardMaterial
+          key={`fz-${mat.map?.uuid ?? 'none'}`}
           color={mat.color}
           map={mat.map}
           normalMap={mat.normalMap}
@@ -977,13 +1006,14 @@ function FloorZoneItem({
           return (
             <mesh
               key={`fz-handle-${idx}`}
-              position={[pt[0], 0.06, pt[1]]}
+              position={[pt[0], pinY, pt[1]]}
               onClick={(e) => {
                 e.stopPropagation();
+                if (e.delta > 4) return;
                 onSelectFloorVertex?.({ zoneId: zone.id, pointIndex: idx });
               }}
             >
-              <sphereGeometry args={[isVSelected ? 0.11 : 0.08, 14, 14]} />
+              <sphereGeometry args={[isVSelected ? 0.13 : 0.095, 16, 16]} />
               <meshStandardMaterial
                 color={isVSelected ? '#f59e0b' : '#10b981'}
                 emissive={isVSelected ? '#d97706' : '#059669'}
@@ -993,6 +1023,81 @@ function FloorZoneItem({
           );
         })}
     </group>
+  );
+}
+
+function AutoClosedFloorPolygon({
+  points,
+  draggedTextureId,
+  onMaterializeAutoFloorZone,
+}: {
+  points: [number, number][];
+  draggedTextureId: string | null;
+  onMaterializeAutoFloorZone?: (
+    points: [number, number][],
+    options?: {
+      textureId?: string | null;
+      selectZone?: boolean;
+      additive?: boolean;
+    }
+  ) => string | null;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  const geometry = useMemo(() => {
+    if (points.length < 3) return null;
+    const shape = new THREE.Shape();
+    shape.moveTo(points[0][0], -points[0][1]);
+    for (let i = 1; i < points.length; i++) {
+      shape.lineTo(points[i][0], -points[i][1]);
+    }
+    shape.closePath();
+    const geom = new THREE.ShapeGeometry(shape);
+    geom.rotateX(-Math.PI / 2);
+    geom.computeVertexNormals();
+    return geom;
+  }, [points]);
+
+  useEffect(() => {
+    return () => {
+      geometry?.dispose();
+    };
+  }, [geometry]);
+
+  if (!geometry) return null;
+
+  return (
+    <mesh
+      geometry={geometry}
+      position={[0, 0.002, 0]}
+      receiveShadow
+      onClick={(e) => {
+        e.stopPropagation();
+        if (e.delta > 4) return;
+        const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+        onMaterializeAutoFloorZone?.(points, { selectZone: true, additive });
+      }}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        setHovered(true);
+      }}
+      onPointerOut={() => setHovered(false)}
+      onPointerUp={(e) => {
+        if (!draggedTextureId || !onMaterializeAutoFloorZone) return;
+        e.stopPropagation();
+        onMaterializeAutoFloorZone(points, {
+          textureId: draggedTextureId,
+          selectZone: true,
+        });
+      }}
+    >
+      <meshStandardMaterial
+        color={draggedTextureId && hovered ? '#34d399' : '#334155'}
+        roughness={0.85}
+        metalness={0.05}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
   );
 }
 
@@ -1023,6 +1128,7 @@ function StandaloneOpeningItem({
       rotation={[0, -rotRad, 0]}
       onClick={(e) => {
         e.stopPropagation();
+        if (e.delta > 4) return;
         onSelect();
       }}
       onPointerDown={(e) => {
@@ -1082,27 +1188,24 @@ function FloorplanUnderlayPlane({
       return;
     }
     let cancelled = false;
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin('anonymous');
-    loader.load(floorplan.imageUrl, (loaded) => {
+    let activeTex: THREE.Texture | null = null;
+    loadTextureWithFallback(floorplan.imageUrl, true).then((loaded) => {
       if (cancelled) {
-        loaded.dispose();
+        loaded?.dispose();
         return;
       }
-      loaded.colorSpace = THREE.SRGBColorSpace;
-      loaded.needsUpdate = true;
+      if (loaded) {
+        loaded.wrapS = THREE.ClampToEdgeWrapping;
+        loaded.wrapT = THREE.ClampToEdgeWrapping;
+      }
+      activeTex = loaded;
       setTex(loaded);
     });
     return () => {
       cancelled = true;
+      activeTex?.dispose();
     };
   }, [floorplan.imageUrl]);
-
-  useEffect(() => {
-    return () => {
-      tex?.dispose();
-    };
-  }, [tex]);
 
   if (!floorplan.visible || !tex) return null;
 
@@ -1138,6 +1241,7 @@ export function RoomMesh({
   onSelectSurface,
   onClearSurfaceSelection,
   onDropTextureOnSurface,
+  onMaterializeAutoFloorZone,
   onSelectOpening,
   onSelectStandaloneOpening,
   onSelectFloorZone,
@@ -1157,10 +1261,29 @@ export function RoomMesh({
   const isInteractiveFloorMode =
     isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
 
+  const closedRoomPolys = useMemo(
+    () => findClosedRoomPolygons(room.walls),
+    [room.walls]
+  );
+
+  const uncoveredAutoPolys = useMemo(() => {
+    const zones = room.floorZones ?? [];
+    if (zones.length === 0) return closedRoomPolys;
+    return closedRoomPolys.filter((poly) => {
+      const cx = poly.reduce((s, p) => s + p[0], 0) / poly.length;
+      const cz = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+      return !zones.some((z) => {
+        if (z.points.length < 3) return false;
+        const zcx = z.points.reduce((s, p) => s + p[0], 0) / z.points.length;
+        const zcz = z.points.reduce((s, p) => s + p[1], 0) / z.points.length;
+        return Math.hypot(cx - zcx, cz - zcz) < 0.25;
+      });
+    });
+  }, [closedRoomPolys, room.floorZones]);
+
   const ceilingGeometries = useMemo(() => {
     if (!room.showCeiling || isTopView) return [];
-    const polys = findClosedRoomPolygons(room.walls);
-    return polys.map((pts) => {
+    return closedRoomPolys.map((pts) => {
       const shape = new THREE.Shape();
       shape.moveTo(pts[0][0], -pts[0][1]);
       for (let i = 1; i < pts.length; i++) {
@@ -1171,7 +1294,7 @@ export function RoomMesh({
       geom.rotateX(Math.PI / 2);
       return geom;
     });
-  }, [room.showCeiling, room.walls, isTopView]);
+  }, [room.showCeiling, closedRoomPolys, isTopView]);
 
   useEffect(() => {
     return () => {
@@ -1181,7 +1304,7 @@ export function RoomMesh({
 
   return (
     <group>
-      {/* Основна плоча на пода (за деселекция или чертане/калибрация) */}
+      {/* Основна плоча на пода */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, -0.002, 0]}
@@ -1196,6 +1319,7 @@ export function RoomMesh({
         }}
         onClick={(e) => {
           e.stopPropagation();
+          if (e.delta > 4) return;
           const pt: [number, number] = hoverPoint ?? [
             Math.round(e.point.x * 20) / 20,
             Math.round(e.point.z * 20) / 20,
@@ -1227,12 +1351,24 @@ export function RoomMesh({
       {/* 2D Архитектурна подложка */}
       {room.floorplan && <FloorplanUnderlayPlane floorplan={room.floorplan} />}
 
+      {/* Автоматични подове */}
+      {uncoveredAutoPolys.map((poly, idx) => (
+        <AutoClosedFloorPolygon
+          key={`auto-floor-${idx}`}
+          points={poly}
+          draggedTextureId={draggedTextureId}
+          onMaterializeAutoFloorZone={onMaterializeAutoFloorZone}
+        />
+      ))}
+
       {/* Подови зони */}
       {(room.floorZones ?? []).map((zone) => (
         <FloorZoneItem
           key={zone.id}
           zone={zone}
           textures={textures}
+          ceilingHeightM={room.ceilingHeightM}
+          isTopView={isTopView}
           isSelected={selectedFloorZoneId === zone.id}
           isSurfaceSelected={selectedSurfaces.some((s) =>
             isSameSurface(s, { kind: 'floor', zoneId: zone.id })

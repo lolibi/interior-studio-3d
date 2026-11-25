@@ -335,19 +335,50 @@ export function RightInspector({
     if (first.kind === 'wall') {
       const w = room.walls.find((item) => item.id === first.wallId);
       if (!w) return null;
-      const isFront = first.side === 'front';
-      const texId = isFront ? w.frontTextureId ?? '' : w.backTextureId ?? '';
+      const side = first.side;
+      const texId =
+        side === 'front'
+          ? w.frontTextureId ?? ''
+          : side === 'back'
+            ? w.backTextureId ?? ''
+            : side === 'start'
+              ? w.startTextureId ?? ''
+              : w.endTextureId ?? '';
+      const color =
+        side === 'front'
+          ? w.frontColor || '#f1f5f9'
+          : side === 'back'
+            ? w.backColor || '#f1f5f9'
+            : side === 'start'
+              ? w.startColor || '#f1f5f9'
+              : w.endColor || '#f1f5f9';
+      const tileHeightM =
+        side === 'front'
+          ? w.frontTileHeightM ?? null
+          : side === 'back'
+            ? w.backTileHeightM ?? null
+            : side === 'start'
+              ? w.startTileHeightM ?? null
+              : w.endTileHeightM ?? null;
+      const uvw =
+        (side === 'front'
+          ? w.frontUvw
+          : side === 'back'
+            ? w.backUvw
+            : side === 'start'
+              ? w.startUvw
+              : w.endUvw) ?? {};
       const texMeta = texId ? textures.find((t) => t.id === texId) ?? null : null;
       return {
         kind: 'wall' as const,
-        side: first.side,
+        side,
         hasWalls,
         hasFloors,
-        color: isFront ? w.frontColor || '#f1f5f9' : w.backColor || '#f1f5f9',
+        color,
         textureId: texId,
         textureMeta: texMeta,
-        tileHeightM: isFront ? w.frontTileHeightM ?? null : w.backTileHeightM ?? null,
-        uvw: (isFront ? w.frontUvw : w.backUvw) ?? {},
+        tileHeightM,
+        uvw,
       };
     }
 
@@ -528,7 +559,15 @@ export function RightInspector({
               <span style={{ fontWeight: 600, fontSize: '12px', color: '#38bdf8' }}>
                 {selectedSurfaces.length === 1
                   ? primarySurfaceInfo.kind === 'wall'
-                    ? `Лице на стена (${primarySurfaceInfo.side === 'front' ? 'Страна А' : 'Страна Б'})`
+                    ? `Лице на стена (${
+                        primarySurfaceInfo.side === 'front'
+                          ? 'Страна А'
+                          : primarySurfaceInfo.side === 'back'
+                            ? 'Страна Б'
+                            : primarySurfaceInfo.side === 'start'
+                              ? 'Чело (Начало)'
+                              : 'Чело (Край)'
+                      })`
                     : `Подова зона: ${selectedFloorZone?.name ?? ''}`
                   : `Групова редакция: ${selectedSurfaces.length} лица`}
               </span>
