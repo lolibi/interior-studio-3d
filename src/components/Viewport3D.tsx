@@ -669,7 +669,7 @@ export function Viewport3D({
         );
       })}
 
-{sceneObjects.map((obj) => {
+      {sceneObjects.map((obj) => {
         const handleSelectThis = (id: string) => {
           if (!isBusyDrawingOrCalib) {
             onSelectObject(id);
@@ -689,6 +689,7 @@ export function Viewport3D({
               item={obj}
               config={obj.parametric}
               textures={textures}
+              walls={room.walls}
               isSelected={
                 !isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId
               }
@@ -709,6 +710,7 @@ export function Viewport3D({
             item={obj}
             model={model}
             textures={textures}
+            walls={room.walls}
             isSelected={!isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId}
             transformTool={transformTool}
             onSelect={handleSelectThis}

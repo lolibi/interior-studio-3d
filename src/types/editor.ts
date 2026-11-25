@@ -29,6 +29,16 @@ export const CATEGORY_LABELS: Record<ModelCategory, string> = {
   windows: 'Прозорци',
 };
 
+/** Категории мебели, които се снапват магнитно към стените и ъглите */
+export const WALL_SNAP_CATEGORIES: ModelCategory[] = [
+  'wardrobes',
+  'kitchen',
+  'decor',
+  'bathroom',
+  'doors',
+  'windows',
+];
+
 export type ScaleMode = 'fixed' | 'constrained' | 'free';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
 export type DisplayUnit = 'cm' | 'm';
@@ -127,6 +137,7 @@ export type ParametricFurnitureKind = 'wardrobe' | 'kitchen';
 export type FrontStyleType = 'flat' | 'shaker' | 'gola';
 export type HandleStyleType = 'vertical' | 'horizontal' | 'knob' | 'none';
 export type WardrobeDoorOpeningType = 'hinged' | 'sliding';
+export type KitchenShapeType = 'straight' | 'l-left' | 'l-right';
 export type KitchenLayoutMode =
   | 'base-only'
   | 'base-and-wall'
@@ -140,6 +151,7 @@ export interface WardrobeSpec {
   depthCm: number;
   doorCount: number;
   doorType: WardrobeDoorOpeningType;
+  mirrorDoorIndices?: number[];
   plinthHeightCm: number;
   hasTopBridge: boolean;
   topBridgeHeightCm: number;
@@ -155,7 +167,10 @@ export interface WardrobeSpec {
 }
 
 export interface KitchenSpec {
+  shape?: KitchenShapeType;
   widthCm: number;
+  wingWidthCm?: number;
+  wingModuleCount?: number;
   depthCm: number;
   layoutMode: KitchenLayoutMode;
   baseHeightCm: number;
@@ -195,6 +210,7 @@ export const DEFAULT_WARDROBE_SPEC: WardrobeSpec = {
   depthCm: 60,
   doorCount: 3,
   doorType: 'hinged',
+  mirrorDoorIndices: [],
   plinthHeightCm: 8,
   hasTopBridge: false,
   topBridgeHeightCm: 45,
@@ -210,7 +226,10 @@ export const DEFAULT_WARDROBE_SPEC: WardrobeSpec = {
 };
 
 export const DEFAULT_KITCHEN_SPEC: KitchenSpec = {
+  shape: 'straight',
   widthCm: 240,
+  wingWidthCm: 160,
+  wingModuleCount: 2,
   depthCm: 60,
   layoutMode: 'base-and-wall',
   baseHeightCm: 86,

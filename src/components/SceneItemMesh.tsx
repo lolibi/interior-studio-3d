@@ -2,13 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { TransformControls } from '@react-three/drei';
 import type { ThreeEvent } from '@react-three/fiber';
+import { WALL_SNAP_CATEGORIES } from '../types/editor';
 import type {
   CatalogModel,
   CatalogTexture,
   SceneObject,
   TransformTool,
 } from '../types/editor';
+import type { WallSegment } from '../types/room';
 import { loadGlbFromUrl } from '../utils/gltfLoader';
+import { snapFurnitureToWalls } from '../utils/furnitureSnap';
 
 export interface DiscoveredMaterialSlot {
   key: string;
@@ -30,6 +33,7 @@ interface SceneItemMeshProps {
   item: SceneObject;
   model: CatalogModel;
   textures?: CatalogTexture[];
+  walls?: WallSegment[];
   isSelected: boolean;
   transformTool: TransformTool;
   onSelect: (instanceId: string) => void;
@@ -76,6 +80,7 @@ export function SceneItemMesh({
   item,
   model,
   textures = [],
+  walls = [],
   isSelected,
   transformTool,
   onSelect,
@@ -93,6 +98,8 @@ export function SceneItemMesh({
   const targetW = Math.max(0.01, model.dimensionsCm.width / 100);
   const targetH = Math.max(0.01, model.dimensionsCm.height / 100);
   const targetD = Math.max(0.01, model.dimensionsCm.depth / 100);
+
+  const canSnapToWall = WALL_SNAP_CATEGORIES.includes(model.category);
 
   // Зареждане на .glb файла от сървъра и приравняване към базовите размери на кота Y = 0
   useEffect(() => {
@@ -314,6 +321,29 @@ export function SceneItemMesh({
         Math.min(20, Math.max(0.05, groupObj.scale.y)),
         Math.min(20, Math.max(0.05, groupObj.scale.z))
       );
+    }
+
+    // Магнитно снапване към стените само за разрешените категории (гардероби, кухни, декор и др.)
+    if (canSnapToWall && transformTool === 'translate' && walls.length > 0) {
+      const currentHalfW = (targetW * Math.abs(groupObj.scale.x)) / 2;
+      const currentBackOffset = (targetD * Math.abs(groupObj.scale.z)) / 2;
+
+      const snapped = snapFurnitureToWalls(
+        [groupObj.position.x, groupObj.position.y, groupObj.position.z],
+        groupObj.rotation.y,
+        walls,
+        {
+          backOffsetM: currentBackOffset,
+          halfWidthM: currentHalfW,
+          snapDistanceM: 0.3,
+        }
+      );
+
+      if (snapped.snapped) {
+        groupObj.position.x = snapped.position[0];
+        groupObj.position.z = snapped.position[2];
+        groupObj.rotation.y = snapped.rotationY;
+      }
     }
   }
 
