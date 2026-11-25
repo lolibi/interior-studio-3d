@@ -1,13 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { CSSProperties } from 'react';
-import { CATEGORY_LABELS } from '../types/editor';
+import { useState } from 'react';
 import type {
   CatalogModel,
   CatalogTexture,
-  DimensionsCm,
   DisplayUnit,
   MaterialOverride,
-  ScaleMode,
   SceneObject,
 } from '../types/editor';
 import { getWallAngleDeg, getWallLengthM } from '../types/room';
@@ -26,144 +22,17 @@ import type {
 } from '../types/room';
 import type { DiscoveredMaterialSlot } from './SceneItemMesh';
 
-const SCALE_MODE_SHORT: Record<ScaleMode, string> = {
-  fixed: 'Фиксиран',
-  constrained: 'Ограничен',
-  free: 'Свободен',
-};
-
-const FLOOR_COLOR_PRESETS = [
-  { label: 'Паркет дъб', color: '#b08968', roughness: 0.55, metalness: 0.05 },
-  { label: 'Светъл дървен под', color: '#d4b483', roughness: 0.5, metalness: 0.05 },
-  { label: 'Тъмен орех', color: '#5c4033', roughness: 0.45, metalness: 0.08 },
-  { label: 'Гранитогрес светъл', color: '#cbd5e1', roughness: 0.28, metalness: 0.12 },
-  { label: 'Плочки / Бетон', color: '#94a3b8', roughness: 0.65, metalness: 0.08 },
-];
-
-const FRAME_COLOR_PRESETS = [
-  { label: 'Бяла (PVC)', color: '#f1f5f9' },
-  { label: 'Антрацит', color: '#334155' },
-  { label: 'Черна (Алуминий)', color: '#1e293b' },
-  { label: 'Златен дъб', color: '#a16207' },
-  { label: 'Орех', color: '#5c4033' },
-];
-
-function formatUnitValue(meters: number, unit: DisplayUnit): number {
-  if (unit === 'cm') {
-    return Math.round(meters * 1000) / 10;
-  }
-  return Math.round(meters * 1000) / 1000;
-}
-
-function radToDeg(rad: number): number {
-  return Math.round(((rad * 180) / Math.PI) * 10) / 10;
-}
-
-function degToRad(deg: number): number {
-  return (deg * Math.PI) / 180;
-}
-
-function BufferedNumberInput({
-  value,
-  onCommit,
-  min,
-  max,
-  step = 1,
-  style,
-  className = 'input-control',
-}: {
-  value: number;
-  onCommit: (nextVal: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
-  style?: CSSProperties;
-  className?: string;
-}) {
-  const [text, setText] = useState<string>(() => String(value));
-  const [isFocused, setIsFocused] = useState(false);
-
-  useEffect(() => {
-    if (!isFocused) {
-      setText(String(value));
-    }
-  }, [value, isFocused]);
-
-  const clampVal = (num: number): number => {
-    let res = num;
-    if (min !== undefined) res = Math.max(min, res);
-    if (max !== undefined) res = Math.min(max, res);
-    return res;
-  };
-
-  const commitCurrentText = () => {
-    const normalized = text.trim().replace(',', '.');
-    if (normalized === '' || normalized === '-' || normalized === '.') {
-      setText(String(value));
-      return;
-    }
-    const parsed = parseFloat(normalized);
-    if (Number.isNaN(parsed)) {
-      setText(String(value));
-      return;
-    }
-    const clamped = clampVal(parsed);
-    setText(String(clamped));
-    if (clamped !== value) {
-      onCommit(clamped);
-    }
-  };
-
-  return (
-    <input
-      type="number"
-      step={step}
-      min={min}
-      max={max}
-      className={className}
-      style={style}
-      value={text}
-      onFocus={() => setIsFocused(true)}
-      onChange={(e) => {
-        const raw = e.target.value;
-        setText(raw);
-        const normalized = raw.trim().replace(',', '.');
-        if (normalized === '' || normalized === '-' || normalized === '.') {
-          return;
-        }
-        const parsed = parseFloat(normalized);
-        if (Number.isNaN(parsed)) return;
-        if (min !== undefined && parsed < min) return;
-        if (max !== undefined && parsed > max) return;
-        onCommit(parsed);
-      }}
-      onBlur={() => {
-        setIsFocused(false);
-        commitCurrentText();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.currentTarget.blur();
-        } else if (e.key === 'Escape') {
-          setText(String(value));
-          e.currentTarget.blur();
-        }
-      }}
-    />
-  );
-}
-
 export interface SurfaceBatchPatch {
   color?: string;
   textureId?: string | null;
-  tileHeightM?: number | null;
-  uvwPatch?: Partial<CustomUvwSettings>;
-  resetUvw?: boolean;
+  tileHeightM?: number;
   roughness?: number;
   metalness?: number;
+  uvwPatch?: Partial<CustomUvwSettings>;
+  resetUvw?: boolean;
 }
 
-export interface RightInspectorProps {
+interface RightInspectorProps {
   room: RoomConfig;
   models: CatalogModel[];
   textures: CatalogTexture[];
@@ -183,6 +52,7 @@ export interface RightInspectorProps {
   selectedFloorVertex: SelectedFloorVertex | null;
   linkedVertexJoint: boolean;
   autoStraightenVertices: boolean;
+
   wallLengthInput: string;
   wallAngleInput: string;
   wallThicknessInput: string;
@@ -190,10 +60,11 @@ export interface RightInspectorProps {
   onApplySurfaceBatch: (patch: SurfaceBatchPatch) => void;
   onClearSurfaceSelection: () => void;
 
-  onSelectWallVertex: (v: SelectedWallVertex | null) => void;
+  onSelectWallVertex: (vertex: SelectedWallVertex | null) => void;
   onToggleLinkedVertexJoint: () => void;
   onToggleAutoStraightenVertices: () => void;
   onStraightenSelectedWall: () => void;
+
   onWallLengthInputChange: (val: string) => void;
   onWallAngleInputChange: (val: string) => void;
   onWallThicknessInputChange: (val: string) => void;
@@ -201,18 +72,25 @@ export interface RightInspectorProps {
   onUpdateWallSurface: (wallId: string, patch: Partial<WallSegment>) => void;
   onDeleteSelectedWall: () => void;
 
-  onSelectOpening: (opId: string | null) => void;
+  onSelectOpening: (openingId: string | null) => void;
   onAddOpeningToSelectedWall: (type: OpeningType) => void;
-  onUpdateOpening: (wallId: string, opId: string, patch: Partial<WallOpening>) => void;
-  onDeleteOpening: (wallId: string, opId: string) => void;
+  onUpdateOpening: (
+    wallId: string,
+    openingId: string,
+    patch: Partial<WallOpening>
+  ) => void;
+  onDeleteOpening: (wallId: string, openingId: string) => void;
 
-  onSelectStandaloneOpening: (id: string | null) => void;
-  onUpdateStandaloneOpening: (id: string, patch: Partial<StandaloneOpening>) => void;
-  onDuplicateStandaloneOpening: (id: string) => void;
-  onDeleteStandaloneOpening: (id: string) => void;
+  onSelectStandaloneOpening: (openingId: string | null) => void;
+  onUpdateStandaloneOpening: (
+    openingId: string,
+    patch: Partial<StandaloneOpening>
+  ) => void;
+  onDuplicateStandaloneOpening: (openingId: string) => void;
+  onDeleteStandaloneOpening: (openingId: string) => void;
 
-  onSelectFloorZone: (id: string | null) => void;
-  onSelectFloorVertex: (v: SelectedFloorVertex | null) => void;
+  onSelectFloorZone: (zoneId: string | null) => void;
+  onSelectFloorVertex: (vertex: SelectedFloorVertex | null) => void;
   onUpdateFloorZoneVertex: (
     zoneId: string,
     pointIndex: number,
@@ -220,34 +98,74 @@ export interface RightInspectorProps {
   ) => void;
   onInsertFloorZoneVertexAfter: (zoneId: string, pointIndex: number) => void;
   onDeleteFloorZoneVertex: (zoneId: string, pointIndex: number) => void;
-  onUpdateFloorZone: (id: string, patch: Partial<FloorZone>) => void;
-  onDuplicateFloorZone: (id: string) => void;
-  onDeleteFloorZone: (id: string) => void;
+  onUpdateFloorZone: (zoneId: string, patch: Partial<FloorZone>) => void;
+  onDuplicateFloorZone: (zoneId: string) => void;
+  onDeleteFloorZone: (zoneId: string) => void;
 
-  onUpdateRoomCeiling: (patch: { showCeiling?: boolean; ceilingColor?: string }) => void;
+  onUpdateRoomCeiling: (patch: Partial<RoomConfig>) => void;
 
-  onSelectInstance: (id: string | null) => void;
+  onSelectInstance: (instanceId: string | null) => void;
   onTransformChange: (
     instanceId: string,
     position: [number, number, number],
     rotation: [number, number, number],
     scale: [number, number, number]
   ) => void;
-  onRotateYBy: (deg: number) => void;
+  onRotateYBy: (degrees: number) => void;
   onToggleMirrorSelected: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
+
   onUpdateObjectMaterial: (
     instanceId: string,
     slotKey: string,
     override: MaterialOverride | null
   ) => void;
   onSaveObjectAsPreset: (obj: SceneObject, baseModel: CatalogModel) => void;
+  onEditParametricObject: (obj: SceneObject) => void;
+}
+
+const DEFAULT_WALL_HEX = '#f1f5f9';
+
+const SWING_OPTIONS: { value: DoorSwing; label: string }[] = [
+  { value: 'left-in', label: 'Лява навътре' },
+  { value: 'right-in', label: 'Дясна навътре' },
+  { value: 'left-out', label: 'Лява навън' },
+  { value: 'right-out', label: 'Дясна навън' },
+];
+
+const WALL_SIDE_LABELS: Record<'front' | 'back' | 'start' | 'end', string> = {
+  front: 'Лице',
+  back: 'Гръб',
+  start: 'Челна (начало)',
+  end: 'Челна (край)',
+};
+
+function describeSurface(room: RoomConfig, target: SurfaceTarget): string {
+  if (target.kind === 'floor') {
+    const zone = (room.floorZones ?? []).find((z) => z.id === target.zoneId);
+    return zone ? `Под: ${zone.name}` : 'Подова зона';
+  }
+  const idx = room.walls.findIndex((w) => w.id === target.wallId);
+  const label = idx >= 0 ? `Стена #${idx + 1}` : 'Стена';
+  return `${label} (${WALL_SIDE_LABELS[target.side]})`;
+}
+
+function formatDimValue(meters: number, unit: DisplayUnit): string {
+  if (unit === 'cm') {
+    return String(Math.round(meters * 1000) / 10);
+  }
+  return String(Math.round(meters * 1000) / 1000);
+}
+
+function parseDimToMeters(rawValue: string, unit: DisplayUnit): number | null {
+  const num = parseFloat(rawValue.replace(',', '.'));
+  if (Number.isNaN(num)) return null;
+  return unit === 'cm' ? num / 100 : num;
 }
 
 export function RightInspector({
   room,
-  models,
   textures,
   sceneObjects,
   unit,
@@ -276,6 +194,7 @@ export function RightInspector({
   onWallAngleInputChange,
   onWallThicknessInputChange,
   onCommitSelectedWallChanges,
+  onUpdateWallSurface,
   onDeleteSelectedWall,
   onSelectOpening,
   onAddOpeningToSelectedWall,
@@ -302,135 +221,55 @@ export function RightInspector({
   onDeleteSelected,
   onUpdateObjectMaterial,
   onSaveObjectAsPreset,
+  onEditParametricObject,
 }: RightInspectorProps) {
-  const unitLabel = unit === 'cm' ? 'см' : 'м';
+  const [batchColor, setBatchColor] = useState('#e2e8f0');
+  const [batchTextureId, setBatchTextureId] = useState('');
+  const [batchTileHeightCm, setBatchTileHeightCm] = useState('');
+  const [batchRoughness, setBatchRoughness] = useState(0.55);
+  const [batchMetalness, setBatchMetalness] = useState(0.05);
 
-  const glbCatalogModels = useMemo(
-    () => models.filter((m) => m.isActive && Boolean(m.glbUrl)),
-    [models]
-  );
+  const [uvwTileW, setUvwTileW] = useState(100);
+  const [uvwTileH, setUvwTileH] = useState(100);
+  const [uvwOffsetX, setUvwOffsetX] = useState(0);
+  const [uvwOffsetY, setUvwOffsetY] = useState(0);
+  const [uvwRotationDeg, setUvwRotationDeg] = useState(0);
 
-  const floorTextures = useMemo(
-    () => textures.filter((t) => t.category === 'floor' || t.category === 'tiles'),
-    [textures]
-  );
+  const [isSceneOverviewOpen, setIsSceneOverviewOpen] = useState(false);
 
-  const wallTextures = useMemo(
-    () => textures.filter((t) => t.category === 'wall' || t.category === 'tiles'),
-    [textures]
-  );
+  const hasFloorInSelection = selectedSurfaces.some((s) => s.kind === 'floor');
+  const hasWallInSelection = selectedSurfaces.some((s) => s.kind === 'wall');
 
-  const furnitureTextures = useMemo(
-    () => textures.filter((t) => t.category === 'furniture'),
-    [textures]
-  );
-
-  const primarySurfaceInfo = useMemo(() => {
-    const first = selectedSurfaces[0];
-    if (!first) return null;
-
-    const hasWalls = selectedSurfaces.some((s) => s.kind === 'wall');
-    const hasFloors = selectedSurfaces.some((s) => s.kind === 'floor');
-
-    if (first.kind === 'wall') {
-      const w = room.walls.find((item) => item.id === first.wallId);
-      if (!w) return null;
-      const side = first.side;
-      const texId =
-        side === 'front'
-          ? w.frontTextureId ?? ''
-          : side === 'back'
-            ? w.backTextureId ?? ''
-            : side === 'start'
-              ? w.startTextureId ?? ''
-              : w.endTextureId ?? '';
-      const color =
-        side === 'front'
-          ? w.frontColor || '#f1f5f9'
-          : side === 'back'
-            ? w.backColor || '#f1f5f9'
-            : side === 'start'
-              ? w.startColor || '#f1f5f9'
-              : w.endColor || '#f1f5f9';
-      const tileHeightM =
-        side === 'front'
-          ? w.frontTileHeightM ?? null
-          : side === 'back'
-            ? w.backTileHeightM ?? null
-            : side === 'start'
-              ? w.startTileHeightM ?? null
-              : w.endTileHeightM ?? null;
-      const uvw =
-        (side === 'front'
-          ? w.frontUvw
-          : side === 'back'
-            ? w.backUvw
-            : side === 'start'
-              ? w.startUvw
-              : w.endUvw) ?? {};
-      const texMeta = texId ? textures.find((t) => t.id === texId) ?? null : null;
-      return {
-        kind: 'wall' as const,
-        side,
-        hasWalls,
-        hasFloors,
-        color,
-        textureId: texId,
-        textureMeta: texMeta,
-        tileHeightM,
-        uvw,
-      };
+  const firstSurface = selectedSurfaces[0] ?? null;
+  const firstSurfaceUvw: CustomUvwSettings | undefined = (() => {
+    if (!firstSurface) return undefined;
+    if (firstSurface.kind === 'wall') {
+      const w = room.walls.find((item) => item.id === firstSurface.wallId);
+      if (!w) return undefined;
+      if (firstSurface.side === 'front') return w.frontUvw;
+      if (firstSurface.side === 'back') return w.backUvw;
+      if (firstSurface.side === 'start') return w.startUvw;
+      return w.endUvw;
     }
+    const z = (room.floorZones ?? []).find(
+      (item) => item.id === firstSurface.zoneId
+    );
+    return z?.uvw;
+  })();
 
-    const z = (room.floorZones ?? []).find((item) => item.id === first.zoneId);
-    if (!z) return null;
-    const texId = z.textureId ?? '';
-    const texMeta = texId ? textures.find((t) => t.id === texId) ?? null : null;
-    return {
-      kind: 'floor' as const,
-      hasWalls,
-      hasFloors,
-      color: z.color || '#b08968',
-      textureId: texId,
-      textureMeta: texMeta,
-      tileHeightM: null,
-      uvw: {
-        ...z.uvw,
-        rotationDeg: z.uvw?.rotationDeg ?? z.textureRotationDeg ?? 0,
-      },
-    };
-  }, [selectedSurfaces, room.walls, room.floorZones, textures]);
+  const activeTileW = firstSurfaceUvw?.tileWidthCm ?? uvwTileW;
+  const activeTileH = firstSurfaceUvw?.tileHeightCm ?? uvwTileH;
+  const activeOffsetX = firstSurfaceUvw?.offsetXCm ?? uvwOffsetX;
+  const activeOffsetY = firstSurfaceUvw?.offsetYCm ?? uvwOffsetY;
+  const activeRotationDeg = firstSurfaceUvw?.rotationDeg ?? uvwRotationDeg;
 
-  const applicableTextures = useMemo(() => {
-    if (!primarySurfaceInfo) return textures;
-    if (primarySurfaceInfo.hasWalls && !primarySurfaceInfo.hasFloors) {
-      return wallTextures;
-    }
-    if (primarySurfaceInfo.hasFloors && !primarySurfaceInfo.hasWalls) {
-      return floorTextures;
-    }
-    return textures.filter((t) => t.category !== 'furniture');
-  }, [primarySurfaceInfo, textures, wallTextures, floorTextures]);
+  const surfaceTextures = textures.filter((t) => t.category !== 'furniture');
+  const allActiveTextures = textures;
 
-  function isAxisScalable(
-    model: CatalogModel,
-    axis: keyof DimensionsCm
-  ): boolean {
-    if (model.scaleMode === 'fixed') return false;
-    if (model.scaleMode === 'free') return true;
-    if (axis === 'width') return model.scaleConstraints.allowX;
-    if (axis === 'height') return model.scaleConstraints.allowY;
-    return model.scaleConstraints.allowZ;
-  }
-
-  function handlePositionInput(axisIndex: 0 | 1 | 2, rawValue: string) {
+  const updatePositionAxis = (axisIndex: 0 | 1 | 2, rawValue: string) => {
     if (!selectedObject) return;
-    const parsed = parseFloat(rawValue);
-    if (Number.isNaN(parsed)) return;
-
-    let meters = unit === 'cm' ? parsed / 100 : parsed;
-    if (axisIndex === 1) meters = Math.max(0, meters);
-
+    const meters = parseDimToMeters(rawValue, unit);
+    if (meters === null) return;
     const nextPos: [number, number, number] = [...selectedObject.position];
     nextPos[axisIndex] = meters;
     onTransformChange(
@@ -439,114 +278,95 @@ export function RightInspector({
       selectedObject.rotation,
       selectedObject.scale
     );
-  }
+  };
 
-  function handleRotationInput(axisIndex: 0 | 1 | 2, rawValue: string) {
+  const updateRotationAxis = (axisIndex: 0 | 1 | 2, rawDeg: string) => {
     if (!selectedObject) return;
-    const parsed = parseFloat(rawValue);
-    if (Number.isNaN(parsed)) return;
-
+    const deg = parseFloat(rawDeg);
+    if (Number.isNaN(deg)) return;
     const nextRot: [number, number, number] = [...selectedObject.rotation];
-    nextRot[axisIndex] = degToRad(parsed);
+    nextRot[axisIndex] = (deg * Math.PI) / 180;
     onTransformChange(
       selectedObject.instanceId,
       selectedObject.position,
       nextRot,
       selectedObject.scale
     );
-  }
+  };
 
-  function handleDimensionInput(
-    axis: keyof DimensionsCm,
-    rawValue: string
-  ) {
-    if (!selectedObject || !selectedModel) return;
-    if (!isAxisScalable(selectedModel, axis)) return;
-
-    const parsed = parseFloat(rawValue);
-    if (Number.isNaN(parsed)) return;
-
-    const inputCm = unit === 'cm' ? parsed : parsed * 100;
-    const minAllowed =
-      selectedModel.scaleMode === 'free'
-        ? 1
-        : Math.max(1, selectedModel.scaleConstraints.minCm[axis]);
-    const maxAllowed =
-      selectedModel.scaleMode === 'free'
-        ? 2000
-        : Math.max(minAllowed, selectedModel.scaleConstraints.maxCm[axis]);
-
-    const clampedCm = Math.min(maxAllowed, Math.max(minAllowed, inputCm));
-    const baseCm = Math.max(1, selectedModel.dimensionsCm[axis]);
-    const newRatio = clampedCm / baseCm;
-
+  const updateDimensionCm = (
+    axisIndex: 0 | 1 | 2,
+    baseCm: number,
+    rawCm: string
+  ) => {
+    if (!selectedObject || baseCm <= 0) return;
+    const targetCm = parseFloat(rawCm);
+    if (Number.isNaN(targetCm) || targetCm <= 1) return;
     const nextScale: [number, number, number] = [...selectedObject.scale];
-    if (axis === 'width') nextScale[0] = newRatio;
-    if (axis === 'height') nextScale[1] = newRatio;
-    if (axis === 'depth') nextScale[2] = newRatio;
-
+    nextScale[axisIndex] = targetCm / baseCm;
     onTransformChange(
       selectedObject.instanceId,
       selectedObject.position,
       selectedObject.rotation,
       nextScale
     );
-  }
+  };
 
-  const defaultTileWCm = primarySurfaceInfo?.textureMeta
-    ? Math.round(primarySurfaceInfo.textureMeta.tileWidthM * 100)
-    : 60;
-  const defaultTileHCm = primarySurfaceInfo?.textureMeta
-    ? Math.round(primarySurfaceInfo.textureMeta.tileHeightM * 100)
-    : 60;
+  const selectedWallOpening =
+    selectedWall?.openings?.find((o) => o.id === selectedOpeningId) ?? null;
 
-  const activeFloorVertexPoint =
-    selectedFloorZone &&
-    selectedFloorVertex?.zoneId === selectedFloorZone.id &&
-    selectedFloorZone.points[selectedFloorVertex.pointIndex]
-      ? {
-          index: selectedFloorVertex.pointIndex,
-          point: selectedFloorZone.points[selectedFloorVertex.pointIndex],
+  const effectiveMaterialSlots: DiscoveredMaterialSlot[] = (() => {
+    if (!selectedObject) return [];
+    const map = new Map<string, DiscoveredMaterialSlot>();
+
+    for (const s of discoveredMaterialSlots) {
+      map.set(s.key, s);
+    }
+
+    if (selectedObject.materialOverrides) {
+      for (const [key, ov] of Object.entries(selectedObject.materialOverrides)) {
+        if (!map.has(key)) {
+          map.set(key, {
+            key,
+            label: key,
+            defaultColorHex: ov.color || '#cbd5e1',
+          });
         }
-      : null;
+      }
+    }
+
+    return Array.from(map.values());
+  })();
+
+  const hasActiveSelection = Boolean(
+    selectedSurfaces.length > 0 ||
+      selectedWall ||
+      selectedStandaloneOpening ||
+      selectedFloorZone ||
+      selectedObject
+  );
 
   return (
     <aside className="sidebar-right">
       <div className="panel-header">
-        <span>
-          {selectedSurfaces.length > 1
-            ? `Избрани повърхности (${selectedSurfaces.length})`
-            : selectedFloorZone
-              ? 'Подова зона и настилка'
-              : selectedStandaloneOpening
-                ? selectedStandaloneOpening.type === 'door'
-                  ? 'Врата (3D Пивот + Snap)'
-                  : 'Прозорец (3D Пивот + Snap)'
-                : selectedWall
-                  ? 'Лице на стена и геометрия'
-                  : 'Настройки на обект'}
-        </span>
-        <span style={{ fontSize: '11px', color: '#94a3b8' }}>
-          {selectedSurfaces.length > 0
-            ? 'UVW / PBR'
-            : selectedStandaloneOpening || selectedWall
-              ? 'м / °'
-              : `Единици: ${unitLabel}`}
+        <span>Свойства и инспектор</span>
+        <span style={{ fontSize: '10px', color: '#64748b' }}>
+          {unit.toUpperCase()}
         </span>
       </div>
 
       <div className="panel-body">
-        {/* 1. ОБЩ ПАНЕЛ ЗА МАТЕРИАЛ + CUSTOM UVW НА СЕЛЕКТИРАНИТЕ ПОЛИГОНИ */}
-        {primarySurfaceInfo && selectedSurfaces.length > 0 && (
+        {/* 1. ИЗБРАНИ ПОВЪРХНОСТИ (СТЕНИ / ПОДОВИ ЗОНИ) */}
+        {selectedSurfaces.length > 0 && (
           <div
             style={{
-              backgroundColor: '#0f172a',
-              border: '1px solid #38bdf8',
+              backgroundColor: '#0c2320',
+              border: '1px solid #10b981',
               borderRadius: '6px',
               padding: '10px',
               display: 'flex',
               flexDirection: 'column',
-              gap: '10px',
+              gap: '8px',
             }}
           >
             <div
@@ -556,86 +376,76 @@ export function RightInspector({
                 alignItems: 'center',
               }}
             >
-              <span style={{ fontWeight: 600, fontSize: '12px', color: '#38bdf8' }}>
-                {selectedSurfaces.length === 1
-                  ? primarySurfaceInfo.kind === 'wall'
-                    ? `Лице на стена (${
-                        primarySurfaceInfo.side === 'front'
-                          ? 'Страна А'
-                          : primarySurfaceInfo.side === 'back'
-                            ? 'Страна Б'
-                            : primarySurfaceInfo.side === 'start'
-                              ? 'Чело (Начало)'
-                              : 'Чело (Край)'
-                      })`
-                    : `Подова зона: ${selectedFloorZone?.name ?? ''}`
-                  : `Групова редакция: ${selectedSurfaces.length} лица`}
+              <span
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  color: '#34d399',
+                  textTransform: 'uppercase',
+                }}
+              >
+                Избрани повърхности ({selectedSurfaces.length})
               </span>
-              {selectedSurfaces.length > 1 && (
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: '2px 6px', fontSize: '10px' }}
+                onClick={onClearSurfaceSelection}
+              >
+                Изчисти
+              </button>
+            </div>
+
+            <div
+              style={{
+                fontSize: '10px',
+                color: '#a7f3d0',
+                lineHeight: 1.4,
+                maxHeight: '54px',
+                overflowY: 'auto',
+              }}
+            >
+              {selectedSurfaces
+                .map((s) => describeSurface(room, s))
+                .join(' • ')}
+            </div>
+
+            <div className="axis-field">
+              <span>Цвят на повърхността</span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <input
+                  type="color"
+                  value={batchColor}
+                  onChange={(e) => {
+                    setBatchColor(e.target.value);
+                    onApplySurfaceBatch({ color: e.target.value });
+                  }}
+                  style={{ width: '40px', height: '28px' }}
+                />
                 <button
                   type="button"
                   className="btn"
-                  style={{ padding: '2px 6px', fontSize: '10px' }}
-                  onClick={onClearSurfaceSelection}
+                  style={{ flex: 1, fontSize: '11px' }}
+                  onClick={() => onApplySurfaceBatch({ color: batchColor })}
                 >
-                  Изчисти
+                  Приложи цвят
                 </button>
-              )}
+              </div>
             </div>
 
-            <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-              Съвет: Задръж <strong>Shift + Click</strong> в 3D, за да добавиш още стени/подове, или плъзни материал от левия таб „Материали“.
-            </div>
-
-            {/* Цвят / Боя */}
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                backgroundColor: '#1e293b',
-                padding: '6px 8px',
-                borderRadius: '5px',
-                border: '1px solid #334155',
-              }}
-            >
-              <span style={{ fontSize: '11px', color: '#e2e8f0' }}>
-                Основен цвят / боя
-              </span>
-              <input
-                type="color"
-                style={{
-                  width: '36px',
-                  height: '22px',
-                  border: '1px solid #475569',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                }}
-                value={primarySurfaceInfo.color}
-                onChange={(e) =>
-                  onApplySurfaceBatch({
-                    color: e.target.value,
-                    textureId: null,
-                  })
-                }
-              />
-            </div>
-
-            {/* Избор на текстура */}
             <div className="axis-field">
-              <span>Текстура / Тапет / Плочки / Паркет</span>
+              <span>PBR Текстура / Материал</span>
               <select
-                className="select-control"
-                style={{ fontSize: '11px', padding: '5px 6px' }}
-                value={primarySurfaceInfo.textureId}
-                onChange={(e) =>
-                  onApplySurfaceBatch({
-                    textureId: e.target.value || null,
-                  })
-                }
+                className="input-control"
+                value={batchTextureId}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setBatchTextureId(val);
+                  onApplySurfaceBatch({ textureId: val || null });
+                }}
               >
-                <option value="">Без текстура (само боя)</option>
-                {applicableTextures.map((t) => (
+                <option value="">-- Без текстура (само цвят) --</option>
+                {surfaceTextures.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name} ({Math.round(t.tileWidthM * 100)}×
                     {Math.round(t.tileHeightM * 100)} см)
@@ -644,203 +454,233 @@ export function RightInspector({
               </select>
             </div>
 
-            {/* Височина на плочките на стената */}
-            {primarySurfaceInfo.hasWalls && primarySurfaceInfo.textureId && (
-              <div className="axis-field">
-                <span>Височина на облицовката (м) — празно = до тавана</span>
-                <input
-                  type="number"
-                  step={0.05}
-                  min={0.2}
-                  max={room.ceilingHeightM}
-                  placeholder={`До тавана (${room.ceilingHeightM} м)`}
-                  className="input-control"
-                  style={{ fontSize: '11px', padding: '4px 6px' }}
-                  value={primarySurfaceInfo.tileHeightM ?? ''}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    onApplySurfaceBatch({
-                      tileHeightM: raw ? parseFloat(raw) || null : null,
-                    });
-                  }}
-                />
-              </div>
-            )}
-
-            {/* CUSTOM UVW КАРТОГРАФИРАНЕ */}
-            {primarySurfaceInfo.textureId && (
+            {/* UVW КОНТРОЛЕР ЗА ТЕКСТУРИ */}
+            <div
+              style={{
+                backgroundColor: '#061715',
+                border: '1px solid #065f46',
+                borderRadius: '5px',
+                padding: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}
+            >
               <div
                 style={{
-                  backgroundColor: '#1e293b',
-                  border: '1px solid #475569',
-                  borderRadius: '6px',
-                  padding: '8px',
                   display: 'flex',
-                  flexDirection: 'column',
-                  gap: '7px',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
                 }}
               >
-                <div
+                <span
                   style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    color: '#6ee7b7',
+                    textTransform: 'uppercase',
                   }}
                 >
-                  <span style={{ fontSize: '11px', fontWeight: 600, color: '#f8fafc' }}>
-                    Custom UVW Мащаб и Позиция
-                  </span>
+                  UVW Мапинг (Размер / Позиция / Завъртане)
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ padding: '1px 5px', fontSize: '9px' }}
+                  onClick={() => {
+                    setUvwTileW(100);
+                    setUvwTileH(100);
+                    setUvwOffsetX(0);
+                    setUvwOffsetY(0);
+                    setUvwRotationDeg(0);
+                    onApplySurfaceBatch({ resetUvw: true });
+                  }}
+                >
+                  Нулирай UV
+                </button>
+              </div>
+
+              <div
+                className="axis-grid"
+                style={{ gridTemplateColumns: '1fr 1fr' }}
+              >
+                <div className="axis-field">
+                  <span>Шир. плочка (см)</span>
+                  <input
+                    type="number"
+                    step={5}
+                    min={5}
+                    max={1000}
+                    className="input-control"
+                    value={activeTileW}
+                    onChange={(e) => {
+                      const v = Math.max(5, parseFloat(e.target.value) || 100);
+                      setUvwTileW(v);
+                      onApplySurfaceBatch({ uvwPatch: { tileWidthCm: v } });
+                    }}
+                  />
+                </div>
+                <div className="axis-field">
+                  <span>Вис. плочка (см)</span>
+                  <input
+                    type="number"
+                    step={5}
+                    min={5}
+                    max={1000}
+                    className="input-control"
+                    value={activeTileH}
+                    onChange={(e) => {
+                      const v = Math.max(5, parseFloat(e.target.value) || 100);
+                      setUvwTileH(v);
+                      onApplySurfaceBatch({ uvwPatch: { tileHeightCm: v } });
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div
+                className="axis-grid"
+                style={{ gridTemplateColumns: '1fr 1fr' }}
+              >
+                <div className="axis-field">
+                  <span>Изместване X (см)</span>
+                  <input
+                    type="number"
+                    step={5}
+                    className="input-control"
+                    value={activeOffsetX}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value) || 0;
+                      setUvwOffsetX(v);
+                      onApplySurfaceBatch({ uvwPatch: { offsetXCm: v } });
+                    }}
+                  />
+                </div>
+                <div className="axis-field">
+                  <span>Изместване Y (см)</span>
+                  <input
+                    type="number"
+                    step={5}
+                    className="input-control"
+                    value={activeOffsetY}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value) || 0;
+                      setUvwOffsetY(v);
+                      onApplySurfaceBatch({ uvwPatch: { offsetYCm: v } });
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="axis-field">
+                <span>Завъртане на текстурата ({activeRotationDeg}°)</span>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  <input
+                    type="range"
+                    min={0}
+                    max={360}
+                    step={5}
+                    style={{ flex: 1 }}
+                    value={activeRotationDeg}
+                    onChange={(e) => {
+                      const deg = parseFloat(e.target.value) || 0;
+                      setUvwRotationDeg(deg);
+                      onApplySurfaceBatch({ uvwPatch: { rotationDeg: deg } });
+                    }}
+                  />
                   <button
                     type="button"
                     className="btn"
-                    style={{ padding: '2px 6px', fontSize: '9px' }}
-                    onClick={() => onApplySurfaceBatch({ resetUvw: true })}
+                    style={{ padding: '2px 6px', fontSize: '10px' }}
+                    onClick={() => {
+                      const next = (activeRotationDeg + 90) % 360;
+                      setUvwRotationDeg(next);
+                      onApplySurfaceBatch({ uvwPatch: { rotationDeg: next } });
+                    }}
                   >
-                    Нулирай UVW
+                    +90°
                   </button>
                 </div>
+              </div>
+            </div>
 
-                <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                  <div className="axis-field">
-                    <span>Ширина плочка (см)</span>
-                    <BufferedNumberInput
-                      step={5}
-                      min={5}
-                      max={1000}
-                      value={primarySurfaceInfo.uvw.tileWidthCm ?? defaultTileWCm}
-                      onCommit={(val) =>
-                        onApplySurfaceBatch({
-                          uvwPatch: { tileWidthCm: val },
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="axis-field">
-                    <span>Височина плочка (см)</span>
-                    <BufferedNumberInput
-                      step={5}
-                      min={5}
-                      max={1000}
-                      value={primarySurfaceInfo.uvw.tileHeightCm ?? defaultTileHCm}
-                      onCommit={(val) =>
-                        onApplySurfaceBatch({
-                          uvwPatch: { tileHeightCm: val },
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="axis-field">
-                  <span>Завъртане на текстурата (°)</span>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {[0, 45, 90].map((deg) => (
-                      <button
-                        key={deg}
-                        type="button"
-                        className={`btn ${(primarySurfaceInfo.uvw.rotationDeg ?? 0) === deg ? 'btn-active' : ''}`}
-                        style={{ flex: 1, fontSize: '10px', padding: '3px 4px' }}
-                        onClick={() =>
-                          onApplySurfaceBatch({ uvwPatch: { rotationDeg: deg } })
-                        }
-                      >
-                        {deg}°
-                      </button>
-                    ))}
-                    <BufferedNumberInput
-                      step={15}
-                      style={{ width: '58px', padding: '3px 5px', fontSize: '11px' }}
-                      value={primarySurfaceInfo.uvw.rotationDeg ?? 0}
-                      onCommit={(val) =>
-                        onApplySurfaceBatch({
-                          uvwPatch: { rotationDeg: val },
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                  <div className="axis-field">
-                    <span>Отместване U (см)</span>
-                    <BufferedNumberInput
-                      step={5}
-                      value={primarySurfaceInfo.uvw.offsetXCm ?? 0}
-                      onCommit={(val) =>
-                        onApplySurfaceBatch({
-                          uvwPatch: { offsetXCm: val },
-                        })
-                      }
-                    />
-                  </div>
-                  <div className="axis-field">
-                    <span>Отместване V (см)</span>
-                    <BufferedNumberInput
-                      step={5}
-                      value={primarySurfaceInfo.uvw.offsetYCm ?? 0}
-                      onCommit={(val) =>
-                        onApplySurfaceBatch({
-                          uvwPatch: { offsetYCm: val },
-                        })
-                      }
-                    />
-                  </div>
+            {hasWallInSelection && (
+              <div className="axis-field">
+                <span>Височина на облицовката на стената (см)</span>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input
+                    type="number"
+                    min={10}
+                    max={600}
+                    placeholder="Цялата стена"
+                    className="input-control"
+                    value={batchTileHeightCm}
+                    onChange={(e) => setBatchTileHeightCm(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ fontSize: '11px' }}
+                    onClick={() => {
+                      const cm = parseFloat(batchTileHeightCm);
+                      onApplySurfaceBatch({
+                        tileHeightM:
+                          !Number.isNaN(cm) && cm > 0 ? cm / 100 : undefined,
+                      });
+                    }}
+                  >
+                    Задай
+                  </button>
                 </div>
               </div>
             )}
 
-            {/* Бързи едноцветни пресети за под */}
-            {primarySurfaceInfo.hasFloors && !primarySurfaceInfo.hasWalls && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Бързи настилки
-                </div>
-                {FLOOR_COLOR_PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    className="btn"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      justifyContent: 'flex-start',
-                      fontSize: '11px',
-                      padding: '4px 8px',
+            {hasFloorInSelection && (
+              <div
+                className="axis-grid"
+                style={{ gridTemplateColumns: '1fr 1fr' }}
+              >
+                <div className="axis-field">
+                  <span>Гланц / Roughness ({batchRoughness.toFixed(2)})</span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={1}
+                    step={0.05}
+                    value={batchRoughness}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setBatchRoughness(val);
+                      onApplySurfaceBatch({ roughness: val });
                     }}
-                    onClick={() =>
-                      onApplySurfaceBatch({
-                        textureId: null,
-                        color: preset.color,
-                        roughness: preset.roughness,
-                        metalness: preset.metalness,
-                      })
-                    }
-                  >
-                    <span
-                      style={{
-                        width: '12px',
-                        height: '12px',
-                        borderRadius: '3px',
-                        backgroundColor: preset.color,
-                        border: '1px solid rgba(255,255,255,0.25)',
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span>{preset.label}</span>
-                  </button>
-                ))}
+                  />
+                </div>
+                <div className="axis-field">
+                  <span>Металност ({batchMetalness.toFixed(2)})</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={batchMetalness}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      setBatchMetalness(val);
+                      onApplySurfaceBatch({ metalness: val });
+                    }}
+                  />
+                </div>
               </div>
             )}
           </div>
         )}
 
-        {/* 2. ДОПЪЛНИТЕЛНИ НАСТРОЙКИ И ВЪРТЕКСИ ЗА ЕДИНИЧНА ПОДОВА ЗОНА */}
-        {selectedFloorZone && selectedSurfaces.length <= 1 && (
+        {/* 2. ИЗБРАНА СТЕНА */}
+        {selectedWall && (
           <div
             style={{
               backgroundColor: '#0f172a',
-              border: '1px solid #334155',
+              border: '1px solid #38bdf8',
               borderRadius: '6px',
               padding: '10px',
               display: 'flex',
@@ -848,1033 +688,927 @@ export function RightInspector({
               gap: '8px',
             }}
           >
-            <div className="axis-field">
-              <span>Наименование на зоната</span>
-              <input
-                type="text"
-                className="input-control"
-                value={selectedFloorZone.name}
-                onChange={(e) =>
-                  onUpdateFloorZone(selectedFloorZone.id, { name: e.target.value })
-                }
-              />
-            </div>
-
-            {/* Въртекси (ъгли) на подовата зона */}
             <div
               style={{
-                backgroundColor: '#1e293b',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '8px',
                 display: 'flex',
-                flexDirection: 'column',
-                gap: '6px',
+                justifyContent: 'space-between',
+                alignItems: 'center',
               }}
             >
-              <div className="section-label" style={{ marginBottom: 0 }}>
-                Въртекси (ъгли) на пода ({selectedFloorZone.points.length})
-              </div>
-              <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                Избери ъгъл от списъка или кликни зеления маркер в 3D, за да го преместиш със Snap.
-              </div>
-
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr',
-                  gap: '4px',
-                }}
+              <span
+                className="section-label"
+                style={{ color: '#38bdf8', marginBottom: 0 }}
               >
-                {selectedFloorZone.points.map((pt, idx) => {
-                  const isActiveV =
-                    selectedFloorVertex?.zoneId === selectedFloorZone.id &&
-                    selectedFloorVertex?.pointIndex === idx;
-                  return (
-                    <button
-                      key={`fz-v-${idx}`}
-                      type="button"
-                      className={`btn ${isActiveV ? 'btn-active' : ''}`}
-                      style={{ fontSize: '10px', padding: '4px 6px' }}
-                      onClick={() =>
-                        onSelectFloorVertex(
-                          isActiveV
-                            ? null
-                            : { zoneId: selectedFloorZone.id, pointIndex: idx }
-                        )
-                      }
-                    >
-                      #{idx + 1} ({pt[0]}, {pt[1]})
-                    </button>
-                  );
-                })}
+                Стена ({getWallLengthM(selectedWall)} м /{' '}
+                {getWallAngleDeg(selectedWall)}°)
+              </span>
+              <button
+                type="button"
+                className="btn btn-danger"
+                style={{ padding: '2px 6px', fontSize: '10px' }}
+                onClick={onDeleteSelectedWall}
+              >
+                Изтрий
+              </button>
+            </div>
+
+            <div className="axis-grid">
+              <div className="axis-field">
+                <span>Дължина (м)</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  className="input-control"
+                  value={wallLengthInput}
+                  onChange={(e) => onWallLengthInputChange(e.target.value)}
+                />
               </div>
-
-              {activeFloorVertexPoint && (
-                <div
-                  style={{
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #475569',
-                    borderRadius: '5px',
-                    padding: '6px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px',
-                  }}
-                >
-                  <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                    <div className="axis-field">
-                      <span>Ъгъл #{activeFloorVertexPoint.index + 1} X (м)</span>
-                      <BufferedNumberInput
-                        step={0.05}
-                        value={activeFloorVertexPoint.point[0]}
-                        onCommit={(val) =>
-                          onUpdateFloorZoneVertex(
-                            selectedFloorZone.id,
-                            activeFloorVertexPoint.index,
-                            [
-                              Number(val.toFixed(3)),
-                              activeFloorVertexPoint.point[1],
-                            ]
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="axis-field">
-                      <span>Ъгъл #{activeFloorVertexPoint.index + 1} Z (м)</span>
-                      <BufferedNumberInput
-                        step={0.05}
-                        value={activeFloorVertexPoint.point[1]}
-                        onCommit={(val) =>
-                          onUpdateFloorZoneVertex(
-                            selectedFloorZone.id,
-                            activeFloorVertexPoint.index,
-                            [
-                              activeFloorVertexPoint.point[0],
-                              Number(val.toFixed(3)),
-                            ]
-                          )
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
-                      onClick={() =>
-                        onInsertFloorZoneVertexAfter(
-                          selectedFloorZone.id,
-                          activeFloorVertexPoint.index
-                        )
-                      }
-                    >
-                      + Нов връх след #{activeFloorVertexPoint.index + 1}
-                    </button>
-                    {selectedFloorZone.points.length > 3 && (
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        style={{ fontSize: '10px', padding: '4px 6px' }}
-                        onClick={() =>
-                          onDeleteFloorZoneVertex(
-                            selectedFloorZone.id,
-                            activeFloorVertexPoint.index
-                          )
-                        }
-                      >
-                        Изтрий връх
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
+              <div className="axis-field">
+                <span>Ъгъл (°)</span>
+                <input
+                  type="number"
+                  step={1}
+                  className="input-control"
+                  value={wallAngleInput}
+                  onChange={(e) => onWallAngleInputChange(e.target.value)}
+                />
+              </div>
+              <div className="axis-field">
+                <span>Дебелина (м)</span>
+                <input
+                  type="number"
+                  step={0.01}
+                  className="input-control"
+                  value={wallThicknessInput}
+                  onChange={(e) => onWallThicknessInputChange(e.target.value)}
+                />
+              </div>
             </div>
 
             <div style={{ display: 'flex', gap: '6px' }}>
               <button
                 type="button"
-                className="btn"
-                style={{ flex: 1, fontSize: '11px' }}
-                onClick={() => onDuplicateFloorZone(selectedFloorZone.id)}
-              >
-                Дублирай зона
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                style={{ flex: 1, fontSize: '11px' }}
-                onClick={() => onDeleteFloorZone(selectedFloorZone.id)}
-              >
-                Премахни
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* 3. НАСТРОЙКИ ЗА ВРАТА / ПРОЗОРЕЦ НА ПЛАНА */}
-        {selectedStandaloneOpening ? (
-          <>
-            <div
-              style={{
-                backgroundColor: '#0f172a',
-                border: '1px solid #38bdf8',
-                borderRadius: '6px',
-                padding: '10px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: '13px', color: '#f8fafc' }}>
-                {selectedStandaloneOpening.type === 'door'
-                  ? 'Врата на плана'
-                  : 'Прозорец на плана'}
-              </div>
-
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>Позиция X (м)</span>
-                  <input
-                    type="number"
-                    step={0.05}
-                    className="input-control"
-                    value={selectedStandaloneOpening.position[0]}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        position: [
-                          parseFloat(e.target.value) || 0,
-                          selectedStandaloneOpening.position[1],
-                        ],
-                      })
-                    }
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Позиция Z (м)</span>
-                  <input
-                    type="number"
-                    step={0.05}
-                    className="input-control"
-                    value={selectedStandaloneOpening.position[1]}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        position: [
-                          selectedStandaloneOpening.position[0],
-                          parseFloat(e.target.value) || 0,
-                        ],
-                      })
-                    }
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Завъртане (°)</span>
-                  <input
-                    type="number"
-                    step={15}
-                    className="input-control"
-                    value={selectedStandaloneOpening.rotationDeg}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        rotationDeg: parseFloat(e.target.value) || 0,
-                      })
-                    }
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {[0, 90, 180, 270].map((deg) => (
-                  <button
-                    key={deg}
-                    type="button"
-                    className={`btn ${selectedStandaloneOpening.rotationDeg === deg ? 'btn-active' : ''}`}
-                    style={{ flex: 1, padding: '3px 4px', fontSize: '10px' }}
-                    onClick={() =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        rotationDeg: deg,
-                      })
-                    }
-                  >
-                    {deg}°
-                  </button>
-                ))}
-              </div>
-
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>Ширина (м)</span>
-                  <input
-                    type="number"
-                    step={0.05}
-                    min={0.3}
-                    className="input-control"
-                    value={selectedStandaloneOpening.widthM}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        widthM: Math.max(0.3, parseFloat(e.target.value) || 0.9),
-                      })
-                    }
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Височина (м)</span>
-                  <input
-                    type="number"
-                    step={0.05}
-                    min={0.3}
-                    className="input-control"
-                    value={selectedStandaloneOpening.heightM}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        heightM: Math.max(0.3, parseFloat(e.target.value) || 1.4),
-                      })
-                    }
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Дебелина (м)</span>
-                  <input
-                    type="number"
-                    step={0.02}
-                    min={0.05}
-                    className="input-control"
-                    value={selectedStandaloneOpening.thicknessM}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        thicknessM: Math.max(0.05, parseFloat(e.target.value) || 0.15),
-                      })
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="axis-field">
-                <span>Цвят на дограмата / касата</span>
-                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                  {FRAME_COLOR_PRESETS.map((fp) => (
-                    <button
-                      key={fp.label}
-                      type="button"
-                      className="btn"
-                      style={{
-                        padding: '3px 6px',
-                        fontSize: '10px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                      }}
-                      onClick={() =>
-                        onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                          frameColor: fp.color,
-                        })
-                      }
-                    >
-                      <span
-                        style={{
-                          width: '10px',
-                          height: '10px',
-                          borderRadius: '2px',
-                          backgroundColor: fp.color,
-                          border: '1px solid #64748b',
-                        }}
-                      />
-                      <span>{fp.label}</span>
-                    </button>
-                  ))}
-                  <input
-                    type="color"
-                    style={{
-                      width: '28px',
-                      height: '22px',
-                      border: '1px solid #334155',
-                      background: 'transparent',
-                      cursor: 'pointer',
-                    }}
-                    value={selectedStandaloneOpening.frameColor || '#e2e8f0'}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        frameColor: e.target.value,
-                      })
-                    }
-                  />
-                </div>
-              </div>
-
-              {selectedStandaloneOpening.type === 'window' ? (
-                <div className="axis-field">
-                  <span>Отстояние от земята / парапет (м)</span>
-                  <input
-                    type="number"
-                    step={0.05}
-                    min={0}
-                    max={Math.max(0, room.ceilingHeightM - 0.3)}
-                    className="input-control"
-                    value={selectedStandaloneOpening.sillHeightM}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        sillHeightM: Math.max(0, parseFloat(e.target.value) || 0),
-                      })
-                    }
-                  />
-                </div>
-              ) : (
-                <div className="axis-field">
-                  <span>Отваряне на крилото</span>
-                  <select
-                    className="select-control"
-                    value={selectedStandaloneOpening.swing ?? 'left-in'}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        swing: e.target.value as DoorSwing,
-                      })
-                    }
-                  >
-                    <option value="left-in">Ляво навътре</option>
-                    <option value="right-in">Дясно навътре</option>
-                    <option value="left-out">Ляво навън</option>
-                    <option value="right-out">Дясно навън</option>
-                  </select>
-                </div>
-              )}
-
-              {glbCatalogModels.length > 0 && (
-                <div className="axis-field">
-                  <span>3D .glb модел (по избор)</span>
-                  <select
-                    className="select-control"
-                    value={selectedStandaloneOpening.modelId ?? ''}
-                    onChange={(e) =>
-                      onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
-                        modelId: e.target.value || null,
-                      })
-                    }
-                  >
-                    <option value="">Стандартен 3D модул</option>
-                    {glbCatalogModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '8px',
-                marginTop: '6px',
-                paddingTop: '12px',
-                borderTop: '1px solid #334155',
-              }}
-            >
-              <button
-                type="button"
                 className="btn btn-active"
-                onClick={() =>
-                  onDuplicateStandaloneOpening(selectedStandaloneOpening.id)
-                }
-              >
-                {selectedStandaloneOpening.type === 'door'
-                  ? 'Дублирай вратата (Ctrl+D)'
-                  : 'Дублирай прозореца (Ctrl+D)'}
-              </button>
-
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() =>
-                  onDeleteStandaloneOpening(selectedStandaloneOpening.id)
-                }
-              >
-                Премахни от плана (Del)
-              </button>
-            </div>
-          </>
-        ) : selectedWall && selectedSurfaces.length <= 1 ? (
-          <>
-            {/* 4. ГЕОМЕТРИЯ И ОТВОРИ НА ЕДИНИЧНА СТЕНА */}
-            <div
-              style={{
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '10px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: '13px', color: '#f8fafc' }}>
-                Стена ({getWallLengthM(selectedWall)} м • {getWallAngleDeg(selectedWall)}°)
-              </div>
-
-              <div
-                style={{
-                  backgroundColor: '#1e293b',
-                  border: '1px solid #334155',
-                  borderRadius: '6px',
-                  padding: '8px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '6px',
-                }}
-              >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Въртекс (ъгъл) и изправяне
-                </div>
-
-                <div style={{ display: 'flex', gap: '4px' }}>
-                  {(['start', 'end'] as const).map((endKey) => {
-                    const isActiveV =
-                      selectedWallVertex?.wallId === selectedWall.id &&
-                      selectedWallVertex?.endKey === endKey;
-                    const pt =
-                      endKey === 'start'
-                        ? selectedWall.start
-                        : selectedWall.end;
-                    return (
-                      <button
-                        key={endKey}
-                        type="button"
-                        className={`btn ${isActiveV ? 'btn-active' : ''}`}
-                        style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
-                        onClick={() =>
-                          onSelectWallVertex(
-                            isActiveV ? null : { wallId: selectedWall.id, endKey }
-                          )
-                        }
-                      >
-                        {endKey === 'start' ? 'Начало' : 'Край'} ({pt[0]}, {pt[1]})
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div style={{ display: 'flex', gap: '4px' }}>
-                  <button
-                    type="button"
-                    className={`btn ${linkedVertexJoint ? 'btn-active' : ''}`}
-                    style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
-                    onClick={onToggleLinkedVertexJoint}
-                  >
-                    {linkedVertexJoint ? 'Свързан ъгъл: ДА' : 'Свързан ъгъл: НЕ'}
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${autoStraightenVertices ? 'btn-active' : ''}`}
-                    style={{ flex: 1, fontSize: '10px', padding: '4px 6px' }}
-                    onClick={onToggleAutoStraightenVertices}
-                  >
-                    {autoStraightenVertices
-                      ? 'Авто-изправяне: ДА'
-                      : 'Авто-изправяне: НЕ'}
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  className="btn"
-                  style={{ fontSize: '11px', padding: '5px 8px' }}
-                  onClick={onStraightenSelectedWall}
-                >
-                  📐 Изправи стената (0° / 90° / 180° / 270°)
-                </button>
-              </div>
-
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>Дължина (м)</span>
-                  <input
-                    type="text"
-                    className="input-control"
-                    value={wallLengthInput}
-                    onChange={(e) => onWallLengthInputChange(e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Ъгъл (°)</span>
-                  <input
-                    type="text"
-                    className="input-control"
-                    value={wallAngleInput}
-                    onChange={(e) => onWallAngleInputChange(e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Дебелина (м)</span>
-                  <input
-                    type="text"
-                    className="input-control"
-                    value={wallThicknessInput}
-                    onChange={(e) => onWallThicknessInputChange(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <button
-                type="button"
-                className="btn btn-active"
+                style={{ flex: 1, fontSize: '11px' }}
                 onClick={onCommitSelectedWallChanges}
               >
-                Приложи размерите на стената
+                Приложи размери
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: '11px' }}
+                onClick={onStraightenSelectedWall}
+                title="Подравни на 0°, 90°, 180° или 270°"
+              >
+                Изправи 90°
               </button>
             </div>
 
             <div
               style={{
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '10px',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '10px',
+                gap: '4px',
+                borderTop: '1px solid #1e293b',
+                paddingTop: '6px',
               }}
             >
               <div className="section-label" style={{ marginBottom: 0 }}>
-                Вградени отвори в стената ({(selectedWall.openings ?? []).length})
+                Върхове (ъгли) на стената
               </div>
-
               <div style={{ display: 'flex', gap: '6px' }}>
                 <button
                   type="button"
-                  className="btn btn-active"
-                  style={{ flex: 1, fontSize: '11px' }}
-                  onClick={() => onAddOpeningToSelectedWall('door')}
+                  className={`btn ${
+                    selectedWallVertex?.wallId === selectedWall.id &&
+                    selectedWallVertex.endKey === 'start'
+                      ? 'btn-active'
+                      : ''
+                  }`}
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={() =>
+                    onSelectWallVertex({
+                      wallId: selectedWall.id,
+                      endKey: 'start',
+                    })
+                  }
                 >
-                  + Врата в стената
+                  Начало ({selectedWall.start[0].toFixed(2)},{' '}
+                  {selectedWall.start[1].toFixed(2)})
                 </button>
                 <button
                   type="button"
-                  className="btn btn-active"
-                  style={{ flex: 1, fontSize: '11px' }}
-                  onClick={() => onAddOpeningToSelectedWall('window')}
+                  className={`btn ${
+                    selectedWallVertex?.wallId === selectedWall.id &&
+                    selectedWallVertex.endKey === 'end'
+                      ? 'btn-active'
+                      : ''
+                  }`}
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={() =>
+                    onSelectWallVertex({
+                      wallId: selectedWall.id,
+                      endKey: 'end',
+                    })
+                  }
                 >
-                  + Прозорец в стената
+                  Край ({selectedWall.end[0].toFixed(2)},{' '}
+                  {selectedWall.end[1].toFixed(2)})
                 </button>
               </div>
+              <div style={{ display: 'flex', gap: '6px', marginTop: '2px' }}>
+                <button
+                  type="button"
+                  className={`btn ${linkedVertexJoint ? 'btn-active' : ''}`}
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={onToggleLinkedVertexJoint}
+                >
+                  {linkedVertexJoint ? '🔗 Свързани ъгли' : '⛓️‍💥 Свободен край'}
+                </button>
+                <button
+                  type="button"
+                  className={`btn ${autoStraightenVertices ? 'btn-active' : ''}`}
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={onToggleAutoStraightenVertices}
+                >
+                  {autoStraightenVertices ? '📐 Магнит 90°' : '📐 Свободен ъгъл'}
+                </button>
+              </div>
+            </div>
 
-              {(selectedWall.openings ?? []).map((op, idx) => {
-                const isOpSelected = selectedOpeningId === op.id;
-                return (
-                  <div
-                    key={op.id}
-                    onClick={() => onSelectOpening(op.id)}
-                    style={{
-                      backgroundColor: '#1e293b',
-                      border: `1px solid ${isOpSelected ? '#38bdf8' : '#334155'}`,
-                      borderRadius: '6px',
-                      padding: '8px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '8px',
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+                borderTop: '1px solid #1e293b',
+                paddingTop: '6px',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span className="section-label" style={{ marginBottom: 0 }}>
+                  Отвори в стената ({selectedWall.openings?.length ?? 0})
+                </span>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ padding: '2px 6px', fontSize: '10px' }}
+                    onClick={() => onAddOpeningToSelectedWall('door')}
+                  >
+                    + Врата
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ padding: '2px 6px', fontSize: '10px' }}
+                    onClick={() => onAddOpeningToSelectedWall('window')}
+                  >
+                    + Прозорец
+                  </button>
+                </div>
+              </div>
+
+              {(selectedWall.openings ?? []).map((op) => (
+                <div
+                  key={op.id}
+                  onClick={() => onSelectOpening(op.id)}
+                  style={{
+                    padding: '5px 8px',
+                    borderRadius: '4px',
+                    backgroundColor:
+                      selectedOpeningId === op.id ? '#1e293b' : '#020617',
+                    border: `1px solid ${
+                      selectedOpeningId === op.id ? '#38bdf8' : '#1e293b'
+                    }`,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: '11px',
+                  }}
+                >
+                  <span>
+                    {op.type === 'door' ? '🚪 Врата' : '🪟 Прозорец'} (
+                    {op.widthM}×{op.heightM} м)
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    style={{ padding: '0 5px', fontSize: '10px' }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteOpening(selectedWall.id, op.id);
                     }}
                   >
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontWeight: 600,
-                          fontSize: '12px',
-                          color: '#f8fafc',
-                        }}
-                      >
-                        {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'}
-                      </span>
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        style={{ padding: '2px 6px', fontSize: '10px' }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteOpening(selectedWall.id, op.id);
-                        }}
-                      >
-                        Изтрий
-                      </button>
-                    </div>
+                    ✕
+                  </button>
+                </div>
+              ))}
 
-                    <div className="axis-grid">
-                      <div className="axis-field">
-                        <span>Отстъп (м)</span>
-                        <input
-                          type="number"
-                          step={0.05}
-                          min={0.05}
-                          className="input-control"
-                          value={op.offsetFromStartM}
-                          onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              offsetFromStartM: parseFloat(e.target.value) || 0.05,
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="axis-field">
-                        <span>Ширина (м)</span>
-                        <input
-                          type="number"
-                          step={0.05}
-                          min={0.3}
-                          className="input-control"
-                          value={op.widthM}
-                          onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              widthM: parseFloat(e.target.value) || 0.6,
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="axis-field">
-                        <span>Височина (м)</span>
-                        <input
-                          type="number"
-                          step={0.05}
-                          min={0.3}
-                          className="input-control"
-                          value={op.heightM}
-                          onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              heightM: parseFloat(e.target.value) || 1.2,
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
-
+              {selectedWallOpening && (
+                <div
+                  style={{
+                    backgroundColor: '#020617',
+                    border: '1px solid #334155',
+                    borderRadius: '5px',
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <div className="axis-grid">
                     <div className="axis-field">
-                      <span>Цвят на дограмата / касата</span>
-                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                        {FRAME_COLOR_PRESETS.map((fp) => (
-                          <button
-                            key={fp.label}
-                            type="button"
-                            className="btn"
-                            style={{ padding: '2px 5px', fontSize: '10px' }}
-                            onClick={() =>
-                              onUpdateOpening(selectedWall.id, op.id, {
-                                frameColor: fp.color,
-                              })
+                      <span>От начало (м)</span>
+                      <input
+                        type="number"
+                        step={0.05}
+                        className="input-control"
+                        value={selectedWallOpening.offsetFromStartM}
+                        onChange={(e) =>
+                          onUpdateOpening(
+                            selectedWall.id,
+                            selectedWallOpening.id,
+                            {
+                              offsetFromStartM: Math.max(
+                                0,
+                                parseFloat(e.target.value) || 0
+                              ),
                             }
-                          >
-                            {fp.label}
-                          </button>
-                        ))}
-                      </div>
+                          )
+                        }
+                      />
                     </div>
+                    <div className="axis-field">
+                      <span>Ширина (м)</span>
+                      <input
+                        type="number"
+                        step={0.05}
+                        className="input-control"
+                        value={selectedWallOpening.widthM}
+                        onChange={(e) =>
+                          onUpdateOpening(
+                            selectedWall.id,
+                            selectedWallOpening.id,
+                            {
+                              widthM: Math.max(
+                                0.3,
+                                parseFloat(e.target.value) || 0.9
+                              ),
+                            }
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="axis-field">
+                      <span>Височина (м)</span>
+                      <input
+                        type="number"
+                        step={0.05}
+                        className="input-control"
+                        value={selectedWallOpening.heightM}
+                        onChange={(e) =>
+                          onUpdateOpening(
+                            selectedWall.id,
+                            selectedWallOpening.id,
+                            {
+                              heightM: Math.max(
+                                0.3,
+                                parseFloat(e.target.value) || 2.05
+                              ),
+                            }
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
 
-                    {op.type === 'window' ? (
-                      <div className="axis-field">
-                        <span>Отстояние от земята / парапет (м)</span>
-                        <input
-                          type="number"
-                          step={0.05}
-                          min={0}
-                          className="input-control"
-                          value={op.sillHeightM}
-                          onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              sillHeightM: Math.max(0, parseFloat(e.target.value) || 0),
-                            })
-                          }
-                        />
-                      </div>
-                    ) : (
+                  <div
+                    className="axis-grid"
+                    style={{ gridTemplateColumns: '1fr 1fr' }}
+                  >
+                    <div className="axis-field">
+                      <span>Подпрозоречен праг (м)</span>
+                      <input
+                        type="number"
+                        step={0.05}
+                        className="input-control"
+                        value={selectedWallOpening.sillHeightM}
+                        onChange={(e) =>
+                          onUpdateOpening(
+                            selectedWall.id,
+                            selectedWallOpening.id,
+                            {
+                              sillHeightM: Math.max(
+                                0,
+                                parseFloat(e.target.value) || 0
+                              ),
+                            }
+                          )
+                        }
+                      />
+                    </div>
+                    {selectedWallOpening.type === 'door' && (
                       <div className="axis-field">
                         <span>Отваряне на крилото</span>
                         <select
-                          className="select-control"
-                          value={op.swing ?? 'left-in'}
+                          className="input-control"
+                          value={selectedWallOpening.swing ?? 'left-in'}
                           onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              swing: e.target.value as DoorSwing,
-                            })
+                            onUpdateOpening(
+                              selectedWall.id,
+                              selectedWallOpening.id,
+                              { swing: e.target.value as DoorSwing }
+                            )
                           }
                         >
-                          <option value="left-in">Ляво навътре</option>
-                          <option value="right-in">Дясно навътре</option>
-                          <option value="left-out">Ляво навън</option>
-                          <option value="right-out">Дясно навън</option>
-                        </select>
-                      </div>
-                    )}
-
-                    {glbCatalogModels.length > 0 && (
-                      <div className="axis-field">
-                        <span>3D .glb модел (по избор)</span>
-                        <select
-                          className="select-control"
-                          value={op.modelId ?? ''}
-                          onChange={(e) =>
-                            onUpdateOpening(selectedWall.id, op.id, {
-                              modelId: e.target.value || null,
-                            })
-                          }
-                        >
-                          <option value="">Стандартен 3D модул</option>
-                          {glbCatalogModels.map((m) => (
-                            <option key={m.id} value={m.id}>
-                              {m.name}
+                          {SWING_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
                             </option>
                           ))}
                         </select>
                       </div>
                     )}
                   </div>
-                );
-              })}
+                </div>
+              )}
             </div>
 
-            <button
-              type="button"
-              className="btn btn-danger"
-              onClick={onDeleteSelectedWall}
-            >
-              Премахни стената
-            </button>
-          </>
-        ) : selectedSurfaces.length === 0 && (!selectedObject || !selectedModel) ? (
-          <>
-            {/* 5. ОБЩИ НАСТРОЙКИ НА СЦЕНАТА */}
             <div
               style={{
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '10px',
                 display: 'flex',
-                flexDirection: 'column',
-                gap: '8px',
+                gap: '6px',
+                borderTop: '1px solid #1e293b',
+                paddingTop: '6px',
               }}
             >
-              <div className="section-label" style={{ marginBottom: 0 }}>
-                Таван и изглед отвътре
-              </div>
-              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn"
+                style={{ flex: 1, fontSize: '10px' }}
+                onClick={() =>
+                  onUpdateWallSurface(selectedWall.id, {
+                    frontColor: DEFAULT_WALL_HEX,
+                    frontTextureId: undefined,
+                    frontTileHeightM: undefined,
+                    frontUvw: undefined,
+                    backColor: DEFAULT_WALL_HEX,
+                    backTextureId: undefined,
+                    backTileHeightM: undefined,
+                    backUvw: undefined,
+                    startColor: DEFAULT_WALL_HEX,
+                    startTextureId: undefined,
+                    startTileHeightM: undefined,
+                    startUvw: undefined,
+                    endColor: DEFAULT_WALL_HEX,
+                    endTextureId: undefined,
+                    endTileHeightM: undefined,
+                    endUvw: undefined,
+                  })
+                }
+              >
+                Нулирай облицовките на стената
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* 3. САМОСТОЯТЕЛНА ВРАТА / ПРОЗОРЕЦ */}
+        {selectedStandaloneOpening && (
+          <div
+            style={{
+              backgroundColor: '#0f172a',
+              border: '1px solid #a855f7',
+              borderRadius: '6px',
+              padding: '10px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <span
+                className="section-label"
+                style={{ color: '#c084fc', marginBottom: 0 }}
+              >
+                {selectedStandaloneOpening.type === 'door'
+                  ? 'Самостоятелна врата'
+                  : 'Самостоятелен прозорец'}
+              </span>
+              <div style={{ display: 'flex', gap: '4px' }}>
                 <button
                   type="button"
-                  className={`btn ${room.showCeiling ? 'btn-active' : ''}`}
-                  style={{ flex: 1, fontSize: '11px' }}
+                  className="btn"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
                   onClick={() =>
-                    onUpdateRoomCeiling({ showCeiling: !room.showCeiling })
+                    onDuplicateStandaloneOpening(selectedStandaloneOpening.id)
                   }
                 >
-                  {room.showCeiling ? 'Таван: Видим' : 'Таван: Скрит (отворен отгоре)'}
+                  Копие
                 </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                  onClick={() =>
+                    onDeleteStandaloneOpening(selectedStandaloneOpening.id)
+                  }
+                >
+                  Изтрий
+                </button>
+              </div>
+            </div>
+
+            <div className="axis-grid">
+              <div className="axis-field">
+                <span>Ширина (м)</span>
                 <input
-                  type="color"
-                  title="Цвят на тавана"
-                  style={{
-                    width: '32px',
-                    height: '28px',
-                    border: '1px solid #334155',
-                    background: 'transparent',
-                    cursor: 'pointer',
-                  }}
-                  value={room.ceilingColor || '#f8fafc'}
+                  type="number"
+                  step={0.05}
+                  className="input-control"
+                  value={selectedStandaloneOpening.widthM}
                   onChange={(e) =>
-                    onUpdateRoomCeiling({ ceilingColor: e.target.value })
+                    onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
+                      widthM: Math.max(0.3, parseFloat(e.target.value) || 0.9),
+                    })
+                  }
+                />
+              </div>
+              <div className="axis-field">
+                <span>Височина (м)</span>
+                <input
+                  type="number"
+                  step={0.05}
+                  className="input-control"
+                  value={selectedStandaloneOpening.heightM}
+                  onChange={(e) =>
+                    onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
+                      heightM: Math.max(0.3, parseFloat(e.target.value) || 2.05),
+                    })
+                  }
+                />
+              </div>
+              <div className="axis-field">
+                <span>Завъртане (°)</span>
+                <input
+                  type="number"
+                  step={5}
+                  className="input-control"
+                  value={selectedStandaloneOpening.rotationDeg}
+                  onChange={(e) =>
+                    onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
+                      rotationDeg: parseFloat(e.target.value) || 0,
+                    })
                   }
                 />
               </div>
             </div>
 
-            {(room.floorZones ?? []).length > 0 && (
-              <div>
-                <div className="section-label">
-                  Отделни подови зони ({(room.floorZones ?? []).length})
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  {(room.floorZones ?? []).map((zone) => (
-                    <div
-                      key={zone.id}
-                      style={{ display: 'flex', gap: '4px', alignItems: 'center' }}
-                    >
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{
-                          flex: 1,
-                          textAlign: 'left',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                        onClick={() => onSelectFloorZone(zone.id)}
-                      >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span
-                            style={{
-                              width: '10px',
-                              height: '10px',
-                              borderRadius: '2px',
-                              backgroundColor: zone.color,
-                            }}
-                          />
-                          <span>{zone.name}</span>
-                        </span>
-                        <span style={{ fontSize: '10px', color: '#94a3b8' }}>Настилка</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{ padding: '5px 8px', fontSize: '11px' }}
-                        title="Дублирай"
-                        onClick={() => onDuplicateFloorZone(zone.id)}
-                      >
-                        ⧉
-                      </button>
-                    </div>
+            {selectedStandaloneOpening.type === 'door' && (
+              <div className="axis-field">
+                <span>Посока на отваряне</span>
+                <select
+                  className="input-control"
+                  value={selectedStandaloneOpening.swing ?? 'left-in'}
+                  onChange={(e) =>
+                    onUpdateStandaloneOpening(selectedStandaloneOpening.id, {
+                      swing: e.target.value as DoorSwing,
+                    })
+                  }
+                >
+                  {SWING_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
                   ))}
-                </div>
+                </select>
               </div>
             )}
+          </div>
+        )}
 
-            {(room.openings ?? []).length > 0 && (
-              <div>
-                <div className="section-label">
-                  Врати и прозорци на плана ({(room.openings ?? []).length})
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  {(room.openings ?? []).map((op, idx) => (
-                    <div
-                      key={op.id}
-                      style={{ display: 'flex', gap: '4px', alignItems: 'center' }}
-                    >
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{
-                          flex: 1,
-                          textAlign: 'left',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                        onClick={() => onSelectStandaloneOpening(op.id)}
-                      >
-                        <span>
-                          {idx + 1}. {op.type === 'door' ? 'Врата' : 'Прозорец'} (
-                          {op.widthM}×{op.heightM} м)
-                        </span>
-                        <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn"
-                        style={{ padding: '5px 8px', fontSize: '11px' }}
-                        title="Дублирай"
-                        onClick={() => onDuplicateStandaloneOpening(op.id)}
-                      >
-                        ⧉
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {sceneObjects.length > 0 && (
-              <div>
-                <div className="section-label">
-                  Обекти в сцената ({sceneObjects.length})
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  {sceneObjects.map((obj, idx) => {
-                    const m = models.find((item) => item.id === obj.modelId);
-                    return (
-                      <button
-                        key={obj.instanceId}
-                        type="button"
-                        className="btn"
-                        style={{
-                          textAlign: 'left',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                        onClick={() => onSelectInstance(obj.instanceId)}
-                      >
-                        <span
-                          style={{
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {idx + 1}. {obj.name || m?.name}
-                        </span>
-                        <span style={{ fontSize: '10px', color: '#94a3b8' }}>Избери</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </>
-        ) : selectedObject && selectedModel ? (
-          <>
-            {/* 6. НАСТРОЙКИ НА МЕБЕЛ */}
+        {/* 4. ИЗБРАНА ПОДОВА ЗОНА И РЕДАКЦИЯ НА ЪГЛИ */}
+        {selectedFloorZone && (
+          <div
+            style={{
+              backgroundColor: '#0f172a',
+              border: '1px solid #f59e0b',
+              borderRadius: '6px',
+              padding: '10px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+            }}
+          >
             <div
               style={{
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                borderRadius: '6px',
-                padding: '10px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
               }}
             >
-              <div style={{ fontWeight: 600, fontSize: '13px', color: '#f8fafc' }}>
-                {selectedObject.name || selectedModel.name}
-              </div>
-              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
-                {CATEGORY_LABELS[selectedModel.category]} • Режим:{' '}
-                {SCALE_MODE_SHORT[selectedModel.scaleMode]}
+              <span
+                className="section-label"
+                style={{ color: '#fbbf24', marginBottom: 0 }}
+              >
+                Подова зона ({selectedFloorZone.points.length} ъгъла)
+              </span>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                  onClick={() => onDuplicateFloorZone(selectedFloorZone.id)}
+                >
+                  Копие
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                  onClick={() => onDeleteFloorZone(selectedFloorZone.id)}
+                >
+                  Изтрий
+                </button>
               </div>
             </div>
 
-            {discoveredMaterialSlots.length > 0 && (
+            <div className="axis-field">
+              <span>Име на зоната (напр. Хол, Кухня, Коридор)</span>
+              <input
+                type="text"
+                className="input-control"
+                value={selectedFloorZone.name}
+                onChange={(e) =>
+                  onUpdateFloorZone(selectedFloorZone.id, {
+                    name: e.target.value,
+                  })
+                }
+              />
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '5px',
+                borderTop: '1px solid #1e293b',
+                paddingTop: '6px',
+              }}
+            >
+              <div className="section-label" style={{ marginBottom: 0 }}>
+                Ъгли на подовата зона (влачи в 3D/2D или редактирай)
+              </div>
+
+              {selectedFloorZone.points.map((pt, idx) => {
+                const isSelectedPt =
+                  selectedFloorVertex?.zoneId === selectedFloorZone.id &&
+                  selectedFloorVertex.pointIndex === idx;
+
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      backgroundColor: isSelectedPt ? '#1e293b' : '#020617',
+                      border: `1px solid ${
+                        isSelectedPt ? '#fbbf24' : '#1e293b'
+                      }`,
+                      borderRadius: '4px',
+                      padding: '4px 6px',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        padding: '1px 5px',
+                        fontSize: '10px',
+                        color: isSelectedPt ? '#fbbf24' : '#94a3b8',
+                      }}
+                      onClick={() =>
+                        onSelectFloorVertex({
+                          zoneId: selectedFloorZone.id,
+                          pointIndex: idx,
+                        })
+                      }
+                    >
+                      #{idx + 1}
+                    </button>
+
+                    <input
+                      type="number"
+                      step={0.05}
+                      className="input-control"
+                      style={{ padding: '2px 4px', fontSize: '11px' }}
+                      value={Number(pt[0].toFixed(3))}
+                      onChange={(e) => {
+                        const nx = parseFloat(e.target.value);
+                        if (!Number.isNaN(nx)) {
+                          onUpdateFloorZoneVertex(selectedFloorZone.id, idx, [
+                            nx,
+                            pt[1],
+                          ]);
+                        }
+                      }}
+                    />
+
+                    <input
+                      type="number"
+                      step={0.05}
+                      className="input-control"
+                      style={{ padding: '2px 4px', fontSize: '11px' }}
+                      value={Number(pt[1].toFixed(3))}
+                      onChange={(e) => {
+                        const nz = parseFloat(e.target.value);
+                        if (!Number.isNaN(nz)) {
+                          onUpdateFloorZoneVertex(selectedFloorZone.id, idx, [
+                            pt[0],
+                            nz,
+                          ]);
+                        }
+                      }}
+                    />
+
+                    <button
+                      type="button"
+                      className="btn"
+                      title="Добави нов ъгъл след този"
+                      style={{ padding: '1px 5px', fontSize: '10px' }}
+                      onClick={() =>
+                        onInsertFloorZoneVertexAfter(selectedFloorZone.id, idx)
+                      }
+                    >
+                      +
+                    </button>
+
+                    {selectedFloorZone.points.length > 3 && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        title="Премахни този ъгъл"
+                        style={{ padding: '1px 5px', fontSize: '10px' }}
+                        onClick={() =>
+                          onDeleteFloorZoneVertex(selectedFloorZone.id, idx)
+                        }
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 5. ИЗБРАНА МЕБЕЛ / 3D ОБЕКТ */}
+        {selectedObject && (
+          <div
+            style={{
+              backgroundColor: '#0f172a',
+              border: '1px solid #38bdf8',
+              borderRadius: '6px',
+              padding: '10px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              <span
+                className="section-label"
+                style={{
+                  color: '#38bdf8',
+                  marginBottom: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {selectedObject.name || selectedModel?.name || 'Обект'}
+              </span>
+              <div style={{ display: 'flex', gap: '4px' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                  onClick={onDuplicateSelected}
+                >
+                  Копие
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                  onClick={onDeleteSelected}
+                >
+                  Изтрий
+                </button>
+              </div>
+            </div>
+
+            {selectedObject.parametric && (
+              <button
+                type="button"
+                className="btn btn-active"
+                style={{ width: '100%', fontSize: '11px' }}
+                onClick={() => onEditParametricObject(selectedObject)}
+              >
+                ✎ Редактирай модулите / размерите
+              </button>
+            )}
+
+            <div className="axis-field">
+              <span>Позиция ({unit})</span>
+              <div className="axis-grid">
+                {(['X', 'Y', 'Z'] as const).map((label, idx) => (
+                  <div key={label} className="axis-field">
+                    <span>{label}</span>
+                    <input
+                      type="number"
+                      step={unit === 'cm' ? 1 : 0.01}
+                      className="input-control"
+                      value={formatDimValue(
+                        selectedObject.position[idx as 0 | 1 | 2],
+                        unit
+                      )}
+                      onChange={(e) =>
+                        updatePositionAxis(idx as 0 | 1 | 2, e.target.value)
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="axis-field">
+              <span>Завъртане (°)</span>
+              <div className="axis-grid">
+                {(['X', 'Y', 'Z'] as const).map((label, idx) => (
+                  <div key={label} className="axis-field">
+                    <span>{label}</span>
+                    <input
+                      type="number"
+                      step={5}
+                      className="input-control"
+                      value={Math.round(
+                        (selectedObject.rotation[idx as 0 | 1 | 2] * 180) /
+                          Math.PI
+                      )}
+                      onChange={(e) =>
+                        updateRotationAxis(idx as 0 | 1 | 2, e.target.value)
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={() => onRotateYBy(-90)}
+                >
+                  -90°
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={() => onRotateYBy(90)}
+                >
+                  +90°
+                </button>
+                <button
+                  type="button"
+                  className={`btn ${selectedObject.mirrored ? 'btn-active' : ''}`}
+                  style={{ flex: 1, fontSize: '10px' }}
+                  onClick={onToggleMirrorSelected}
+                >
+                  Огледало
+                </button>
+              </div>
+            </div>
+
+            {selectedModel && (
+              <div className="axis-field">
+                <span>Габаритни размери (см)</span>
+                <div className="axis-grid">
+                  <div className="axis-field">
+                    <span>Шир.</span>
+                    <input
+                      type="number"
+                      className="input-control"
+                      value={Math.round(
+                        selectedModel.dimensionsCm.width *
+                          selectedObject.scale[0]
+                      )}
+                      onChange={(e) =>
+                        updateDimensionCm(
+                          0,
+                          selectedModel.dimensionsCm.width,
+                          e.target.value
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="axis-field">
+                    <span>Вис.</span>
+                    <input
+                      type="number"
+                      className="input-control"
+                      value={Math.round(
+                        selectedModel.dimensionsCm.height *
+                          selectedObject.scale[1]
+                      )}
+                      onChange={(e) =>
+                        updateDimensionCm(
+                          1,
+                          selectedModel.dimensionsCm.height,
+                          e.target.value
+                        )
+                      }
+                    />
+                  </div>
+                  <div className="axis-field">
+                    <span>Дълб.</span>
+                    <input
+                      type="number"
+                      className="input-control"
+                      value={Math.round(
+                        selectedModel.dimensionsCm.depth *
+                          selectedObject.scale[2]
+                      )}
+                      onChange={(e) =>
+                        updateDimensionCm(
+                          2,
+                          selectedModel.dimensionsCm.depth,
+                          e.target.value
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* МАТЕРИАЛИ ПО ЧАСТИ НА МЕБЕЛТА */}
+            {effectiveMaterialSlots.length > 0 && (
               <div
                 style={{
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #38bdf8',
-                  borderRadius: '6px',
-                  padding: '10px',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: '8px',
+                  gap: '6px',
+                  borderTop: '1px solid #1e293b',
+                  paddingTop: '8px',
                 }}
               >
                 <div className="section-label" style={{ marginBottom: 0 }}>
-                  Цветове и материали на мебелта ({discoveredMaterialSlots.length})
+                  Материали на мебелта ({effectiveMaterialSlots.length})
                 </div>
 
-                {discoveredMaterialSlots.map((slot) => {
-                  const currentOv = selectedObject.materialOverrides?.[slot.key];
-                  const activeColor = currentOv?.color || slot.defaultColorHex;
-                  const activeTexId = currentOv?.textureId || '';
+                {effectiveMaterialSlots.map((slot) => {
+                  const currentOverride =
+                    selectedObject.materialOverrides?.[slot.key];
+                  const fallbackHex = slot.defaultColorHex || '#cbd5e1';
+                  const currentColor = currentOverride?.color ?? fallbackHex;
+                  const currentTextureId = currentOverride?.textureId ?? '';
 
                   return (
                     <div
                       key={slot.key}
                       style={{
-                        backgroundColor: '#1e293b',
-                        border: '1px solid #334155',
-                        borderRadius: '5px',
-                        padding: '7px',
+                        backgroundColor: '#020617',
+                        border: '1px solid #1e293b',
+                        borderRadius: '4px',
+                        padding: '6px',
                         display: 'flex',
                         flexDirection: 'column',
-                        gap: '6px',
+                        gap: '4px',
                       }}
                     >
                       <div
@@ -1882,346 +1616,237 @@ export function RightInspector({
                           display: 'flex',
                           justifyContent: 'space-between',
                           alignItems: 'center',
+                          fontSize: '11px',
+                          color: '#e2e8f0',
                         }}
                       >
-                        <span
-                          style={{
-                            fontSize: '11px',
-                            fontWeight: 600,
-                            color: '#e2e8f0',
-                          }}
-                        >
-                          {slot.label}
-                        </span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <input
-                            type="color"
-                            style={{
-                              width: '26px',
-                              height: '20px',
-                              border: '1px solid #475569',
-                              background: 'transparent',
-                              cursor: 'pointer',
-                            }}
-                            value={activeColor}
-                            onChange={(e) =>
+                        <span style={{ fontWeight: 600 }}>{slot.label}</span>
+                        {currentOverride && (
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ padding: '1px 5px', fontSize: '9px' }}
+                            onClick={() =>
                               onUpdateObjectMaterial(
                                 selectedObject.instanceId,
                                 slot.key,
-                                {
-                                  color: e.target.value,
-                                  textureId: activeTexId || null,
-                                }
+                                null
                               )
                             }
-                          />
-                          {currentOv && (
-                            <button
-                              type="button"
-                              className="btn"
-                              style={{ padding: '2px 5px', fontSize: '9px' }}
-                              onClick={() =>
-                                onUpdateObjectMaterial(
-                                  selectedObject.instanceId,
-                                  slot.key,
-                                  null
-                                )
-                              }
-                            >
-                              Нулирай
-                            </button>
-                          )}
-                        </div>
+                          >
+                            Нулирай
+                          </button>
+                        )}
                       </div>
 
-                      {furnitureTextures.length > 0 && (
-                        <select
-                          className="select-control"
-                          style={{ fontSize: '11px', padding: '3px 6px' }}
-                          value={activeTexId}
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <input
+                          type="color"
+                          value={currentColor}
                           onChange={(e) =>
                             onUpdateObjectMaterial(
                               selectedObject.instanceId,
                               slot.key,
                               {
-                                color: e.target.value ? '#ffffff' : activeColor,
-                                textureId: e.target.value || null,
+                                ...(currentOverride ?? {}),
+                                color: e.target.value,
                               }
                             )
                           }
+                          style={{ width: '36px', height: '26px' }}
+                        />
+                        <select
+                          className="input-control"
+                          style={{ flex: 1, fontSize: '11px' }}
+                          value={currentTextureId}
+                          onChange={(e) => {
+                            const tid = e.target.value;
+                            onUpdateObjectMaterial(
+                              selectedObject.instanceId,
+                              slot.key,
+                              {
+                                ...(currentOverride ?? {}),
+                                color: currentColor,
+                                textureId: tid || undefined,
+                              }
+                            );
+                          }}
                         >
-                          <option value="">Оригинален / Едноцветен</option>
-                          {furnitureTextures.map((t) => (
+                          <option value="">-- Без текстура --</option>
+                          {allActiveTextures.map((t) => (
                             <option key={t.id} value={t.id}>
                               {t.name}
                             </option>
                           ))}
                         </select>
-                      )}
+                      </div>
                     </div>
                   );
                 })}
-
-                <button
-                  type="button"
-                  className="btn btn-active"
-                  style={{ fontSize: '11px' }}
-                  onClick={() =>
-                    onSaveObjectAsPreset(selectedObject, selectedModel)
-                  }
-                >
-                  ★ Запази в „Мои варианти“ (Лична библиотека)
-                </button>
               </div>
             )}
 
-            <div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '6px',
-                }}
+            {selectedModel && (
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: '11px', marginTop: '2px' }}
+                onClick={() =>
+                  onSaveObjectAsPreset(selectedObject, selectedModel)
+                }
               >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Позиция ({unitLabel})
-                </div>
-                {selectedObject.position[1] > 0.001 && (
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ padding: '2px 6px', fontSize: '10px' }}
-                    onClick={() =>
-                      onTransformChange(
-                        selectedObject.instanceId,
-                        [selectedObject.position[0], 0, selectedObject.position[2]],
-                        selectedObject.rotation,
-                        selectedObject.scale
-                      )
-                    }
-                  >
-                    На пода (Y=0)
-                  </button>
-                )}
-              </div>
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>X</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={unit === 'cm' ? 1 : 0.01}
-                    value={formatUnitValue(selectedObject.position[0], unit)}
-                    onChange={(e) => handlePositionInput(0, e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Y</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    min={0}
-                    step={unit === 'cm' ? 1 : 0.01}
-                    value={formatUnitValue(selectedObject.position[1], unit)}
-                    onChange={(e) => handlePositionInput(1, e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Z</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={unit === 'cm' ? 1 : 0.01}
-                    value={formatUnitValue(selectedObject.position[2], unit)}
-                    onChange={(e) => handlePositionInput(2, e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
+                ★ Запази в „Мои варианти“
+              </button>
+            )}
+          </div>
+        )}
 
-            <div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '6px',
-                }}
-              >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Ротация (градуси)
-                </div>
-                <div style={{ display: 'flex', gap: '4px' }}>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ padding: '2px 6px', fontSize: '10px' }}
-                    onClick={() => onRotateYBy(-90)}
-                  >
-                    -90°
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ padding: '2px 6px', fontSize: '10px' }}
-                    onClick={() => onRotateYBy(90)}
-                  >
-                    +90°
-                  </button>
-                </div>
-              </div>
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>X</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={5}
-                    value={radToDeg(selectedObject.rotation[0])}
-                    onChange={(e) => handleRotationInput(0, e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Y</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={5}
-                    value={radToDeg(selectedObject.rotation[1])}
-                    onChange={(e) => handleRotationInput(1, e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Z</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={5}
-                    value={radToDeg(selectedObject.rotation[2])}
-                    onChange={(e) => handleRotationInput(2, e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
+        {/* ПРАЗЕН ИНСПЕКТОР + ПЪЛЕН СПИСЪК НА ЕЛЕМЕНТИТЕ В СЦЕНАТА (ПО ЖЕЛАНИЕ) */}
+        {!hasActiveSelection && (
+          <div className="empty-state-box">
+            Кликни върху стена, под, врата или мебел в 3D/2D изгледа, за да видиш и редактираш свойствата му.
+          </div>
+        )}
 
-            <div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '6px',
-                }}
-              >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Размери ({unitLabel})
-                </div>
-                {(selectedObject.scale[0] !== 1 ||
-                  selectedObject.scale[1] !== 1 ||
-                  selectedObject.scale[2] !== 1) && (
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ padding: '2px 6px', fontSize: '10px' }}
-                    onClick={() =>
-                      onTransformChange(
-                        selectedObject.instanceId,
-                        selectedObject.position,
-                        selectedObject.rotation,
-                        [1, 1, 1]
-                      )
-                    }
-                  >
-                    100%
-                  </button>
-                )}
-              </div>
-              <div className="axis-grid">
-                <div className="axis-field">
-                  <span>Ш (X)</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={unit === 'cm' ? 1 : 0.01}
-                    disabled={!isAxisScalable(selectedModel, 'width')}
-                    value={formatUnitValue(
-                      (selectedModel.dimensionsCm.width * selectedObject.scale[0]) /
-                        100,
-                      unit
-                    )}
-                    onChange={(e) => handleDimensionInput('width', e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>В (Y)</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={unit === 'cm' ? 1 : 0.01}
-                    disabled={!isAxisScalable(selectedModel, 'height')}
-                    value={formatUnitValue(
-                      (selectedModel.dimensionsCm.height * selectedObject.scale[1]) /
-                        100,
-                      unit
-                    )}
-                    onChange={(e) => handleDimensionInput('height', e.target.value)}
-                  />
-                </div>
-                <div className="axis-field">
-                  <span>Д (Z)</span>
-                  <input
-                    className="input-control"
-                    type="number"
-                    step={unit === 'cm' ? 1 : 0.01}
-                    disabled={!isAxisScalable(selectedModel, 'depth')}
-                    value={formatUnitValue(
-                      (selectedModel.dimensionsCm.depth * selectedObject.scale[2]) /
-                        100,
-                      unit
-                    )}
-                    onChange={(e) => handleDimensionInput('depth', e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
+        <div
+          style={{
+            backgroundColor: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '6px',
+            padding: '8px 10px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px',
+            marginTop: 'auto',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setIsSceneOverviewOpen((prev) => !prev)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#94a3b8',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              cursor: 'pointer',
+              padding: 0,
+              fontSize: '11px',
+              fontWeight: 700,
+              textTransform: 'uppercase',
+            }}
+          >
+            <span>
+              Списък на елементите в сцената ({sceneObjects.length} мебели,{' '}
+              {(room.floorZones ?? []).length} зони)
+            </span>
+            <span>{isSceneOverviewOpen ? '▾' : '▸'}</span>
+          </button>
 
+          {isSceneOverviewOpen && (
             <div
               style={{
                 display: 'flex',
                 flexDirection: 'column',
                 gap: '8px',
-                marginTop: '6px',
-                paddingTop: '12px',
-                borderTop: '1px solid #334155',
+                paddingTop: '6px',
+                borderTop: '1px solid #1e293b',
               }}
             >
-              <button
-                type="button"
-                className={`btn ${selectedObject.mirrored ? 'btn-active' : ''}`}
-                onClick={onToggleMirrorSelected}
+              {/* Таван */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: '11px',
+                  color: '#cbd5e1',
+                }}
               >
-                {selectedObject.mirrored
-                  ? 'Огледално: Включено (Mirror)'
-                  : 'Огледално (Mirror)'}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={onDuplicateSelected}
-              >
-                Дублирай обекта (Ctrl+D)
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={onDeleteSelected}
-              >
-                Изтрий от сцената (Del)
-              </button>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(room.showCeiling)}
+                    onChange={(e) =>
+                      onUpdateRoomCeiling({ showCeiling: e.target.checked })
+                    }
+                  />
+                  Покажи тавана
+                </label>
+                <input
+                  type="color"
+                  value={room.ceilingColor ?? '#f8fafc'}
+                  onChange={(e) =>
+                    onUpdateRoomCeiling({ ceilingColor: e.target.value })
+                  }
+                  style={{ width: '32px', height: '22px' }}
+                />
+              </div>
+
+              {/* Подови зони */}
+              {(room.floorZones ?? []).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <span style={{ fontSize: '10px', color: '#64748b' }}>
+                    Подови зони:
+                  </span>
+                  {(room.floorZones ?? []).map((z) => (
+                    <button
+                      key={z.id}
+                      type="button"
+                      className={`btn ${selectedFloorZone?.id === z.id ? 'btn-active' : ''}`}
+                      style={{ textAlign: 'left', fontSize: '11px', padding: '4px 6px' }}
+                      onClick={() => onSelectFloorZone(z.id)}
+                    >
+                      ⬡ {z.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Самостоятелни врати/прозорци */}
+              {(room.openings ?? []).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <span style={{ fontSize: '10px', color: '#64748b' }}>
+                    Самостоятелни отвори:
+                  </span>
+                  {(room.openings ?? []).map((op) => (
+                    <button
+                      key={op.id}
+                      type="button"
+                      className={`btn ${selectedStandaloneOpening?.id === op.id ? 'btn-active' : ''}`}
+                      style={{ textAlign: 'left', fontSize: '11px', padding: '4px 6px' }}
+                      onClick={() => onSelectStandaloneOpening(op.id)}
+                    >
+                      {op.type === 'door' ? '🚪 Врата' : '🪟 Прозорец'} (
+                      {op.widthM}×{op.heightM} м)
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Мебели */}
+              {sceneObjects.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <span style={{ fontSize: '10px', color: '#64748b' }}>
+                    Мебели в сцената:
+                  </span>
+                  {sceneObjects.map((obj) => (
+                    <button
+                      key={obj.instanceId}
+                      type="button"
+                      className={`btn ${selectedObject?.instanceId === obj.instanceId ? 'btn-active' : ''}`}
+                      style={{ textAlign: 'left', fontSize: '11px', padding: '4px 6px' }}
+                      onClick={() => onSelectInstance(obj.instanceId)}
+                    >
+                      🪑 {obj.name || 'Обект'}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          </>
-        ) : null}
+          )}
+        </div>
       </div>
     </aside>
   );

@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
+import { ParametricFurnitureMesh } from './ParametricFurnitureMesh';
 import {
   Environment,
   Grid,
@@ -35,6 +36,7 @@ import type {
 import { RoomMesh } from './RoomMesh';
 import { SceneItemMesh } from './SceneItemMesh';
 import type { DiscoveredMaterialSlot } from './SceneItemMesh';
+
 
 export type ViewportCameraMode = '3d' | 'top';
 
@@ -667,7 +669,37 @@ export function Viewport3D({
         );
       })}
 
-      {sceneObjects.map((obj) => {
+{sceneObjects.map((obj) => {
+        const handleSelectThis = (id: string) => {
+          if (!isBusyDrawingOrCalib) {
+            onSelectObject(id);
+            onSelectWall?.(null);
+            onSelectStandaloneOpening?.(null);
+            onSelectFloorZone?.(null);
+            onSelectWallVertex?.(null);
+            onSelectFloorVertex?.(null);
+            onClearSurfaceSelection?.();
+          }
+        };
+
+        if (obj.parametric) {
+          return (
+            <ParametricFurnitureMesh
+              key={obj.instanceId}
+              item={obj}
+              config={obj.parametric}
+              textures={textures}
+              isSelected={
+                !isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId
+              }
+              transformTool={transformTool}
+              onSelect={handleSelectThis}
+              onTransformChange={onTransformChange}
+              onDraggingChange={setIsDraggingObject}
+            />
+          );
+        }
+
         const model = models.find((m) => m.id === obj.modelId);
         if (!model) return null;
 
@@ -679,17 +711,7 @@ export function Viewport3D({
             textures={textures}
             isSelected={!isBusyDrawingOrCalib && obj.instanceId === selectedInstanceId}
             transformTool={transformTool}
-            onSelect={(id) => {
-              if (!isBusyDrawingOrCalib) {
-                onSelectObject(id);
-                onSelectWall?.(null);
-                onSelectStandaloneOpening?.(null);
-                onSelectFloorZone?.(null);
-                onSelectWallVertex?.(null);
-                onSelectFloorVertex?.(null);
-                onClearSurfaceSelection?.();
-              }
-            }}
+            onSelect={handleSelectThis}
             onMaterialsDiscovered={onMaterialsDiscovered}
             onTransformChange={onTransformChange}
             onDraggingChange={setIsDraggingObject}

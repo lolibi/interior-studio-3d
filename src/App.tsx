@@ -6,6 +6,7 @@ import type {
   DisplayUnit,
   MaterialOverride,
   ModelCategory,
+  ParametricFurnitureConfig,
   SavedSceneSummary,
   SceneObject,
   TransformTool,
@@ -41,6 +42,7 @@ import { RightInspector } from './components/RightInspector';
 import type { SurfaceBatchPatch } from './components/RightInspector';
 import type { DiscoveredMaterialSlot } from './components/SceneItemMesh';
 import { AdminPanel } from './components/AdminPanel';
+import { ParametricBuilderModal } from './components/ParametricBuilderModal';
 import {
   DEFAULT_CATALOG_MODELS,
   loadCatalog,
@@ -83,6 +85,12 @@ export function App() {
   );
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isSyncingServer, setIsSyncingServer] = useState(false);
+  const [parametricBuilderState, setParametricBuilderState] = useState<{
+    isOpen: boolean;
+    editingInstanceId?: string;
+    initialConfig?: ParametricFurnitureConfig;
+    initialName?: string;
+  }>({ isOpen: false });
 
   // Падащи менюта в горната лента („Настройки“ и „Проект“)
   const [openTopPopover, setOpenTopPopover] = useState<TopPopover>(null);
@@ -906,6 +914,7 @@ export function App() {
 
       if (e.key === 'Escape') {
         setOpenTopPopover(null);
+        setParametricBuilderState({ isOpen: false });
         setIsDrawingWalls(false);
         setDraftPoints([]);
         setTypedWallLength('');
@@ -1689,6 +1698,20 @@ export function App() {
           <div className="panel-body">
             {leftTab === 'catalog' && (
               <>
+                <button
+                  type="button"
+                  className="btn btn-active"
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    fontWeight: 700,
+                    fontSize: '12px',
+                  }}
+                  onClick={() => setParametricBuilderState({ isOpen: true })}
+                >
+                  ✨ Генератор: Кухня / Гардероб
+                </button>
+
                 <input
                   type="text"
                   className="input-control"
@@ -2693,6 +2716,15 @@ export function App() {
             pushHistory(room, nextObjects);
           }}
           onSaveObjectAsPreset={handleSaveObjectAsPreset}
+          onEditParametricObject={(obj) => {
+            if (!obj.parametric) return;
+            setParametricBuilderState({
+              isOpen: true,
+              editingInstanceId: obj.instanceId,
+              initialConfig: obj.parametric,
+              initialName: obj.name,
+            });
+          }}
         />
       </div>
 
@@ -2704,6 +2736,44 @@ export function App() {
           onClose={() => setIsAdminOpen(false)}
           onModelsUpdated={() => {
             void refreshServerCatalogs();
+          }}
+        />
+      )}
+
+      {/* ПАРАМЕТРИЧЕН ГЕНЕРАТОР ЗА КУХНЯ И ГАРДЕРОБ */}
+      {parametricBuilderState.isOpen && (
+        <ParametricBuilderModal
+          textures={textures}
+          initialConfig={parametricBuilderState.initialConfig}
+          initialName={parametricBuilderState.initialName}
+          isEditingExisting={Boolean(parametricBuilderState.editingInstanceId)}
+          onClose={() => setParametricBuilderState({ isOpen: false })}
+          onConfirm={(name, config) => {
+            if (parametricBuilderState.editingInstanceId) {
+              const nextObjects = sceneObjects.map((o) =>
+                o.instanceId === parametricBuilderState.editingInstanceId
+                  ? { ...o, name, parametric: config }
+                  : o
+              );
+              pushHistory(room, nextObjects);
+            } else {
+              const id = `param-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              const offset = (sceneObjects.length % 5) * 0.25;
+              const newObj: SceneObject = {
+                instanceId: id,
+                modelId: `parametric-${config.kind}`,
+                name,
+                position: [offset, 0, offset],
+                rotation: [0, 0, 0],
+                scale: [1, 1, 1],
+                mirrored: false,
+                parametric: config,
+              };
+              pushHistory(room, [...sceneObjects, newObj]);
+              clearAllSelections();
+              setSelectedInstanceId(id);
+            }
+            setParametricBuilderState({ isOpen: false });
           }}
         />
       )}
