@@ -17,6 +17,11 @@ import type {
   SceneObject,
   TransformTool,
 } from '../types/editor';
+import {
+  DEFAULT_OVERLAY_SETTINGS,
+  findClosedRoomPolygons,
+  getWallLengthM,
+} from '../types/room';
 import type {
   FloorZone,
   RoomConfig,
@@ -24,6 +29,7 @@ import type {
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
+  ViewportOverlaySettings,
   WallSegment,
 } from '../types/room';
 import { RoomMesh } from './RoomMesh';
@@ -35,6 +41,7 @@ export type ViewportCameraMode = '3d' | 'top';
 interface Viewport3DProps {
   room: RoomConfig;
   viewMode?: ViewportCameraMode;
+  overlaySettings?: ViewportOverlaySettings;
   selectedWallId?: string | null;
   selectedOpeningId?: string | null;
   selectedStandaloneOpeningId?: string | null;
@@ -46,6 +53,7 @@ interface Viewport3DProps {
   linkedVertexJoint?: boolean;
   autoStraightenVertices?: boolean;
   onSelectWall?: (wallId: string | null) => void;
+  onInlineUpdateWallLength?: (wallId: string, nextLengthM: number) => void;
   onSelectSurface?: (target: SurfaceTarget, additive: boolean) => void;
   onClearSurfaceSelection?: () => void;
   onDropTextureOnSurface?: (target: SurfaceTarget, textureId: string) => void;
@@ -102,6 +110,24 @@ interface SegmentDimensionBadge {
   isActivePreview: boolean;
 }
 
+function computePolygonAreaM2(pts: [number, number][]): number {
+  if (pts.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    sum += a[0] * b[1] - b[0] * a[1];
+  }
+  return Math.abs(sum) * 0.5;
+}
+
+function computePolygonCentroid(pts: [number, number][]): [number, number] {
+  if (pts.length === 0) return [0, 0];
+  const sx = pts.reduce((acc, p) => acc + p[0], 0);
+  const sz = pts.reduce((acc, p) => acc + p[1], 0);
+  return [sx / pts.length, sz / pts.length];
+}
+
 function computeSegmentBadge(
   p1: [number, number],
   p2: [number, number],
@@ -136,6 +162,7 @@ function computeSegmentBadge(
 export function Viewport3D({
   room,
   viewMode = '3d',
+  overlaySettings = DEFAULT_OVERLAY_SETTINGS,
   selectedWallId = null,
   selectedOpeningId = null,
   selectedStandaloneOpeningId = null,
@@ -147,6 +174,7 @@ export function Viewport3D({
   linkedVertexJoint = true,
   autoStraightenVertices = true,
   onSelectWall,
+  onInlineUpdateWallLength,
   onSelectSurface,
   onClearSurfaceSelection,
   onDropTextureOnSurface,
@@ -182,9 +210,96 @@ export function Viewport3D({
   const orbitRef = useRef<OrbitControlsImpl | null>(null);
   const [isDraggingObject, setIsDraggingObject] = useState(false);
 
+  const [editingDimWallId, setEditingDimWallId] = useState<string | null>(null);
+  const [editingDimValue, setEditingDimValue] = useState('');
+
   const isTopOrtho = viewMode === 'top';
   const isBusyDrawingOrCalib =
     isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
+
+  const formatDim = (meters: number) => {
+    if (overlaySettings.dimensionUnit === 'cm') {
+      return `${Math.round(meters * 100)} см`;
+    }
+    return `${meters.toFixed(2)} м`;
+  };
+
+  const persistentWallDimensions = useMemo(() => {
+    if (!overlaySettings.showWallDimensions) return [];
+    const yHeight = isTopOrtho ? 0.35 : Math.max(0.25, room.ceilingHeightM) + 0.12;
+
+    return room.walls
+      .map((w) => {
+        const dx = w.end[0] - w.start[0];
+        const dz = w.end[1] - w.start[1];
+        const len = getWallLengthM(w);
+        if (len < 0.05) return null;
+
+        const nx = -dz / len;
+        const nz = dx / len;
+        const offset = w.thicknessM / 2 + 0.24;
+
+        return {
+          wallId: w.id,
+          lengthM: len,
+          thicknessM: w.thicknessM,
+          position: [
+            (w.start[0] + w.end[0]) / 2 + nx * offset,
+            yHeight,
+            (w.start[1] + w.end[1]) / 2 + nz * offset,
+          ] as [number, number, number],
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [
+    overlaySettings.showWallDimensions,
+    room.walls,
+    room.ceilingHeightM,
+    isTopOrtho,
+  ]);
+
+  const roomAreaLabels = useMemo(() => {
+    if (!overlaySettings.showRoomAreas) return [];
+    const labels: {
+      key: string;
+      name: string;
+      areaM2: number;
+      position: [number, number, number];
+    }[] = [];
+
+    const zones = room.floorZones ?? [];
+    for (const z of zones) {
+      const area = computePolygonAreaM2(z.points);
+      if (area < 0.1) continue;
+      const [cx, cz] = computePolygonCentroid(z.points);
+      labels.push({
+        key: `zone-area-${z.id}`,
+        name: z.name,
+        areaM2: area,
+        position: [cx, 0.08, cz],
+      });
+    }
+
+    const closedPolys = findClosedRoomPolygons(room.walls);
+    closedPolys.forEach((poly, idx) => {
+      const area = computePolygonAreaM2(poly);
+      if (area < 0.2) return;
+      const [cx, cz] = computePolygonCentroid(poly);
+      const alreadyCovered = labels.some(
+        (l) => Math.hypot(l.position[0] - cx, l.position[2] - cz) < 0.35
+      );
+      if (!alreadyCovered) {
+        labels.push({
+          key: `poly-area-${idx}`,
+          name: `Помещение ${idx + 1}`,
+          areaM2: area,
+          position: [cx, 0.08, cz],
+        });
+      }
+    });
+
+    return labels;
+  }, [overlaySettings.showRoomAreas, room.floorZones, room.walls]);
 
   const liveDimensionBadges = useMemo(() => {
     const badges: SegmentDimensionBadge[] = [];
@@ -251,6 +366,7 @@ export function Viewport3D({
       shadows
       dpr={[1, 2]}
       onPointerMissed={() => {
+        setEditingDimWallId(null);
         if (!isBusyDrawingOrCalib) {
           onSelectObject(null);
           onSelectWall?.(null);
@@ -323,18 +439,20 @@ export function Viewport3D({
         />
       </Environment>
 
-      <Grid
-        args={[40, 40]}
-        cellSize={0.5}
-        cellThickness={0.6}
-        cellColor="#1e293b"
-        sectionSize={1}
-        sectionThickness={1.2}
-        sectionColor="#334155"
-        fadeDistance={36}
-        fadeStrength={1.5}
-        position={[0, 0, 0]}
-      />
+      {overlaySettings.showGrid && (
+        <Grid
+          args={[40, 40]}
+          cellSize={0.5}
+          cellThickness={0.6}
+          cellColor="#1e293b"
+          sectionSize={1}
+          sectionThickness={1.2}
+          sectionColor="#334155"
+          fadeDistance={36}
+          fadeStrength={1.5}
+          position={[0, 0, 0]}
+        />
+      )}
 
       <RoomMesh
         room={room}
@@ -342,6 +460,8 @@ export function Viewport3D({
         textures={textures}
         transformTool={transformTool}
         isTopView={isTopOrtho}
+        showVertexHandles={overlaySettings.showVertexHandles}
+        show2DDoorSwings={overlaySettings.show2DDoorSwings}
         selectedWallId={selectedWallId}
         selectedOpeningId={selectedOpeningId}
         selectedStandaloneOpeningId={selectedStandaloneOpeningId}
@@ -382,6 +502,135 @@ export function Viewport3D({
         onCalibFloorClick={onCalibFloorClick}
       />
 
+      {/* ПОСТОЯННИ КОТИ НА СТЕНИТЕ (С ДИРЕКТНА РЕДАКЦИЯ ПРИ КЛИК) */}
+      {persistentWallDimensions.map((dim) => {
+        const isSelected = selectedWallId === dim.wallId;
+        const isEditing = editingDimWallId === dim.wallId;
+        return (
+          <Html
+            key={`wall-dim-${dim.wallId}`}
+            position={dim.position}
+            center
+            zIndexRange={[15, 0]}
+          >
+            {isEditing ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const parsed = parseFloat(editingDimValue.replace(',', '.'));
+                  if (!Number.isNaN(parsed) && parsed > 0.02) {
+                    const nextM =
+                      overlaySettings.dimensionUnit === 'cm'
+                        ? parsed / 100
+                        : parsed;
+                    onInlineUpdateWallLength?.(dim.wallId, nextM);
+                  }
+                  setEditingDimWallId(null);
+                }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="text"
+                  autoFocus
+                  value={editingDimValue}
+                  onChange={(e) => setEditingDimValue(e.target.value)}
+                  onBlur={() => setEditingDimWallId(null)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setEditingDimWallId(null);
+                  }}
+                  style={{
+                    width: '66px',
+                    padding: '2px 6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    textAlign: 'center',
+                    borderRadius: '4px',
+                    border: '1.5px solid #38bdf8',
+                    backgroundColor: '#0f172a',
+                    color: '#f8fafc',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  }}
+                />
+              </form>
+            ) : (
+              <button
+                type="button"
+                title="Кликни за директна промяна на дължината"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectWall?.(dim.wallId);
+                  setEditingDimWallId(dim.wallId);
+                  setEditingDimValue(
+                    overlaySettings.dimensionUnit === 'cm'
+                      ? String(Math.round(dim.lengthM * 100))
+                      : String(dim.lengthM)
+                  );
+                }}
+                style={{
+                  backgroundColor: isSelected
+                    ? 'rgba(2, 132, 199, 0.94)'
+                    : 'rgba(15, 23, 42, 0.86)',
+                  border: isSelected
+                    ? '1.5px solid #7dd3fc'
+                    : '1px solid #334155',
+                  color: isSelected ? '#ffffff' : '#e2e8f0',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  fontSize: '10.5px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.35)',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                }}
+              >
+                {formatDim(dim.lengthM)}
+                {overlaySettings.showWallThicknessLabels
+                  ? ` (δ ${Math.round(dim.thicknessM * 100)} см)`
+                  : ''}
+              </button>
+            )}
+          </Html>
+        );
+      })}
+
+      {/* АВТОМАТИЧНИ КВАДРАТУРИ (М²) НА СТАИТЕ */}
+      {roomAreaLabels.map((lbl) => (
+        <Html
+          key={lbl.key}
+          position={lbl.position}
+          center
+          zIndexRange={[10, 0]}
+          style={{ pointerEvents: 'none', userSelect: 'none' }}
+        >
+          <div
+            style={{
+              backgroundColor: 'rgba(15, 23, 42, 0.78)',
+              border: '1px solid rgba(148, 163, 184, 0.35)',
+              color: '#f8fafc',
+              padding: '3px 8px',
+              borderRadius: '6px',
+              textAlign: 'center',
+              whiteSpace: 'nowrap',
+              backdropFilter: 'blur(2px)',
+            }}
+          >
+            <div style={{ fontSize: '10px', color: '#94a3b8' }}>{lbl.name}</div>
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: 700,
+                color: '#38bdf8',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+              }}
+            >
+              {lbl.areaM2.toFixed(2)} м²
+            </div>
+          </div>
+        </Html>
+      ))}
+
+      {/* АКТИВНИ КОТИ ПРИ ЧЕРТАНЕ */}
       {liveDimensionBadges.map((badge) => {
         const cm = Math.round(badge.lengthM * 100);
         return (
@@ -412,7 +661,7 @@ export function Viewport3D({
             >
               {badge.isActivePreview
                 ? `${badge.lengthM.toFixed(2)} м (${cm} см) • ${badge.angleDeg}°`
-                : `${badge.lengthM.toFixed(2)} м`}
+                : formatDim(badge.lengthM)}
             </div>
           </Html>
         );

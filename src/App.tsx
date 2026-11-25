@@ -11,7 +11,9 @@ import type {
   TransformTool,
 } from './types/editor';
 import {
+  DEFAULT_OVERLAY_SETTINGS,
   calibrateFloorplanByTwoPoints,
+  computeEndpointFromAngleAndLength,
   createDefaultRoomConfig,
   getWallAngleDeg,
   getWallLengthM,
@@ -29,6 +31,7 @@ import type {
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
+  ViewportOverlaySettings,
   WallOpening,
   WallSegment,
 } from './types/room';
@@ -59,7 +62,8 @@ import {
   uploadFloorplanImage,
 } from './utils/apiClient';
 
-type LeftTab = 'catalog' | 'materials' | 'room' | 'projects';
+type LeftTab = 'catalog' | 'materials' | 'room';
+type TopPopover = 'settings' | 'project' | null;
 
 interface ProjectSnapshot {
   room: RoomConfig;
@@ -67,9 +71,9 @@ interface ProjectSnapshot {
 }
 
 const STORAGE_KEY_PROJECT = 'interior_configurator_project_v1';
+const STORAGE_KEY_OVERLAYS = 'interior_configurator_overlays_v1';
 
 export function App() {
-  // Каталог от сървъра + локален кеш
   const [models, setModels] = useState<CatalogModel[]>(() => loadCatalog());
   const [textures, setTextures] = useState<CatalogTexture[]>([]);
   const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
@@ -79,6 +83,65 @@ export function App() {
   );
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isSyncingServer, setIsSyncingServer] = useState(false);
+
+  // Падащи менюта в горната лента („Настройки“ и „Проект“)
+  const [openTopPopover, setOpenTopPopover] = useState<TopPopover>(null);
+  const settingsPopoverRef = useRef<HTMLDivElement | null>(null);
+  const projectPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!openTopPopover) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        openTopPopover === 'settings' &&
+        settingsPopoverRef.current &&
+        !settingsPopoverRef.current.contains(target)
+      ) {
+        setOpenTopPopover(null);
+      }
+      if (
+        openTopPopover === 'project' &&
+        projectPopoverRef.current &&
+        !projectPopoverRef.current.contains(target)
+      ) {
+        setOpenTopPopover(null);
+      }
+    };
+    window.addEventListener('mousedown', handleOutsideClick);
+    return () => window.removeEventListener('mousedown', handleOutsideClick);
+  }, [openTopPopover]);
+
+  const [overlaySettings, setOverlaySettings] =
+    useState<ViewportOverlaySettings>(() => {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY_OVERLAYS);
+        if (raw) {
+          return { ...DEFAULT_OVERLAY_SETTINGS, ...JSON.parse(raw) };
+        }
+      } catch {
+        // ignore
+      }
+      return DEFAULT_OVERLAY_SETTINGS;
+    });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY_OVERLAYS,
+        JSON.stringify(overlaySettings)
+      );
+    } catch {
+      // ignore
+    }
+  }, [overlaySettings]);
+
+  const toggleOverlay = (key: keyof ViewportOverlaySettings) => {
+    setOverlaySettings((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
 
   const refreshServerCatalogs = useCallback(async () => {
     setIsSyncingServer(true);
@@ -119,7 +182,6 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Автоматично опресняване от сървъра (на всеки 30 сек. и при фокус върху прозореца)
   useEffect(() => {
     const syncNow = () => {
       if (document.visibilityState === 'visible') {
@@ -138,11 +200,12 @@ export function App() {
     };
   }, [refreshServerCatalogs]);
 
-  // Текущ проект (стая + мебели) + Undo/Redo история
   const [currentSceneId, setCurrentSceneId] = useState<string | undefined>(
     undefined
   );
-  const [currentSceneTitle, setCurrentSceneTitle] = useState('Нов интериорен проект');
+  const [currentSceneTitle, setCurrentSceneTitle] = useState(
+    'Нов интериорен проект'
+  );
 
   const [room, setRoom] = useState<RoomConfig>(() => {
     try {
@@ -216,7 +279,6 @@ export function App() {
     }
   }, [room, sceneObjects]);
 
-  // Навигация и режими
   const [leftTab, setLeftTab] = useState<LeftTab>('catalog');
   const [categoryFilter, setCategoryFilter] = useState<
     ModelCategory | 'all' | 'presets'
@@ -230,10 +292,13 @@ export function App() {
   const [transformTool, setTransformTool] = useState<TransformTool>('translate');
   const [unit, setUnit] = useState<DisplayUnit>('cm');
 
-  // Селекции в 3D сцената
-  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
+  const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(
+    null
+  );
   const [selectedWallId, setSelectedWallId] = useState<string | null>(null);
-  const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(null);
+  const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(
+    null
+  );
   const [selectedStandaloneOpeningId, setSelectedStandaloneOpeningId] = useState<
     string | null
   >(null);
@@ -246,7 +311,6 @@ export function App() {
   const [selectedFloorVertex, setSelectedFloorVertex] =
     useState<SelectedFloorVertex | null>(null);
 
-  // Drag & Drop на текстура върху 3D полигон
   const [draggedTextureId, setDraggedTextureId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -256,10 +320,10 @@ export function App() {
     return () => window.removeEventListener('pointerup', clearDrag);
   }, [draggedTextureId]);
 
-  // Чертане и калибриране
   const [isDrawingWalls, setIsDrawingWalls] = useState(false);
   const [draftPoints, setDraftPoints] = useState<[number, number][]>([]);
   const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
+  const [typedWallLength, setTypedWallLength] = useState('');
 
   const [isDrawingFloorZone, setIsDrawingFloorZone] = useState(false);
   const [zoneDraftPoints, setZoneDraftPoints] = useState<[number, number][]>([]);
@@ -267,11 +331,9 @@ export function App() {
   const [isCalibratingPlan, setIsCalibratingPlan] = useState(false);
   const [calibPoints, setCalibPoints] = useState<[number, number][]>([]);
 
-  // Настройки за въртекси
   const [linkedVertexJoint, setLinkedVertexJoint] = useState(true);
   const [autoStraightenVertices, setAutoStraightenVertices] = useState(true);
 
-  // Полета за геометрия на стената
   const [wallLengthInput, setWallLengthInput] = useState('');
   const [wallAngleInput, setWallAngleInput] = useState('');
   const [wallThicknessInput, setWallThicknessInput] = useState('');
@@ -349,8 +411,10 @@ export function App() {
       return;
     }
 
+    setOpenTopPopover(null);
     setIsDrawingWalls(false);
     setDraftPoints([]);
+    setTypedWallLength('');
     setIsDrawingFloorZone(false);
     setZoneDraftPoints([]);
     setIsCalibratingPlan(false);
@@ -369,7 +433,21 @@ export function App() {
     clearAllSelections,
   ]);
 
-  // Клик и Shift + Click върху лице на стена или подова зона
+  const handleInlineUpdateWallLength = useCallback(
+    (wallId: string, nextLengthM: number) => {
+      if (Number.isNaN(nextLengthM) || nextLengthM < 0.05 || nextLengthM > 50) {
+        return;
+      }
+      const nextWalls = room.walls.map((w) => {
+        if (w.id !== wallId) return w;
+        const ang = getWallAngleDeg(w);
+        return updateWallGeometry(w, nextLengthM, ang);
+      });
+      pushHistory({ ...room, walls: nextWalls }, sceneObjects);
+    },
+    [room, sceneObjects, pushHistory]
+  );
+
   const handleSelectSurface = useCallback(
     (target: SurfaceTarget, additive: boolean) => {
       setSelectedInstanceId(null);
@@ -408,7 +486,6 @@ export function App() {
     setSelectedSurfaces([]);
   }, []);
 
-  // Прилагане на цвят / текстура / UVW върху селектираните полигони
   const applyPatchToTargets = useCallback(
     (targets: SurfaceTarget[], patch: SurfaceBatchPatch) => {
       if (targets.length === 0) return;
@@ -514,7 +591,6 @@ export function App() {
     [room, sceneObjects, pushHistory]
   );
 
-  // Drag & Drop върху 3D полигон
   const handleDropTextureOnSurface = useCallback(
     (target: SurfaceTarget, textureId: string) => {
       const targetIsInSelection = selectedSurfaces.some((s) =>
@@ -542,7 +618,6 @@ export function App() {
     [selectedSurfaces, applyPatchToTargets]
   );
 
-  // Редакция на върховете (ъглите) на подовата зона
   const handleUpdateFloorZoneVertex = useCallback(
     (zoneId: string, pointIndex: number, nextPoint: [number, number]) => {
       const nextZones = (room.floorZones ?? []).map((z) => {
@@ -594,9 +669,9 @@ export function App() {
     [room, sceneObjects, pushHistory]
   );
 
-  // Чертане на стени
   const handleFloorDrawClick = useCallback(
     (pt: [number, number]) => {
+      setTypedWallLength('');
       if (draftPoints.length === 0) {
         setDraftPoints([pt]);
         return;
@@ -631,7 +706,6 @@ export function App() {
     [draftPoints, room, sceneObjects, pushHistory]
   );
 
-  // Чертане на подова зона
   const handleFloorZoneDrawClick = useCallback(
     (pt: [number, number]) => {
       if (zoneDraftPoints.length >= 3) {
@@ -661,7 +735,6 @@ export function App() {
     [zoneDraftPoints, room, sceneObjects, pushHistory]
   );
 
-  // Калибриране на 2D план
   const handleCalibFloorClick = useCallback(
     (pt: [number, number]) => {
       if (!room.floorplan) return;
@@ -696,7 +769,6 @@ export function App() {
     [calibPoints, room, sceneObjects, pushHistory]
   );
 
-  // Добавяне на мебел
   const handleAddModelToScene = useCallback(
     (model: CatalogModel) => {
       const id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -720,7 +792,6 @@ export function App() {
     [room, sceneObjects, pushHistory, clearAllSelections]
   );
 
-  // Добавяне на запазен вариант от „Мои варианти“
   const handleAddPresetToScene = useCallback(
     (preset: UserFurniturePreset) => {
       const baseModel = models.find((m) => m.id === preset.baseModelId);
@@ -790,15 +861,54 @@ export function App() {
     [room, sceneObjects, pushHistory, clearAllSelections]
   );
 
-  // Клавиатурни шорткъти
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+      if (isDrawingWalls && draftPoints.length > 0) {
+        if (/^[0-9.,]$/.test(e.key)) {
+          e.preventDefault();
+          setTypedWallLength((prev) => prev + e.key.replace(',', '.'));
+          return;
+        }
+        if (e.key === 'Backspace' && typedWallLength.length > 0) {
+          e.preventDefault();
+          setTypedWallLength((prev) => prev.slice(0, -1));
+          return;
+        }
+        if (e.key === 'Enter' && typedWallLength.length > 0 && hoverPoint) {
+          e.preventDefault();
+          const parsedVal = parseFloat(typedWallLength);
+          if (!Number.isNaN(parsedVal) && parsedVal > 0.02) {
+            const lenM =
+              overlaySettings.dimensionUnit === 'cm'
+                ? parsedVal / 100
+                : parsedVal;
+            const lastPt = draftPoints[draftPoints.length - 1];
+            const dx = hoverPoint[0] - lastPt[0];
+            const dz = hoverPoint[1] - lastPt[1];
+            const angDeg =
+              Math.hypot(dx, dz) > 0.005
+                ? (Math.atan2(dz, dx) * 180) / Math.PI
+                : 0;
+            const exactEnd = computeEndpointFromAngleAndLength(
+              lastPt,
+              lenM,
+              angDeg
+            );
+            handleFloorDrawClick(exactEnd);
+          }
+          setTypedWallLength('');
+          return;
+        }
+      }
+
       if (e.key === 'Escape') {
+        setOpenTopPopover(null);
         setIsDrawingWalls(false);
         setDraftPoints([]);
+        setTypedWallLength('');
         setIsDrawingFloorZone(false);
         setZoneDraftPoints([]);
         setIsCalibratingPlan(false);
@@ -861,6 +971,12 @@ export function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [
+    isDrawingWalls,
+    draftPoints,
+    typedWallLength,
+    hoverPoint,
+    overlaySettings.dimensionUnit,
+    handleFloorDrawClick,
     selectedObject,
     selectedStandaloneOpening,
     selectedWall,
@@ -872,7 +988,6 @@ export function App() {
     clearAllSelections,
   ]);
 
-  // Качване на 2D план (през сървъра или локално DataURL при офлайн)
   const handleUploadFloorplanImage = async (file: File) => {
     let finalUrl = '';
     try {
@@ -914,7 +1029,6 @@ export function App() {
     img.src = finalUrl;
   };
 
-  // Запис и зареждане на проект в облака (apiClient)
   const handleSaveCloudProject = async () => {
     const title = window.prompt('Име на проекта за запис:', currentSceneTitle);
     if (!title || !title.trim()) return;
@@ -927,6 +1041,7 @@ export function App() {
       });
       setCurrentSceneId(res.id || currentSceneId);
       setCurrentSceneTitle(res.title || title.trim());
+      setOpenTopPopover(null);
       await refreshServerCatalogs();
       window.alert('Проектът е запазен успешно!');
     } catch (err) {
@@ -941,6 +1056,7 @@ export function App() {
       const loaded = await fetchSceneById(id);
       setCurrentSceneId(loaded.id);
       setCurrentSceneTitle(loaded.title);
+      setOpenTopPopover(null);
       pushHistory(loaded.room ?? createDefaultRoomConfig(), loaded.objects ?? []);
       clearAllSelections();
     } catch (err) {
@@ -958,6 +1074,7 @@ export function App() {
     ) {
       return;
     }
+    setOpenTopPopover(null);
     pushHistory(
       {
         templateId: tpl.id,
@@ -977,7 +1094,6 @@ export function App() {
     clearAllSelections();
   };
 
-  // Експорт / Импорт на JSON проект
   const handleExportProject = () => {
     const data = JSON.stringify({ room, sceneObjects }, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
@@ -987,6 +1103,7 @@ export function App() {
     a.download = `interior-project-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    setOpenTopPopover(null);
   };
 
   const handleImportProject = (file: File) => {
@@ -997,6 +1114,7 @@ export function App() {
         if (parsed?.room?.walls) {
           pushHistory(parsed.room, parsed.sceneObjects ?? []);
           clearAllSelections();
+          setOpenTopPopover(null);
         }
       } catch {
         window.alert('Невалиден JSON файл на проект.');
@@ -1091,6 +1209,248 @@ export function App() {
           >
             Мащаб
           </button>
+
+          {/* ПАДАЩО МЕНЮ: НАСТРОЙКИ */}
+          <div ref={settingsPopoverRef} style={{ position: 'relative' }}>
+            <button
+              type="button"
+              className={`btn ${openTopPopover === 'settings' ? 'btn-active' : ''}`}
+              onClick={() =>
+                setOpenTopPopover((prev) =>
+                  prev === 'settings' ? null : 'settings'
+                )
+              }
+            >
+              ⚙ Настройки ▾
+            </button>
+
+            {openTopPopover === 'settings' && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  left: 0,
+                  width: '300px',
+                  backgroundColor: '#0f172a',
+                  border: '1px solid #334155',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  zIndex: 100,
+                  boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div className="section-label" style={{ marginBottom: 0 }}>
+                  Котиране и визуални слоеве
+                </div>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Размерни линии (коти) на стените</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showWallDimensions}
+                    onChange={() => toggleOverlay('showWallDimensions')}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Квадратура на стаите (м²)</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showRoomAreas}
+                    onChange={() => toggleOverlay('showRoomAreas')}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>2D дъги на отваряне на вратите</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.show2DDoorSwings}
+                    onChange={() => toggleOverlay('show2DDoorSwings')}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Дебелина на стената в котите</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showWallThicknessLabels}
+                    onChange={() => toggleOverlay('showWallThicknessLabels')}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Подова координатна мрежа (Grid)</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showGrid}
+                    onChange={() => toggleOverlay('showGrid')}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Ъглови маркери (въртекси)</span>
+                  <input
+                    type="checkbox"
+                    checked={overlaySettings.showVertexHandles}
+                    onChange={() => toggleOverlay('showVertexHandles')}
+                  />
+                </label>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    paddingTop: '8px',
+                    borderTop: '1px solid #1e293b',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                  }}
+                >
+                  <span>Единица на котите</span>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <button
+                      type="button"
+                      className={`btn ${overlaySettings.dimensionUnit === 'm' ? 'btn-active' : ''}`}
+                      style={{ padding: '3px 8px', fontSize: '11px' }}
+                      onClick={() =>
+                        setOverlaySettings((p) => ({ ...p, dimensionUnit: 'm' }))
+                      }
+                    >
+                      Метри (м)
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn ${overlaySettings.dimensionUnit === 'cm' ? 'btn-active' : ''}`}
+                      style={{ padding: '3px 8px', fontSize: '11px' }}
+                      onClick={() =>
+                        setOverlaySettings((p) => ({
+                          ...p,
+                          dimensionUnit: 'cm',
+                        }))
+                      }
+                    >
+                      СМ
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  className="section-label"
+                  style={{
+                    marginBottom: 0,
+                    paddingTop: '8px',
+                    borderTop: '1px solid #1e293b',
+                  }}
+                >
+                  Поведение при редакция на ъгли
+                </div>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Свързани ъгли (движи съседните стени)</span>
+                  <input
+                    type="checkbox"
+                    checked={linkedVertexJoint}
+                    onChange={() => setLinkedVertexJoint((p) => !p)}
+                  />
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    fontSize: '12px',
+                    color: '#e2e8f0',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>Магнитно изправяне (90° / 180°)</span>
+                  <input
+                    type="checkbox"
+                    checked={autoStraightenVertices}
+                    onChange={() => setAutoStraightenVertices((p) => !p)}
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: '11px', marginTop: '2px' }}
+                  onClick={() => setOverlaySettings(DEFAULT_OVERLAY_SETTINGS)}
+                >
+                  Възстанови стандартните настройки
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="topbar-group">
@@ -1121,40 +1481,169 @@ export function App() {
             {unit === 'cm' ? 'СМ' : 'М'}
           </button>
 
-          <button
-            type="button"
-            className="btn"
-            onClick={handleStartNewProject}
-            title="Нов празен проект"
-          >
-            + Нов проект
-          </button>
+          {/* ПАДАЩО МЕНЮ: ПРОЕКТ (всички контроли за проекта събрани тук) */}
+          <div ref={projectPopoverRef} style={{ position: 'relative' }}>
+            <button
+              type="button"
+              className={`btn ${openTopPopover === 'project' ? 'btn-active' : ''}`}
+              onClick={() =>
+                setOpenTopPopover((prev) =>
+                  prev === 'project' ? null : 'project'
+                )
+              }
+              title={`Текущ проект: ${currentSceneTitle}`}
+            >
+              📁 Проект: {currentSceneTitle} ▾
+            </button>
 
-          <select
-            className="select-control"
-            style={{ width: 'auto', minWidth: '175px', maxWidth: '230px' }}
-            value={currentSceneId ?? ''}
-            onChange={(e) => {
-              const id = e.target.value;
-              if (id) void handleLoadCloudProject(id);
-            }}
-            title="Зареди запазен проект"
-          >
-            <option value="">
-              {savedScenes.length > 0
-                ? `Запазени проекти (${savedScenes.length})`
-                : 'Няма запазени проекти'}
-            </option>
-            {savedScenes.map((sc) => (
-              <option key={sc.id} value={sc.id}>
-                {sc.title}
-              </option>
-            ))}
-          </select>
+            {openTopPopover === 'project' && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  right: 0,
+                  width: '310px',
+                  maxHeight: '78vh',
+                  overflowY: 'auto',
+                  backgroundColor: '#0f172a',
+                  border: '1px solid #334155',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  zIndex: 100,
+                  boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div className="section-label" style={{ marginBottom: 0 }}>
+                  Управление на проекта
+                </div>
 
-          <button type="button" className="btn" onClick={handleSaveCloudProject}>
-            ☁ Запази проект
-          </button>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ flex: 1, fontSize: '11.5px' }}
+                    onClick={handleStartNewProject}
+                  >
+                    + Нов проект
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-active"
+                    style={{ flex: 1, fontSize: '11.5px' }}
+                    onClick={() => void handleSaveCloudProject()}
+                  >
+                    ☁ Запази в облака
+                  </button>
+                </div>
+
+                {savedScenes.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '5px',
+                      paddingTop: '8px',
+                      borderTop: '1px solid #1e293b',
+                    }}
+                  >
+                    <div className="section-label" style={{ marginBottom: 0 }}>
+                      Запазени проекти ({savedScenes.length})
+                    </div>
+                    {savedScenes.map((sc) => (
+                      <button
+                        key={sc.id}
+                        type="button"
+                        className={`btn ${currentSceneId === sc.id ? 'btn-active' : ''}`}
+                        style={{
+                          textAlign: 'left',
+                          fontSize: '11.5px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        onClick={() => void handleLoadCloudProject(sc.id)}
+                      >
+                        📂 {sc.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {templates.length > 0 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '5px',
+                      paddingTop: '8px',
+                      borderTop: '1px solid #1e293b',
+                    }}
+                  >
+                    <div className="section-label" style={{ marginBottom: 0 }}>
+                      Готови шаблони апартаменти ({templates.length})
+                    </div>
+                    {templates.map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        className="btn"
+                        style={{ textAlign: 'left', fontSize: '11.5px' }}
+                        onClick={() => handleApplyApartmentTemplate(tpl)}
+                      >
+                        🏢 {tpl.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    paddingTop: '8px',
+                    borderTop: '1px solid #1e293b',
+                  }}
+                >
+                  <div className="section-label" style={{ marginBottom: 0 }}>
+                    Локален файл (JSON)
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flex: 1, fontSize: '11px' }}
+                      onClick={handleExportProject}
+                    >
+                      ⬇ Експорт JSON
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ flex: 1, fontSize: '11px' }}
+                      onClick={() => fileInputImportRef.current?.click()}
+                    >
+                      ⬆ Импорт JSON
+                    </button>
+                  </div>
+                  <input
+                    ref={fileInputImportRef}
+                    type="file"
+                    accept=".json"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) handleImportProject(f);
+                      e.target.value = '';
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
 
           <button
             type="button"
@@ -1168,7 +1657,7 @@ export function App() {
 
       {/* РАБОТНА ЗОНА */}
       <div className="workspace">
-        {/* ЛЯВ ПАНЕЛ */}
+        {/* ЛЯВ ПАНЕЛ — САМО МЕБЕЛИ, МАТЕРИАЛИ И СТЕНИ */}
         <aside className="sidebar-left">
           <div className="panel-header" style={{ padding: '6px', gap: '4px' }}>
             <button
@@ -1194,14 +1683,6 @@ export function App() {
               onClick={() => setLeftTab('room')}
             >
               Стени
-            </button>
-            <button
-              type="button"
-              className={`btn ${leftTab === 'projects' ? 'btn-active' : ''}`}
-              style={{ flex: 1, padding: '6px 4px', fontSize: '11px' }}
-              onClick={() => setLeftTab('projects')}
-            >
-              Проекти
             </button>
           </div>
 
@@ -1485,6 +1966,7 @@ export function App() {
                       setZoneDraftPoints([]);
                       setIsCalibratingPlan(false);
                       setCalibPoints([]);
+                      setTypedWallLength('');
                       setIsDrawingWalls((prev) => {
                         if (prev) setDraftPoints([]);
                         return !prev;
@@ -1496,12 +1978,29 @@ export function App() {
                       : '✎ Чертай стени по пода'}
                   </button>
 
+                  {isDrawingWalls && (
+                    <div
+                      style={{
+                        fontSize: '10.5px',
+                        color: '#94a3b8',
+                        backgroundColor: '#1e293b',
+                        padding: '6px 8px',
+                        borderRadius: '4px',
+                      }}
+                    >
+                      Съвет: Докато чертаеш, можеш да въведеш точна дължина от клавиатурата (напр. <b>3.6</b> + <b>Enter</b>).
+                    </div>
+                  )}
+
                   {isDrawingWalls && draftPoints.length > 0 && (
                     <button
                       type="button"
                       className="btn"
                       style={{ fontSize: '11px' }}
-                      onClick={() => setDraftPoints([])}
+                      onClick={() => {
+                        setDraftPoints([]);
+                        setTypedWallLength('');
+                      }}
                     >
                       Прекъсни веригата (нова стена)
                     </button>
@@ -1725,106 +2224,6 @@ export function App() {
                     </>
                   )}
                 </div>
-
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  onClick={handleStartNewProject}
-                >
-                  Нов празен проект
-                </button>
-              </>
-            )}
-
-            {leftTab === 'projects' && (
-              <>
-                {templates.length > 0 && (
-                  <div
-                    style={{
-                      backgroundColor: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '6px',
-                      padding: '10px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                    }}
-                  >
-                    <div className="section-label" style={{ marginBottom: 0 }}>
-                      Готови шаблони апартаменти ({templates.length})
-                    </div>
-                    {templates.map((tpl) => (
-                      <button
-                        key={tpl.id}
-                        type="button"
-                        className="btn"
-                        style={{ textAlign: 'left', fontSize: '11px' }}
-                        onClick={() => handleApplyApartmentTemplate(tpl)}
-                      >
-                        🏢 {tpl.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {savedScenes.length > 0 && (
-                  <div
-                    style={{
-                      backgroundColor: '#0f172a',
-                      border: '1px solid #334155',
-                      borderRadius: '6px',
-                      padding: '10px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                    }}
-                  >
-                    <div className="section-label" style={{ marginBottom: 0 }}>
-                      Запазени проекти в облака ({savedScenes.length})
-                    </div>
-                    {savedScenes.map((sc) => (
-                      <button
-                        key={sc.id}
-                        type="button"
-                        className="btn"
-                        style={{ textAlign: 'left', fontSize: '11px' }}
-                        onClick={() => void handleLoadCloudProject(sc.id)}
-                      >
-                        📂 {sc.title}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ flex: 1, fontSize: '11px' }}
-                    onClick={handleExportProject}
-                  >
-                    Експорт JSON
-                  </button>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ flex: 1, fontSize: '11px' }}
-                    onClick={() => fileInputImportRef.current?.click()}
-                  >
-                    Импорт JSON
-                  </button>
-                  <input
-                    ref={fileInputImportRef}
-                    type="file"
-                    accept=".json"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleImportProject(f);
-                      e.target.value = '';
-                    }}
-                  />
-                </div>
               </>
             )}
           </div>
@@ -1837,6 +2236,30 @@ export function App() {
             cursor: draggedTextureId ? 'copy' : undefined,
           }}
         >
+          {isDrawingWalls && typedWallLength.length > 0 && (
+            <div
+              style={{
+                position: 'absolute',
+                top: '12px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                zIndex: 35,
+                backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                border: '1.5px solid #38bdf8',
+                color: '#f8fafc',
+                padding: '6px 14px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                fontWeight: 700,
+                pointerEvents: 'none',
+                boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
+              }}
+            >
+              Дължина на стената: <span style={{ color: '#38bdf8' }}>{typedWallLength}</span>{' '}
+              {overlaySettings.dimensionUnit === 'cm' ? 'см' : 'м'} (натисни Enter)
+            </div>
+          )}
+
           {draggedTextureId && (
             <div
               style={{
@@ -1863,6 +2286,7 @@ export function App() {
           <Viewport3D
             room={room}
             viewMode={viewMode}
+            overlaySettings={overlaySettings}
             selectedWallId={selectedWallId}
             selectedOpeningId={selectedOpeningId}
             selectedStandaloneOpeningId={selectedStandaloneOpeningId}
@@ -1878,6 +2302,7 @@ export function App() {
               setSelectedOpeningId(null);
               if (!wallId) setSelectedSurfaces([]);
             }}
+            onInlineUpdateWallLength={handleInlineUpdateWallLength}
             onSelectSurface={handleSelectSurface}
             onClearSurfaceSelection={handleClearSurfaceSelection}
             onDropTextureOnSurface={handleDropTextureOnSurface}

@@ -32,6 +32,8 @@ export interface RoomMeshProps {
   textures: CatalogTexture[];
   transformTool?: TransformTool;
   isTopView?: boolean;
+  showVertexHandles?: boolean;
+  show2DDoorSwings?: boolean;
   selectedWallId: string | null;
   selectedOpeningId: string | null;
   selectedStandaloneOpeningId: string | null;
@@ -505,6 +507,7 @@ interface WallSegmentItemProps {
   ceilingHeightM: number;
   textures: CatalogTexture[];
   isTopView: boolean;
+  showVertexHandles: boolean;
   isWallSelected: boolean;
   selectedOpeningId: string | null;
   selectedSurfaces: SurfaceTarget[];
@@ -528,6 +531,7 @@ function WallSegmentItem({
   ceilingHeightM,
   textures,
   isTopView,
+  showVertexHandles,
   isWallSelected,
   selectedOpeningId,
   selectedSurfaces,
@@ -831,65 +835,71 @@ function WallSegmentItem({
           ))}
       </group>
 
-      {(isWallSelected || isTopView || isStartVertexSelected || isEndVertexSelected) && (
-        <>
-          <mesh
-            position={[
-              wall.start[0],
-              isTopView ? 0.34 : wallHeight + 0.08,
-              wall.start[1],
-            ]}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (e.delta > 4) return;
-              onSelectWall(wall.id);
-              onSelectWallVertex?.({ wallId: wall.id, endKey: 'start' });
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              onSelectWall(wall.id);
-              onSelectWallVertex?.({ wallId: wall.id, endKey: 'start' });
-              onStartDragVertex?.(wall.id, 'start', e);
-            }}
-          >
-            <sphereGeometry
-              args={[isStartVertexSelected ? 0.13 : 0.095, 16, 16]}
-            />
-            <meshStandardMaterial
-              color={isStartVertexSelected ? '#f59e0b' : '#38bdf8'}
-              emissive={isStartVertexSelected ? '#d97706' : '#0284c7'}
-              emissiveIntensity={0.4}
-            />
-          </mesh>
+      {showVertexHandles &&
+        (isWallSelected ||
+          isTopView ||
+          isStartVertexSelected ||
+          isEndVertexSelected) && (
+          <>
+            <mesh
+              position={[
+                wall.start[0],
+                isTopView ? 0.34 : wallHeight + 0.08,
+                wall.start[1],
+              ]}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (e.delta > 4) return;
+                onSelectWall(wall.id);
+                onSelectWallVertex?.({ wallId: wall.id, endKey: 'start' });
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onSelectWall(wall.id);
+                onSelectWallVertex?.({ wallId: wall.id, endKey: 'start' });
+                onStartDragVertex?.(wall.id, 'start', e);
+              }}
+            >
+              <sphereGeometry
+                args={[isStartVertexSelected ? 0.13 : 0.095, 16, 16]}
+              />
+              <meshStandardMaterial
+                color={isStartVertexSelected ? '#f59e0b' : '#38bdf8'}
+                emissive={isStartVertexSelected ? '#d97706' : '#0284c7'}
+                emissiveIntensity={0.4}
+              />
+            </mesh>
 
-          <mesh
-            position={[
-              wall.end[0],
-              isTopView ? 0.34 : wallHeight + 0.08,
-              wall.end[1],
-            ]}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (e.delta > 4) return;
-              onSelectWall(wall.id);
-              onSelectWallVertex?.({ wallId: wall.id, endKey: 'end' });
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              onSelectWall(wall.id);
-              onSelectWallVertex?.({ wallId: wall.id, endKey: 'end' });
-              onStartDragVertex?.(wall.id, 'end', e);
-            }}
-          >
-            <sphereGeometry args={[isEndVertexSelected ? 0.13 : 0.095, 16, 16]} />
-            <meshStandardMaterial
-              color={isEndVertexSelected ? '#f59e0b' : '#38bdf8'}
-              emissive={isEndVertexSelected ? '#d97706' : '#0284c7'}
-              emissiveIntensity={0.4}
-            />
-          </mesh>
-        </>
-      )}
+            <mesh
+              position={[
+                wall.end[0],
+                isTopView ? 0.34 : wallHeight + 0.08,
+                wall.end[1],
+              ]}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (e.delta > 4) return;
+                onSelectWall(wall.id);
+                onSelectWallVertex?.({ wallId: wall.id, endKey: 'end' });
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onSelectWall(wall.id);
+                onSelectWallVertex?.({ wallId: wall.id, endKey: 'end' });
+                onStartDragVertex?.(wall.id, 'end', e);
+              }}
+            >
+              <sphereGeometry
+                args={[isEndVertexSelected ? 0.13 : 0.095, 16, 16]}
+              />
+              <meshStandardMaterial
+                color={isEndVertexSelected ? '#f59e0b' : '#38bdf8'}
+                emissive={isEndVertexSelected ? '#d97706' : '#0284c7'}
+                emissiveIntensity={0.4}
+              />
+            </mesh>
+          </>
+        )}
     </group>
   );
 }
@@ -1287,6 +1297,8 @@ export function RoomMesh({
   room,
   textures,
   isTopView = false,
+  showVertexHandles = true,
+  show2DDoorSwings = true,
   selectedWallId,
   selectedOpeningId,
   selectedStandaloneOpeningId,
@@ -1328,7 +1340,6 @@ export function RoomMesh({
   const isInteractiveFloorMode =
     isDrawingWalls || isDrawingFloorZone || isCalibratingPlan;
 
-  // Локално състояние при влачене с пивота (за плавно 60fps движение)
   const [liveWalls, setLiveWalls] = useState<WallSegment[] | null>(null);
   const [liveZones, setLiveZones] = useState<FloorZone[] | null>(null);
   const [liveOpeningPos, setLiveOpeningPos] = useState<{
@@ -1353,13 +1364,11 @@ export function RoomMesh({
 
   const pinY = isTopView ? 0.36 : Math.max(0.2, room.ceilingHeightM) + 0.08;
 
-  // Позиция на активния пивот (връх на стена, връх на под или отвор)
   const activePivotInfo = useMemo(() => {
     if (selectedWallVertex) {
       const w = activeWalls.find((item) => item.id === selectedWallVertex.wallId);
       if (!w) return null;
-      const pt =
-        selectedWallVertex.endKey === 'start' ? w.start : w.end;
+      const pt = selectedWallVertex.endKey === 'start' ? w.start : w.end;
       return {
         kind: 'wall-vertex' as const,
         position: [pt[0], pinY, pt[1]] as [number, number, number],
@@ -1398,7 +1407,6 @@ export function RoomMesh({
     isTopView,
   ]);
 
-  // Синхронизираме позицията на pivotTarget, когато не влачим
   useEffect(() => {
     if (!pivotTarget || !activePivotInfo || isDraggingPivotRef.current) return;
     pivotTarget.position.set(
@@ -1518,7 +1526,10 @@ export function RoomMesh({
     ) {
       setLiveOpeningPos({
         id: selectedStandaloneOpeningId,
-        pos: [Number(snapCoord(x, 0.05).toFixed(3)), Number(snapCoord(z, 0.05).toFixed(3))],
+        pos: [
+          Number(snapCoord(x, 0.05).toFixed(3)),
+          Number(snapCoord(z, 0.05).toFixed(3)),
+        ],
       });
     }
   };
@@ -1679,22 +1690,28 @@ export function RoomMesh({
               />
             </mesh>
           )}
-          {activeDraftChain.length > 0 && hoverPoint && (() => {
-            const last = activeDraftChain[activeDraftChain.length - 1];
-            const dx = hoverPoint[0] - last[0];
-            const dz = hoverPoint[1] - last[1];
-            const len = Math.hypot(dx, dz);
-            if (len < 0.02) return null;
-            return (
-              <mesh
-                position={[(last[0] + hoverPoint[0]) / 2, pinY, (last[1] + hoverPoint[1]) / 2]}
-                rotation={[0, -Math.atan2(dz, dx), 0]}
-              >
-                <boxGeometry args={[len, 0.03, 0.03]} />
-                <meshBasicMaterial color="#38bdf8" />
-              </mesh>
-            );
-          })()}
+          {activeDraftChain.length > 0 &&
+            hoverPoint &&
+            (() => {
+              const last = activeDraftChain[activeDraftChain.length - 1];
+              const dx = hoverPoint[0] - last[0];
+              const dz = hoverPoint[1] - last[1];
+              const len = Math.hypot(dx, dz);
+              if (len < 0.02) return null;
+              return (
+                <mesh
+                  position={[
+                    (last[0] + hoverPoint[0]) / 2,
+                    pinY,
+                    (last[1] + hoverPoint[1]) / 2,
+                  ]}
+                  rotation={[0, -Math.atan2(dz, dx), 0]}
+                >
+                  <boxGeometry args={[len, 0.03, 0.03]} />
+                  <meshBasicMaterial color="#38bdf8" />
+                </mesh>
+              );
+            })()}
         </>
       )}
 
@@ -1741,6 +1758,7 @@ export function RoomMesh({
           ceilingHeightM={room.ceilingHeightM}
           textures={textures}
           isTopView={isTopView}
+          showVertexHandles={showVertexHandles}
           isWallSelected={selectedWallId === wall.id}
           selectedOpeningId={
             selectedWallId === wall.id ? selectedOpeningId : null
@@ -1756,6 +1774,75 @@ export function RoomMesh({
           onStartDragVertex={onStartDragVertex}
         />
       ))}
+
+      {/* 2D Архитектурни дъги на отваряне на вратите */}
+      {isTopView &&
+        show2DDoorSwings &&
+        activeWalls.map((w) => {
+          const dx = w.end[0] - w.start[0];
+          const dz = w.end[1] - w.start[1];
+          const len = Math.hypot(dx, dz);
+          if (len < 0.05) return null;
+          const ux = dx / len;
+          const uz = dz / len;
+          const wallYaw = -Math.atan2(dz, dx);
+
+          return (w.openings ?? [])
+            .filter((op) => op.type === 'door')
+            .map((op) => {
+              const swing = op.swing ?? 'left-in';
+              const isRight = swing.startsWith('right');
+              const isOut = swing.endsWith('out');
+              const hingeDist = op.offsetFromStartM + (isRight ? op.widthM : 0);
+              const hx = w.start[0] + ux * hingeDist;
+              const hz = w.start[1] + uz * hingeDist;
+
+              const dirSign = isRight ? -1 : 1;
+              const sideSign = isOut ? -1 : 1;
+              const arcStartAngle =
+                dirSign === 1
+                  ? sideSign === 1
+                    ? 0
+                    : -Math.PI / 2
+                  : sideSign === 1
+                    ? Math.PI / 2
+                    : Math.PI;
+
+              return (
+                <group
+                  key={`door-swing-${w.id}-${op.id}`}
+                  position={[hx, 0.04, hz]}
+                  rotation={[0, wallYaw, 0]}
+                >
+                  <mesh
+                    position={[0, 0, (sideSign * op.widthM) / 2]}
+                    rotation={[-Math.PI / 2, 0, 0]}
+                  >
+                    <planeGeometry args={[0.025, op.widthM]} />
+                    <meshBasicMaterial color="#38bdf8" side={THREE.DoubleSide} />
+                  </mesh>
+                  <mesh rotation={[-Math.PI / 2, 0, 0]}>
+                    <ringGeometry
+                      args={[
+                        op.widthM - 0.02,
+                        op.widthM,
+                        24,
+                        1,
+                        arcStartAngle,
+                        Math.PI / 2,
+                      ]}
+                    />
+                    <meshBasicMaterial
+                      color="#38bdf8"
+                      transparent
+                      opacity={0.75}
+                      side={THREE.DoubleSide}
+                    />
+                  </mesh>
+                </group>
+              );
+            });
+        })}
 
       {/* Свободни врати и прозорци */}
       {activeOpenings.map((op) => (

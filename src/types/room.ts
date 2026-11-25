@@ -1066,6 +1066,26 @@ export function createStarterWalls(defaultThicknessM = 0.15): WallSegment[] {
   ];
 }
 
+export interface ViewportOverlaySettings {
+  showWallDimensions: boolean;
+  showWallThicknessLabels: boolean;
+  showRoomAreas: boolean;
+  show2DDoorSwings: boolean;
+  showVertexHandles: boolean;
+  showGrid: boolean;
+  dimensionUnit: 'm' | 'cm';
+}
+
+export const DEFAULT_OVERLAY_SETTINGS: ViewportOverlaySettings = {
+  showWallDimensions: true,
+  showWallThicknessLabels: false,
+  showRoomAreas: true,
+  show2DDoorSwings: true,
+  showVertexHandles: true,
+  showGrid: true,
+  dimensionUnit: 'm',
+};
+
 export function createDefaultRoomConfig(): RoomConfig {
   return {
     templateId: null,
@@ -1080,4 +1100,5 @@ export function createDefaultRoomConfig(): RoomConfig {
     savedCameras: [],
     floorplan: null,
   };
+
 }
