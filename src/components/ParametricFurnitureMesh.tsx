@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { useFrame } from '@react-three/fiber';
 import { MeshReflectorMaterial, TransformControls } from '@react-three/drei';
 import type {
   CatalogTexture,
@@ -13,8 +14,12 @@ import type {
   WardrobeSpec,
 } from '../types/editor';
 import type { WallSegment } from '../types/room';
-import { snapFurnitureToWalls } from '../utils/furnitureSnap';
+import {
+  snapFurnitureToWalls,
+  type WallDistanceGuide,
+} from '../utils/furnitureSnap';
 import { KitchenSinkAssembly } from './KitchenSinkAssembly';
+import { FurnitureWallGuides } from './FurnitureWallGuides';
 
 export interface ParametricFurnitureMeshProps {
   item: SceneObject;
@@ -120,6 +125,9 @@ interface DoorLeafProps {
   handleColor: string;
   isDrawer?: boolean;
   isMirror?: boolean;
+  isOpen?: boolean;
+  isSliding?: boolean;
+  slideDir?: number;
 }
 
 function DoorOrDrawerLeaf({
@@ -139,11 +147,53 @@ function DoorOrDrawerLeaf({
   handleColor,
   isDrawer = false,
   isMirror = false,
+  isOpen = false,
+  isSliding = false,
+  slideDir = 1,
 }: DoorLeafProps) {
+  const animGroupRef = useRef<THREE.Group | null>(null);
+  const progressRef = useRef(0);
+
   const gap = 0.004;
   const w = Math.max(0.06, width - gap);
   const h = Math.max(0.06, height - gap);
   const frameBorder = Math.min(0.055, w * 0.16, h * 0.16);
+
+  useFrame((_, delta) => {
+    const target = isOpen ? 1 : 0;
+    const step = Math.min(1, delta * 7);
+    progressRef.current += (target - progressRef.current) * step;
+
+    const g = animGroupRef.current;
+    if (!g) return;
+
+    const p = progressRef.current;
+    if (isDrawer) {
+      g.position.set(x, y, z + p * 0.24);
+      g.rotation.set(0, 0, 0);
+    } else if (isSliding) {
+      g.position.set(x + p * slideDir * (w * 0.72), y, z);
+      g.rotation.set(0, 0, 0);
+    } else if (hingeSide === 'right') {
+      const pivotX = x + w / 2;
+      const angle = p * (Math.PI * 0.46);
+      g.rotation.set(0, angle, 0);
+      g.position.set(
+        pivotX - (w / 2) * Math.cos(angle),
+        y,
+        z + (w / 2) * Math.sin(angle)
+      );
+    } else {
+      const pivotX = x - w / 2;
+      const angle = -p * (Math.PI * 0.46);
+      g.rotation.set(0, angle, 0);
+      g.position.set(
+        pivotX + (w / 2) * Math.cos(angle),
+        y,
+        z - (w / 2) * Math.sin(angle)
+      );
+    }
+  });
 
   const handleNode = useMemo(() => {
     if (frontStyle === 'gola' || handleStyle === 'none') return null;
@@ -200,7 +250,7 @@ function DoorOrDrawerLeaf({
     const mirrorH = Math.max(0.04, h - mirrorInset);
 
     return (
-      <group position={[x, y, z]}>
+      <group ref={animGroupRef} position={[x, y, z]}>
         <mesh castShadow receiveShadow>
           <boxGeometry args={[w, h, thickness * 0.85]} />
           <meshStandardMaterial
@@ -230,7 +280,7 @@ function DoorOrDrawerLeaf({
   }
 
   return (
-    <group position={[x, y, z]}>
+    <group ref={animGroupRef} position={[x, y, z]}>
       {frontStyle === 'shaker' && w > 0.16 && h > 0.16 ? (
         <>
           <mesh position={[0, 0, -0.002]} castShadow receiveShadow>
@@ -356,6 +406,8 @@ function WardrobeGeometry({
       : 0;
   const drawerZoneH = drawerRows * 0.19;
   const upperDoorH = Math.max(0.4, mainBodyH - drawerZoneH);
+  const interiorMode = spec.interiorLayout ?? 'mixed';
+  const isOpen = Boolean(spec.doorsOpen);
 
   return (
     <group>
@@ -395,12 +447,12 @@ function WardrobeGeometry({
           return (
             <mesh
               key={`w-div-${idx}`}
-              position={[px, mainBodyH / 2, isOuter ? 0 : -0.01]}
+              position={[px, mainBodyH / 2, isOuter ? 0 : -0.015]}
               castShadow
               receiveShadow
             >
               <boxGeometry
-                args={[panelT, mainBodyH - panelT * 2, isOuter ? D : D - 0.025]}
+                args={[panelT, mainBodyH - panelT * 2, isOuter ? D : D - 0.035]}
               />
               <meshStandardMaterial
                 key={`wc-div-${corpusMat.map?.uuid ?? 'none'}`}
@@ -417,6 +469,64 @@ function WardrobeGeometry({
           <meshStandardMaterial color={spec.corpusColor} roughness={0.85} />
         </mesh>
 
+        {/* Вътрешно разпределение */}
+        {Array.from({ length: doors }).map((_, idx) => {
+          const cx = -W / 2 + doorW * (idx + 0.5);
+          const innerW = Math.max(0.1, doorW - panelT * 1.4);
+          const innerD = Math.max(0.2, D - 0.055);
+          const startY = drawerZoneH + panelT;
+          const availH = Math.max(0.4, mainBodyH - panelT - startY);
+
+          const hasRail =
+            interiorMode === 'rail-and-shelves' ||
+            (interiorMode === 'mixed' && idx % 2 === 0);
+
+          const shelfHeights = hasRail
+            ? [startY + availH * 0.78]
+            : [
+                startY + availH * 0.22,
+                startY + availH * 0.44,
+                startY + availH * 0.66,
+                startY + availH * 0.85,
+              ];
+
+          return (
+            <group key={`w-int-${idx}`}>
+              {shelfHeights.map((sy, sIdx) => (
+                <mesh
+                  key={`w-sh-${idx}-${sIdx}`}
+                  position={[cx, sy, -0.015]}
+                  castShadow
+                  receiveShadow
+                >
+                  <boxGeometry args={[innerW, 0.016, innerD]} />
+                  <meshStandardMaterial
+                    color={corpusMat.color}
+                    map={corpusMat.map}
+                    roughness={corpusMat.roughness}
+                  />
+                </mesh>
+              ))}
+
+              {hasRail && (
+                <mesh
+                  position={[cx, startY + availH * 0.71, -0.01]}
+                  rotation={[0, 0, Math.PI / 2]}
+                  castShadow
+                >
+                  <cylinderGeometry args={[0.012, 0.012, innerW, 14]} />
+                  <meshStandardMaterial
+                    color="#e2e8f0"
+                    roughness={0.25}
+                    metalness={0.55}
+                  />
+                </mesh>
+              )}
+            </group>
+          );
+        })}
+
+        {/* Врати и чекмеджета */}
         {Array.from({ length: doors }).map((_, idx) => {
           const cx = -W / 2 + doorW * (idx + 0.5);
           const isSliding = spec.doorType === 'sliding';
@@ -444,6 +554,7 @@ function WardrobeGeometry({
                   frontMetalness={frontMat.metalness}
                   handleColor={spec.handleColor}
                   isDrawer
+                  isOpen={isOpen}
                 />
               ))}
 
@@ -462,6 +573,9 @@ function WardrobeGeometry({
                 frontMetalness={frontMat.metalness}
                 handleColor={spec.handleColor}
                 isMirror={hasMirror}
+                isOpen={isOpen}
+                isSliding={isSliding}
+                slideDir={idx % 2 === 0 ? 1 : -1}
               />
             </group>
           );
@@ -496,6 +610,7 @@ function WardrobeGeometry({
               frontMetalness={frontMat.metalness}
               handleColor={spec.handleColor}
               isMirror={mirrorSet.has(idx)}
+              isOpen={isOpen}
             />
           ))}
         </group>
@@ -548,6 +663,10 @@ function KitchenRunSegment({
   const W = Math.max(0.4, widthM);
   const count = Math.max(1, Math.min(8, Math.round(modCount)));
   const modW = W / count;
+  const isOpen = Boolean(spec.doorsOpen);
+  const hoodType = spec.hoodType ?? 'chimney';
+  const ledPercent = spec.hasUnderCabinetLed === false ? 0 : (spec.ledIntensity ?? 100);
+  const ledFactor = Math.max(0, Math.min(2, ledPercent / 100));
 
   const getModType = (idx: number): KitchenModuleType => {
     if (isCornerWing) {
@@ -577,6 +696,9 @@ function KitchenRunSegment({
 
   const totalTopD = baseD + overhang;
   const topCenterZ = overhang / 2;
+
+  // Брой точкови светлини по дължината на горния ред за реално осветяване на плота
+  const ledLightCount = Math.max(1, Math.min(4, Math.round(wallTotalW / 0.75)));
 
   return (
     <group>
@@ -772,6 +894,7 @@ function KitchenRunSegment({
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
                     isDrawer
+                    isOpen={isOpen}
                   />
                   <DoorOrDrawerLeaf
                     x={cx}
@@ -787,6 +910,7 @@ function KitchenRunSegment({
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
                     isDrawer
+                    isOpen={isOpen}
                   />
                   <DoorOrDrawerLeaf
                     x={cx}
@@ -802,6 +926,7 @@ function KitchenRunSegment({
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
                     isDrawer
+                    isOpen={isOpen}
                   />
                 </group>
               );
@@ -810,6 +935,8 @@ function KitchenRunSegment({
             if (mType === 'oven') {
               const drawerH = 0.14;
               const ovenH = Math.max(0.45, baseBoxH - drawerH - 0.02);
+              const hobW = Math.min(0.58, modW - 0.04);
+              const hobD = baseD - 0.08;
               return (
                 <group key={`k-mod-${idx}`}>
                   {countertopNode}
@@ -827,6 +954,7 @@ function KitchenRunSegment({
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
                     isDrawer
+                    isOpen={isOpen}
                   />
                   <mesh
                     position={[cx, plinthH + drawerH + ovenH / 2, baseD / 2 + 0.012]}
@@ -854,17 +982,30 @@ function KitchenRunSegment({
                   >
                     <boxGeometry args={[modW - 0.08, 0.014, 0.022]} />
                     <meshStandardMaterial
-                      color="#cbd5e1"
+                      color="#e2e8f0"
                       roughness={0.25}
-                      metalness={0.85}
+                      metalness={0.55}
                     />
                   </mesh>
                   <mesh position={[cx, baseTotalH + 0.004, 0]}>
-                    <boxGeometry
-                      args={[Math.min(0.58, modW - 0.04), 0.008, baseD - 0.08]}
-                    />
+                    <boxGeometry args={[hobW, 0.008, hobD]} />
                     <meshStandardMaterial color="#090d16" roughness={0.12} metalness={0.5} />
                   </mesh>
+                  {[
+                    [-hobW * 0.24, -hobD * 0.22, 0.075],
+                    [hobW * 0.24, -hobD * 0.22, 0.06],
+                    [-hobW * 0.24, hobD * 0.22, 0.06],
+                    [hobW * 0.24, hobD * 0.22, 0.08],
+                  ].map(([bx, bz, r], bIdx) => (
+                    <mesh
+                      key={`hob-ring-${bIdx}`}
+                      position={[cx + bx, baseTotalH + 0.009, bz]}
+                      rotation={[-Math.PI / 2, 0, 0]}
+                    >
+                      <ringGeometry args={[r - 0.008, r, 24]} />
+                      <meshBasicMaterial color="#64748b" />
+                    </mesh>
+                  ))}
                 </group>
               );
             }
@@ -887,6 +1028,7 @@ function KitchenRunSegment({
                     frontRoughness={frontMat.roughness}
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
+                    isOpen={isOpen}
                   />
                   <KitchenSinkAssembly
                     cx={cx}
@@ -917,6 +1059,7 @@ function KitchenRunSegment({
                     frontRoughness={frontMat.roughness}
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
+                    isOpen={isOpen}
                   />
                   <DoorOrDrawerLeaf
                     x={cx + halfW / 2}
@@ -932,6 +1075,7 @@ function KitchenRunSegment({
                     frontRoughness={frontMat.roughness}
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
+                    isOpen={isOpen}
                   />
                 </group>
               );
@@ -954,6 +1098,7 @@ function KitchenRunSegment({
                   frontRoughness={frontMat.roughness}
                   frontMetalness={frontMat.metalness}
                   handleColor={spec.handleColor}
+                  isOpen={isOpen}
                 />
               </group>
             );
@@ -983,73 +1128,222 @@ function KitchenRunSegment({
 
       {showWall && (
         <group position={[wallShiftX, wallStartY, wallZOffset]}>
-          <mesh position={[0, wallCabH / 2, 0]} castShadow receiveShadow>
-            <boxGeometry args={[wallTotalW, wallCabH, wallCabD]} />
-            <meshStandardMaterial
-              key={`kc-wall-${corpusMat.map?.uuid ?? 'none'}`}
-              color={corpusMat.color}
-              map={corpusMat.map}
-              roughness={corpusMat.roughness}
-            />
-          </mesh>
+          {/* Регулируема топла LED лента + реално осветяване върху термоплота */}
+          {ledFactor > 0.01 && (
+            <group>
+              <mesh position={[0, -0.003, 0.015]}>
+                <boxGeometry args={[wallTotalW - 0.04, 0.005, 0.018]} />
+                <meshStandardMaterial
+                  color="#fef3c7"
+                  emissive="#fde68a"
+                  emissiveIntensity={1.6 * ledFactor}
+                  roughness={0.2}
+                />
+              </mesh>
+              {Array.from({ length: ledLightCount }).map((_, lIdx) => {
+                const lx =
+                  -wallTotalW / 2 + (wallTotalW / ledLightCount) * (lIdx + 0.5);
+                return (
+                  <pointLight
+                    key={`led-pt-${lIdx}`}
+                    position={[lx, -0.06, 0.14]}
+                    color="#fff3d6"
+                    intensity={(1.6 * ledFactor) / ledLightCount}
+                    distance={1.6}
+                    decay={1.8}
+                  />
+                );
+              })}
+            </group>
+          )}
 
           {Array.from({ length: wallModCount }).map((_, idx) => {
             const cx = -wallTotalW / 2 + wallModW * (idx + 0.5);
-            if (wallModW >= 0.78) {
-              const halfW = wallModW / 2;
+            const belowModType = !isCornerWing
+              ? getModType(idx + moduleOffsetIdx)
+              : 'doors';
+            const isAboveOven = belowModType === 'oven';
+
+            // 1) Декоративен комин-абсорбатор (светъл сив инокс)
+            if (isAboveOven && hoodType === 'chimney') {
+              const hoodW = Math.min(0.6, wallModW - 0.02);
+              const hoodD = Math.min(0.46, baseD - 0.08);
+              const visorH = 0.055;
+              const chimneyH = Math.max(0.25, wallCabH - visorH);
+              const zShift = (hoodD - wallCabD) / 2;
+
               return (
-                <group key={`k-wall-${idx}`}>
+                <group key={`k-hood-${idx}`} position={[cx, 0, zShift]}>
+                  <mesh position={[0, visorH / 2, 0]} castShadow receiveShadow>
+                    <boxGeometry args={[hoodW, visorH, hoodD]} />
+                    <meshStandardMaterial
+                      color="#e2e8f0"
+                      roughness={0.28}
+                      metalness={0.45}
+                    />
+                  </mesh>
+                  <mesh position={[0, 0.002, 0]}>
+                    <boxGeometry args={[hoodW - 0.08, 0.004, hoodD - 0.08]} />
+                    <meshStandardMaterial
+                      color="#94a3b8"
+                      roughness={0.45}
+                      metalness={0.35}
+                    />
+                  </mesh>
+                  <mesh
+                    position={[0, visorH + chimneyH / 2, -hoodD / 2 + 0.13]}
+                    castShadow
+                    receiveShadow
+                  >
+                    <boxGeometry args={[0.26, chimneyH, 0.24]} />
+                    <meshStandardMaterial
+                      color="#e2e8f0"
+                      roughness={0.28}
+                      metalness={0.45}
+                    />
+                  </mesh>
+                </group>
+              );
+            }
+
+            // 2) Вграден телескопичен аспиратор — долният му ръб е на нивото на шкафовете (Y = 0)
+            if (isAboveOven && hoodType === 'integrated') {
+              const hoodBarH = 0.034; // 3.4 см челна иноксова лайстна
+              const cabH = Math.max(0.3, wallCabH - hoodBarH);
+              const yOffset = hoodBarH;
+
+              return (
+                <group key={`k-hood-int-${idx}`}>
+                  {/* Шкаф над вградения аспиратор */}
+                  <mesh
+                    position={[cx, yOffset + cabH / 2, 0]}
+                    castShadow
+                    receiveShadow
+                  >
+                    <boxGeometry args={[wallModW, cabH, wallCabD]} />
+                    <meshStandardMaterial
+                      key={`kc-wh-${corpusMat.map?.uuid ?? 'none'}`}
+                      color={corpusMat.color}
+                      map={corpusMat.map}
+                      roughness={corpusMat.roughness}
+                    />
+                  </mesh>
+
+                  {/* Светъл сив инокс челен панел на аспиратора, подравнен точно на нивото на шкафовете */}
+                  <mesh
+                    position={[cx, hoodBarH / 2, 0.032]}
+                    castShadow
+                    receiveShadow
+                  >
+                    <boxGeometry args={[wallModW - 0.006, hoodBarH, wallCabD + 0.064]} />
+                    <meshStandardMaterial
+                      color="#e2e8f0"
+                      roughness={0.28}
+                      metalness={0.45}
+                    />
+                  </mesh>
+
+                  {/* Алуминиев филтър отдолу */}
+                  <mesh position={[cx, 0.002, 0.025]}>
+                    <boxGeometry args={[wallModW - 0.07, 0.004, wallCabD + 0.02]} />
+                    <meshStandardMaterial
+                      color="#94a3b8"
+                      roughness={0.45}
+                      metalness={0.35}
+                    />
+                  </mesh>
+
                   <DoorOrDrawerLeaf
-                    x={cx - halfW / 2}
-                    y={wallCabH / 2}
+                    x={cx}
+                    y={yOffset + cabH / 2}
                     z={wallCabD / 2 + 0.011}
-                    width={halfW}
-                    height={wallCabH}
+                    width={wallModW}
+                    height={cabH}
                     frontStyle={spec.frontStyle}
                     handleStyle={spec.handleStyle}
-                    hingeSide="left"
+                    hingeSide={idx % 2 === 0 ? 'left' : 'right'}
                     frontColor={frontMat.color}
                     frontMap={frontMat.map}
                     frontRoughness={frontMat.roughness}
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
-                  />
-                  <DoorOrDrawerLeaf
-                    x={cx + halfW / 2}
-                    y={wallCabH / 2}
-                    z={wallCabD / 2 + 0.011}
-                    width={halfW}
-                    height={wallCabH}
-                    frontStyle={spec.frontStyle}
-                    handleStyle={spec.handleStyle}
-                    hingeSide="right"
-                    frontColor={frontMat.color}
-                    frontMap={frontMat.map}
-                    frontRoughness={frontMat.roughness}
-                    frontMetalness={frontMat.metalness}
-                    handleColor={spec.handleColor}
+                    isOpen={isOpen}
                   />
                 </group>
               );
             }
 
+            // 3) Стандартен горен шкаф
             return (
-              <DoorOrDrawerLeaf
-                key={`k-wall-${idx}`}
-                x={cx}
-                y={wallCabH / 2}
-                z={wallCabD / 2 + 0.011}
-                width={wallModW}
-                height={wallCabH}
-                frontStyle={spec.frontStyle}
-                handleStyle={spec.handleStyle}
-                hingeSide={idx % 2 === 0 ? 'left' : 'right'}
-                frontColor={frontMat.color}
-                frontMap={frontMat.map}
-                frontRoughness={frontMat.roughness}
-                frontMetalness={frontMat.metalness}
-                handleColor={spec.handleColor}
-              />
+              <group key={`k-wall-mod-${idx}`}>
+                <mesh
+                  position={[cx, wallCabH / 2, 0]}
+                  castShadow
+                  receiveShadow
+                >
+                  <boxGeometry args={[wallModW, wallCabH, wallCabD]} />
+                  <meshStandardMaterial
+                    key={`kc-wall-${idx}-${corpusMat.map?.uuid ?? 'none'}`}
+                    color={corpusMat.color}
+                    map={corpusMat.map}
+                    roughness={corpusMat.roughness}
+                  />
+                </mesh>
+
+                {wallModW >= 0.78 ? (
+                  <>
+                    <DoorOrDrawerLeaf
+                      x={cx - wallModW / 4}
+                      y={wallCabH / 2}
+                      z={wallCabD / 2 + 0.011}
+                      width={wallModW / 2}
+                      height={wallCabH}
+                      frontStyle={spec.frontStyle}
+                      handleStyle={spec.handleStyle}
+                      hingeSide="left"
+                      frontColor={frontMat.color}
+                      frontMap={frontMat.map}
+                      frontRoughness={frontMat.roughness}
+                      frontMetalness={frontMat.metalness}
+                      handleColor={spec.handleColor}
+                      isOpen={isOpen}
+                    />
+                    <DoorOrDrawerLeaf
+                      x={cx + wallModW / 4}
+                      y={wallCabH / 2}
+                      z={wallCabD / 2 + 0.011}
+                      width={wallModW / 2}
+                      height={wallCabH}
+                      frontStyle={spec.frontStyle}
+                      handleStyle={spec.handleStyle}
+                      hingeSide="right"
+                      frontColor={frontMat.color}
+                      frontMap={frontMat.map}
+                      frontRoughness={frontMat.roughness}
+                      frontMetalness={frontMat.metalness}
+                      handleColor={spec.handleColor}
+                      isOpen={isOpen}
+                    />
+                  </>
+                ) : (
+                  <DoorOrDrawerLeaf
+                    x={cx}
+                    y={wallCabH / 2}
+                    z={wallCabD / 2 + 0.011}
+                    width={wallModW}
+                    height={wallCabH}
+                    frontStyle={spec.frontStyle}
+                    handleStyle={spec.handleStyle}
+                    hingeSide={idx % 2 === 0 ? 'left' : 'right'}
+                    frontColor={frontMat.color}
+                    frontMap={frontMat.map}
+                    frontRoughness={frontMat.roughness}
+                    frontMetalness={frontMat.metalness}
+                    handleColor={spec.handleColor}
+                    isOpen={isOpen}
+                  />
+                )}
+              </group>
             );
           })}
         </group>
@@ -1080,6 +1374,7 @@ function KitchenGeometry({
 
   const modCount = Math.max(1, Math.min(8, Math.round(spec.moduleCount)));
   const modW = W / modCount;
+  const isOpen = Boolean(spec.doorsOpen);
 
   const corpusMat = useSimpleTexturedMaterial(
     spec.corpusColor,
@@ -1112,6 +1407,8 @@ function KitchenGeometry({
 
   if (spec.layoutMode === 'tall-column') {
     const colBodyH = Math.max(1.2, tallH - plinthH);
+    const hasAppliances = spec.tallColumnAppliances ?? true;
+
     return (
       <group>
         {plinthH > 0.005 && (
@@ -1131,6 +1428,78 @@ function KitchenGeometry({
         </mesh>
         {Array.from({ length: modCount }).map((_, idx) => {
           const cx = -W / 2 + modW * (idx + 0.5);
+          const isApplianceSlot = hasAppliances && idx === 0;
+
+          if (isApplianceSlot) {
+            const lowerDoorH = colBodyH * 0.36;
+            const ovenH = 0.56;
+            const microH = 0.36;
+            const upperDoorH = Math.max(0.25, colBodyH - lowerDoorH - ovenH - microH);
+
+            return (
+              <group key={`k-col-app-${idx}`}>
+                <DoorOrDrawerLeaf
+                  x={cx}
+                  y={plinthH + lowerDoorH / 2}
+                  z={baseD / 2 + 0.011}
+                  width={modW}
+                  height={lowerDoorH}
+                  frontStyle={spec.frontStyle}
+                  handleStyle={spec.handleStyle}
+                  hingeSide="left"
+                  frontColor={frontMat.color}
+                  frontMap={frontMat.map}
+                  frontRoughness={frontMat.roughness}
+                  frontMetalness={frontMat.metalness}
+                  handleColor={spec.handleColor}
+                  isOpen={isOpen}
+                />
+                <mesh
+                  position={[cx, plinthH + lowerDoorH + ovenH / 2, baseD / 2 + 0.012]}
+                  castShadow
+                >
+                  <boxGeometry args={[modW - 0.015, ovenH - 0.01, 0.022]} />
+                  <meshStandardMaterial color="#0f172a" roughness={0.2} metalness={0.85} />
+                </mesh>
+                <mesh
+                  position={[cx, plinthH + lowerDoorH + ovenH * 0.44, baseD / 2 + 0.024]}
+                >
+                  <boxGeometry args={[modW - 0.09, ovenH * 0.62, 0.006]} />
+                  <meshStandardMaterial color="#1e293b" roughness={0.1} metalness={0.9} />
+                </mesh>
+                <mesh
+                  position={[cx, plinthH + lowerDoorH + ovenH + microH / 2, baseD / 2 + 0.012]}
+                  castShadow
+                >
+                  <boxGeometry args={[modW - 0.015, microH - 0.01, 0.022]} />
+                  <meshStandardMaterial color="#0f172a" roughness={0.2} metalness={0.85} />
+                </mesh>
+                <mesh
+                  position={[cx - 0.03, plinthH + lowerDoorH + ovenH + microH / 2, baseD / 2 + 0.024]}
+                >
+                  <boxGeometry args={[modW - 0.14, microH * 0.65, 0.006]} />
+                  <meshStandardMaterial color="#1e293b" roughness={0.1} metalness={0.9} />
+                </mesh>
+                <DoorOrDrawerLeaf
+                  x={cx}
+                  y={plinthH + lowerDoorH + ovenH + microH + upperDoorH / 2}
+                  z={baseD / 2 + 0.011}
+                  width={modW}
+                  height={upperDoorH}
+                  frontStyle={spec.frontStyle}
+                  handleStyle={spec.handleStyle}
+                  hingeSide="left"
+                  frontColor={frontMat.color}
+                  frontMap={frontMat.map}
+                  frontRoughness={frontMat.roughness}
+                  frontMetalness={frontMat.metalness}
+                  handleColor={spec.handleColor}
+                  isOpen={isOpen}
+                />
+              </group>
+            );
+          }
+
           const lowerH = colBodyH * 0.42;
           const upperH = colBodyH - lowerH;
           return (
@@ -1149,6 +1518,7 @@ function KitchenGeometry({
                 frontRoughness={frontMat.roughness}
                 frontMetalness={frontMat.metalness}
                 handleColor={spec.handleColor}
+                isOpen={isOpen}
               />
               <DoorOrDrawerLeaf
                 x={cx}
@@ -1164,6 +1534,7 @@ function KitchenGeometry({
                 frontRoughness={frontMat.roughness}
                 frontMetalness={frontMat.metalness}
                 handleColor={spec.handleColor}
+                isOpen={isOpen}
               />
             </group>
           );
@@ -1273,6 +1644,7 @@ export function ParametricFurnitureMesh({
   onDraggingChange,
 }: ParametricFurnitureMeshProps) {
   const [targetObj, setTargetObj] = useState<THREE.Object3D | null>(null);
+  const [wallGuides, setWallGuides] = useState<WallDistanceGuide[]>([]);
   const isDraggingRef = useRef(false);
 
   const snapDims = useMemo(() => {
@@ -1283,16 +1655,37 @@ export function ParametricFurnitureMesh({
       return {
         halfWidthM: ((config.wardrobe.widthCm / 100) * sx) / 2,
         backOffsetM: ((config.wardrobe.depthCm / 100) * sz) / 2,
+        lWingSide: null as 'left' | 'right' | null,
+        lWingLengthM: 0,
       };
     }
     if (config.kind === 'kitchen' && config.kitchen) {
+      const shape = config.kitchen.shape ?? 'straight';
+      const rawWingSide: 'left' | 'right' | null =
+        shape === 'l-left' ? 'left' : shape === 'l-right' ? 'right' : null;
+      const effectiveWingSide: 'left' | 'right' | null =
+        rawWingSide && item.mirrored
+          ? rawWingSide === 'left'
+            ? 'right'
+            : 'left'
+          : rawWingSide;
+
       return {
         halfWidthM: ((config.kitchen.widthCm / 100) * sx) / 2,
         backOffsetM: ((config.kitchen.depthCm / 100) * sz) / 2,
+        lWingSide: effectiveWingSide,
+        lWingLengthM: effectiveWingSide
+          ? ((config.kitchen.wingWidthCm ?? 160) / 100) * sz
+          : 0,
       };
     }
-    return { halfWidthM: 0.6, backOffsetM: 0.3 };
-  }, [config, item.scale]);
+    return {
+      halfWidthM: 0.6,
+      backOffsetM: 0.3,
+      lWingSide: null as 'left' | 'right' | null,
+      lWingLengthM: 0,
+    };
+  }, [config, item.scale, item.mirrored]);
 
   useEffect(() => {
     if (!targetObj || isDraggingRef.current) return;
@@ -1316,6 +1709,8 @@ export function ParametricFurnitureMesh({
         {
           backOffsetM: snapDims.backOffsetM,
           halfWidthM: snapDims.halfWidthM,
+          lWingSide: snapDims.lWingSide,
+          lWingLengthM: snapDims.lWingLengthM,
           snapDistanceM: 0.34,
         }
       );
@@ -1324,6 +1719,10 @@ export function ParametricFurnitureMesh({
         targetObj.position.x = snapped.position[0];
         targetObj.position.z = snapped.position[2];
         targetObj.rotation.y = snapped.rotationY;
+      }
+
+      if (isDraggingRef.current) {
+        setWallGuides(snapped.guides);
       }
     }
   };
@@ -1352,6 +1751,10 @@ export function ParametricFurnitureMesh({
         ) : null}
       </group>
 
+      {isSelected && wallGuides.length > 0 && (
+        <FurnitureWallGuides guides={wallGuides} />
+      )}
+
       {isSelected && targetObj && (
         <TransformControls
           object={targetObj}
@@ -1365,6 +1768,7 @@ export function ParametricFurnitureMesh({
           onMouseUp={() => {
             isDraggingRef.current = false;
             onDraggingChange(false);
+            setWallGuides([]);
             if (!targetObj) return;
             handleDragChange();
             onTransformChange(

@@ -11,7 +11,11 @@ import type {
 } from '../types/editor';
 import type { WallSegment } from '../types/room';
 import { loadGlbFromUrl } from '../utils/gltfLoader';
-import { snapFurnitureToWalls } from '../utils/furnitureSnap';
+import {
+  snapFurnitureToWalls,
+  type WallDistanceGuide,
+} from '../utils/furnitureSnap';
+import { FurnitureWallGuides } from './FurnitureWallGuides';
 
 export interface DiscoveredMaterialSlot {
   key: string;
@@ -91,7 +95,9 @@ export function SceneItemMesh({
   const [groupObj, setGroupObj] = useState<THREE.Group | null>(null);
   const [loadedScene, setLoadedScene] = useState<THREE.Group | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [wallGuides, setWallGuides] = useState<WallDistanceGuide[]>([]);
 
+  const isDraggingRef = useRef(false);
   const materialsByKeyRef = useRef<MaterialSlotMap>(new Map());
   const originalBackupRef = useRef<MaterialBackupMap>(new Map());
 
@@ -269,7 +275,7 @@ export function SceneItemMesh({
 
   // Синхронизиране на трансформацията от състоянието към 3D групата
   useEffect(() => {
-    if (!groupObj) return;
+    if (!groupObj || isDraggingRef.current) return;
     const mirrorSign = item.mirrored ? -1 : 1;
     groupObj.position.set(item.position[0], item.position[1], item.position[2]);
     groupObj.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
@@ -323,8 +329,8 @@ export function SceneItemMesh({
       );
     }
 
-    // Магнитно снапване към стените само за разрешените категории (гардероби, кухни, декор и др.)
-    if (canSnapToWall && transformTool === 'translate' && walls.length > 0) {
+    // Магнитно снапване към стените и изчисляване на дистанциите в реално време
+    if (transformTool === 'translate' && walls.length > 0) {
       const currentHalfW = (targetW * Math.abs(groupObj.scale.x)) / 2;
       const currentBackOffset = (targetD * Math.abs(groupObj.scale.z)) / 2;
 
@@ -335,14 +341,18 @@ export function SceneItemMesh({
         {
           backOffsetM: currentBackOffset,
           halfWidthM: currentHalfW,
-          snapDistanceM: 0.3,
+          snapDistanceM: canSnapToWall ? 0.3 : 0,
         }
       );
 
-      if (snapped.snapped) {
+      if (canSnapToWall && snapped.snapped) {
         groupObj.position.x = snapped.position[0];
         groupObj.position.z = snapped.position[2];
         groupObj.rotation.y = snapped.rotationY;
+      }
+
+      if (isDraggingRef.current) {
+        setWallGuides(snapped.guides);
       }
     }
   }
@@ -399,13 +409,22 @@ export function SceneItemMesh({
         )}
       </group>
 
+      {isSelected && wallGuides.length > 0 && (
+        <FurnitureWallGuides guides={wallGuides} />
+      )}
+
       {isSelected && groupObj && (
         <TransformControls
           object={groupObj}
           mode={transformTool}
-          onMouseDown={() => onDraggingChange(true)}
+          onMouseDown={() => {
+            isDraggingRef.current = true;
+            onDraggingChange(true);
+          }}
           onMouseUp={() => {
+            isDraggingRef.current = false;
             onDraggingChange(false);
+            setWallGuides([]);
             commitTransform();
           }}
           onObjectChange={clampObjectTransform}

@@ -9,6 +9,7 @@ import type {
   CatalogTexture,
   FrontStyleType,
   HandleStyleType,
+  KitchenHoodType,
   KitchenLayoutMode,
   KitchenModuleType,
   KitchenShapeType,
@@ -17,6 +18,7 @@ import type {
   ParametricFurnitureKind,
   SceneObject,
   WardrobeDoorOpeningType,
+  WardrobeInteriorLayout,
   WardrobeSpec,
 } from '../types/editor';
 import { ParametricFurnitureMesh } from './ParametricFurnitureMesh';
@@ -30,7 +32,6 @@ interface ParametricBuilderModalProps {
   onConfirm: (name: string, config: ParametricFurnitureConfig) => void;
 }
 
-/** Числово поле, което позволява свободно триене и писане и валидира при Enter / onBlur */
 function NumericInput({
   value,
   min,
@@ -170,6 +171,19 @@ export function ParametricBuilderModal({
       ? { kind: 'wardrobe', wardrobe }
       : { kind: 'kitchen', kitchen };
 
+  const isDoorsOpen =
+    kind === 'wardrobe'
+      ? Boolean(wardrobe.doorsOpen)
+      : Boolean(kitchen.doorsOpen);
+
+  const toggleDoorsOpen = () => {
+    if (kind === 'wardrobe') {
+      setWardrobe((p) => ({ ...p, doorsOpen: !p.doorsOpen }));
+    } else {
+      setKitchen((p) => ({ ...p, doorsOpen: !p.doorsOpen }));
+    }
+  };
+
   const previewDummyObject: SceneObject = {
     instanceId: 'preview-parametric',
     modelId: 'parametric-custom',
@@ -206,6 +220,9 @@ export function ParametricBuilderModal({
 
   const isLShape = kitchen.shape === 'l-left' || kitchen.shape === 'l-right';
   const minWingCm = Math.max(100, kitchen.depthCm + 40);
+  const isLedOn =
+    kitchen.hasUnderCabinetLed !== false && (kitchen.ledIntensity ?? 100) > 0;
+  const currentLedPercent = Math.max(10, kitchen.ledIntensity ?? 100);
 
   return (
     <div
@@ -295,6 +312,24 @@ export function ParametricBuilderModal({
               borderRight: '1px solid #1e293b',
             }}
           >
+            <div
+              style={{
+                position: 'absolute',
+                top: '12px',
+                left: '12px',
+                zIndex: 10,
+              }}
+            >
+              <button
+                type="button"
+                className={`btn ${isDoorsOpen ? 'btn-active' : ''}`}
+                style={{ fontSize: '11.5px', padding: '5px 10px' }}
+                onClick={toggleDoorsOpen}
+              >
+                {isDoorsOpen ? '🚪 Затвори вратите' : '🔓 Отвори вратите (вътрешност)'}
+              </button>
+            </div>
+
             <Canvas shadows dpr={[1, 2]} camera={{ position: [2.4, 1.4, 3.2], fov: 42 }}>
               <color attach="background" args={['#090d16']} />
               <ambientLight intensity={0.7} />
@@ -532,6 +567,24 @@ export function ParametricBuilderModal({
                       <option value="sliding">Плъзгащи се врати</option>
                     </select>
                   </div>
+                </div>
+
+                <div className="axis-field">
+                  <span>Вътрешно разпределение (лостове и рафтове)</span>
+                  <select
+                    className="select-control"
+                    value={wardrobe.interiorLayout ?? 'mixed'}
+                    onChange={(e) =>
+                      setWardrobe((p) => ({
+                        ...p,
+                        interiorLayout: e.target.value as WardrobeInteriorLayout,
+                      }))
+                    }
+                  >
+                    <option value="mixed">Комбинирано (лостове + рафтове)</option>
+                    <option value="rail-and-shelves">Лост + горен рафт навсякъде</option>
+                    <option value="shelves-only">Само рафтове (ракла / бельо)</option>
+                  </select>
                 </div>
 
                 <div
@@ -890,7 +943,6 @@ export function ParametricBuilderModal({
                   </div>
                 </div>
 
-                {/* Форма на кухнята (Права / Г-образна) */}
                 {kitchen.layoutMode !== 'tall-column' && (
                   <div
                     style={{
@@ -1022,6 +1074,133 @@ export function ParametricBuilderModal({
                     />
                   </div>
                 </div>
+
+                {kitchen.layoutMode === 'tall-column' ? (
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '12px',
+                      color: '#e2e8f0',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={kitchen.tallColumnAppliances ?? true}
+                      onChange={(e) =>
+                        setKitchen((p) => ({
+                          ...p,
+                          tallColumnAppliances: e.target.checked,
+                        }))
+                      }
+                    />
+                    <span>Вградена фурна и микровълнова на нивото на очите</span>
+                  </label>
+                ) : (
+                  (kitchen.layoutMode === 'base-and-wall' ||
+                    kitchen.layoutMode === 'wall-only') && (
+                    <>
+                      {/* 1. ОТДЕЛЕН DIV ЗА АСПИРАТОРА */}
+                      <div
+                        style={{
+                          backgroundColor: '#1e293b',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                        }}
+                      >
+                        <div className="axis-field">
+                          <span>Аспиратор над котлоните</span>
+                          <select
+                            className="select-control"
+                            value={kitchen.hoodType ?? 'chimney'}
+                            onChange={(e) =>
+                              setKitchen((p) => ({
+                                ...p,
+                                hoodType: e.target.value as KitchenHoodType,
+                              }))
+                            }
+                          >
+                            <option value="chimney">Декоративен комин (светъл инокс)</option>
+                            <option value="integrated">Вграден телескопичен (подравнен)</option>
+                            <option value="none">Без аспиратор</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* 2. ОТДЕЛЕН DIV ЗА LED ЛЕНТАТА С ON/OFF И СИЛА */}
+                      <div
+                        style={{
+                          backgroundColor: '#1e293b',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                          }}
+                        >
+                          <span style={{ fontSize: '12px', color: '#e2e8f0' }}>
+                            💡 LED лента под горните шкафове
+                          </span>
+                          <button
+                            type="button"
+                            className={`btn ${isLedOn ? 'btn-active' : ''}`}
+                            style={{
+                              minWidth: '58px',
+                              padding: '3px 10px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                            }}
+                            onClick={() =>
+                              setKitchen((p) => ({
+                                ...p,
+                                hasUnderCabinetLed: !isLedOn,
+                                ledIntensity: !isLedOn
+                                  ? Math.max(10, p.ledIntensity ?? 100)
+                                  : p.ledIntensity ?? 100,
+                              }))
+                            }
+                          >
+                            {isLedOn ? 'ON' : 'OFF'}
+                          </button>
+                        </div>
+
+                        {isLedOn && (
+                          <div className="axis-field">
+                            <span>
+                              Сила на светене:{' '}
+                              <strong style={{ color: '#fde68a' }}>
+                                {currentLedPercent}%
+                              </strong>
+                            </span>
+                            <input
+                              type="range"
+                              min={10}
+                              max={200}
+                              step={10}
+                              value={currentLedPercent}
+                              onChange={(e) =>
+                                setKitchen((p) => ({
+                                  ...p,
+                                  hasUnderCabinetLed: true,
+                                  ledIntensity: Number(e.target.value),
+                                }))
+                              }
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )
+                )}
 
                 <div
                   className="axis-grid"

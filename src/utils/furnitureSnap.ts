@@ -5,44 +5,104 @@ export interface WallSnapOptions {
   backOffsetM: number;
   /** Половината от ширината на мебелта (от центъра Y-ос до левия/десния край по X) */
   halfWidthM: number;
-  /** Ако кухнята е Г-образна: посока на крилото ('left' или 'right'), за да залепне и за страничната стена */
+  /** Ако кухнята е Г-образна: посока на крилото ('left' или 'right') */
   lWingSide?: 'left' | 'right' | null;
-  /** Обща дълбочина/разстояние от центъра до външния ръб на Г-крилото */
-  lWingBackOffsetM?: number;
-  /** Разстояние на задействане на магнита (по подразбиране 0.32 м) */
+  /** Дължина на Г-крилото (за по-широк обхват при ъглов снап) */
+  lWingLengthM?: number;
+  /** Разстояние на задействане на магнита (по подразбиране 0.34 м) */
   snapDistanceM?: number;
+}
+
+export interface WallDistanceGuide {
+  start: [number, number];
+  end: [number, number];
+  distanceM: number;
+  snapped: boolean;
 }
 
 export interface WallSnapResult {
   position: [number, number, number];
   rotationY: number;
   snapped: boolean;
+  cornerSnapped: boolean;
+  guides: WallDistanceGuide[];
 }
 
 interface WallFaceCandidate {
   wall: WallSegment;
-  /** Единичен вектор по дължината на стената (от start към end) */
   ux: number;
   uz: number;
-  /** Дължина на стената */
   len: number;
-  /** Единичен нормален вектор сочещ навън от стената към стаята */
   nx: number;
   nz: number;
-  /** Начална точка на лицевата равнина на стената */
   faceStartX: number;
   faceStartZ: number;
-  /** Перпендикулярно разстояние от текущия център до лицевата равнина */
   perpDist: number;
-  /** Проекция по дължината на стената */
   proj: number;
-  /** Y-ротация на обекта, така че локалното -Z да сочи към стената */
   targetRotY: number;
 }
 
 /**
- * Прилепва мебел към най-близката стена (или ъгъл от две перпендикулярни стени),
- * така че гърбът ѝ (-Z) да застане плътно до повърхността на стената без врязване.
+ * Намира разстоянието от точка по посока (dirX, dirZ) до най-близката стена в стаята.
+ */
+function raycastToNearestWall(
+  originX: number,
+  originZ: number,
+  dirX: number,
+  dirZ: number,
+  walls: WallSegment[],
+  maxDistM = 8.0
+): { hitX: number; hitZ: number; dist: number } | null {
+  let bestDist = maxDistM;
+  let bestHit: { hitX: number; hitZ: number; dist: number } | null = null;
+
+  for (const wall of walls) {
+    const dx = wall.end[0] - wall.start[0];
+    const dz = wall.end[1] - wall.start[1];
+    const len = Math.hypot(dx, dz);
+    if (len < 0.05) continue;
+
+    const ux = dx / len;
+    const uz = dz / len;
+    const halfT = Math.max(0.05, wall.thicknessM) / 2;
+
+    const sides: [number, number][] = [
+      [-uz, ux],
+      [uz, -ux],
+    ];
+
+    for (const [nx, nz] of sides) {
+      // Лъчът трябва да удря стената откъм лицевата ѝ страна
+      const denom = dirX * nx + dirZ * nz;
+      if (denom >= -0.05) continue;
+
+      const faceStartX = wall.start[0] + nx * halfT;
+      const faceStartZ = wall.start[1] + nz * halfT;
+
+      const t =
+        ((faceStartX - originX) * nx + (faceStartZ - originZ) * nz) / denom;
+      if (t < -0.02 || t > bestDist) continue;
+
+      const hitX = originX + dirX * t;
+      const hitZ = originZ + dirZ * t;
+
+      const proj = (hitX - faceStartX) * ux + (hitZ - faceStartZ) * uz;
+      if (proj < -0.05 || proj > len + 0.05) continue;
+
+      const clampedDist = Math.max(0, t);
+      if (clampedDist < bestDist) {
+        bestDist = clampedDist;
+        bestHit = { hitX, hitZ, dist: clampedDist };
+      }
+    }
+  }
+
+  return bestHit;
+}
+
+/**
+ * Прилепва мебел към най-близката стена или вътрешен ъгъл на две перпендикулярни стени,
+ * и изчислява динамичните дистанции (в метри) от левия и десния край до съседните стени.
  */
 export function snapFurnitureToWalls(
   rawPos: [number, number, number],
@@ -50,9 +110,10 @@ export function snapFurnitureToWalls(
   walls: WallSegment[],
   options: WallSnapOptions
 ): WallSnapResult {
-  const snapRadius = options.snapDistanceM ?? 0.32;
+  const snapRadius = options.snapDistanceM ?? 0.34;
   const backOffset = Math.max(0.01, options.backOffsetM);
   const halfW = Math.max(0.05, options.halfWidthM);
+  const wingLen = Math.max(0, options.lWingLengthM ?? 0);
 
   const candidates: WallFaceCandidate[] = [];
 
@@ -66,7 +127,6 @@ export function snapFurnitureToWalls(
     const uz = dz / len;
     const halfT = Math.max(0.05, wall.thicknessM) / 2;
 
-    // Двете страни на стената: front (+normal) и back (-normal)
     const sides: [number, number][] = [
       [-uz, ux],
       [uz, -ux],
@@ -80,96 +140,140 @@ export function snapFurnitureToWalls(
       const vz = rawPos[2] - faceStartZ;
 
       const proj = vx * ux + vz * uz;
-      // Проверяваме дали обектът е в обхвата на стената (с толеранс колкото ширината му)
-      if (proj < -halfW || proj > len + halfW) continue;
+      const reachTolerance = halfW + wingLen + 0.35;
+      if (proj < -reachTolerance || proj > len + reachTolerance) continue;
 
       const perpDist = vx * nx + vz * nz;
-      // Задействаме снап, когато гърбът на мебелта е близо до повърхността на стената
-      const gapToWall = Math.abs(perpDist - backOffset);
+      const targetRotY = Math.atan2(nx, nz);
 
-      if (gapToWall <= snapRadius && perpDist >= -0.15) {
-        // Локалното -Z на обекта след завъртане на rotY е (-sin(rotY), -cos(rotY)).
-        // Искаме (-sin(rotY), -cos(rotY)) == (-nx, -nz) => sin(rotY) = nx, cos(rotY) = nz
-        const targetRotY = Math.atan2(nx, nz);
+      candidates.push({
+        wall,
+        ux,
+        uz,
+        len,
+        nx,
+        nz,
+        faceStartX,
+        faceStartZ,
+        perpDist,
+        proj,
+        targetRotY,
+      });
+    }
+  }
 
-        candidates.push({
-          wall,
-          ux,
-          uz,
-          len,
-          nx,
-          nz,
-          faceStartX,
-          faceStartZ,
-          perpDist,
-          proj,
-          targetRotY,
-        });
+  // Филтрираме кандидатите за основна задна стена
+  const backCandidates = candidates.filter((c) => {
+    const withinSpan = c.proj >= -halfW * 0.6 && c.proj <= c.len + halfW * 0.6;
+    const gapToWall = Math.abs(c.perpDist - backOffset);
+    return withinSpan && gapToWall <= snapRadius && c.perpDist >= -0.18;
+  });
+
+  let finalX = rawPos[0];
+  let finalZ = rawPos[2];
+  let rotY = currentRotY;
+  let snapped = false;
+  let cornerSnapped = false;
+
+  if (backCandidates.length > 0) {
+    // Приоритет на стената с най-малък gap до гърба (и близка ориентация до текущата)
+    backCandidates.sort((a, b) => {
+      const gapDiff =
+        Math.abs(a.perpDist - backOffset) - Math.abs(b.perpDist - backOffset);
+      if (Math.abs(gapDiff) > 0.06) return gapDiff;
+      const angA = Math.abs(Math.atan2(Math.sin(a.targetRotY - currentRotY), Math.cos(a.targetRotY - currentRotY)));
+      const angB = Math.abs(Math.atan2(Math.sin(b.targetRotY - currentRotY), Math.cos(b.targetRotY - currentRotY)));
+      return angA - angB;
+    });
+
+    const primary = backCandidates[0];
+    snapped = true;
+    rotY = primary.targetRotY;
+
+    let clampedProj = primary.proj;
+    if (primary.len >= halfW * 2) {
+      if (clampedProj < halfW && clampedProj > halfW - 0.28) {
+        clampedProj = halfW;
+      } else if (
+        clampedProj > primary.len - halfW &&
+        clampedProj < primary.len - halfW + 0.28
+      ) {
+        clampedProj = primary.len - halfW;
+      }
+    }
+
+    finalX =
+      primary.faceStartX + primary.ux * clampedProj + primary.nx * backOffset;
+    finalZ =
+      primary.faceStartZ + primary.uz * clampedProj + primary.nz * backOffset;
+
+    // Проверка за втора перпендикулярна стена (ъгъл на стаята)
+    const rightX = Math.cos(rotY);
+    const rightZ = -Math.sin(rotY);
+
+    // По-силен магнит за страничната стена, ако кухнята е Г-образна от тази страна
+    const leftSnapRadius = options.lWingSide === 'left' ? snapRadius + 0.14 : snapRadius;
+    const rightSnapRadius = options.lWingSide === 'right' ? snapRadius + 0.14 : snapRadius;
+
+    for (const sec of candidates) {
+      if (sec.wall.id === primary.wall.id) continue;
+      const dotNormals = Math.abs(primary.nx * sec.nx + primary.nz * sec.nz);
+      if (dotNormals > 0.2) continue;
+
+      const sideDot = rightX * sec.nx + rightZ * sec.nz;
+      if (Math.abs(sideDot) < 0.85) continue;
+
+      // sideDot > 0 => стената е отляво на мебела (нормалата ѝ сочи надясно)
+      // sideDot < 0 => стената е отдясно на мебела (нормалата ѝ сочи наляво)
+      const isLeftWall = sideDot > 0;
+      const activeSideRadius = isLeftWall ? leftSnapRadius : rightSnapRadius;
+
+      const sidePerpDist =
+        (finalX - sec.faceStartX) * sec.nx + (finalZ - sec.faceStartZ) * sec.nz;
+
+      if (Math.abs(sidePerpDist - halfW) <= activeSideRadius) {
+        const correction = halfW - sidePerpDist;
+        finalX += sec.nx * correction;
+        finalZ += sec.nz * correction;
+        cornerSnapped = true;
+        break;
       }
     }
   }
 
-  if (candidates.length === 0) {
-    return {
-      position: rawPos,
-      rotationY: currentRotY,
-      snapped: false,
-    };
-  }
-
-  // Избираме стената, чиято повърхност е най-близо до гърба на мебелта
-  candidates.sort(
-    (a, b) =>
-      Math.abs(a.perpDist - backOffset) - Math.abs(b.perpDist - backOffset)
-  );
-  const primary = candidates[0];
-
-  // Позиционираме центъра на разстояние backOffset пред повърхността на основната стена
-  let clampedProj = primary.proj;
-  // Ако мебелта се побира в стената, не позволяваме да излиза извън краищата ѝ при леко плъзгане
-  if (primary.len >= halfW * 2) {
-    if (clampedProj < halfW && clampedProj > halfW - 0.25) {
-      clampedProj = halfW;
-    } else if (
-      clampedProj > primary.len - halfW &&
-      clampedProj < primary.len - halfW + 0.25
-    ) {
-      clampedProj = primary.len - halfW;
-    }
-  }
-
-  let finalX =
-    primary.faceStartX + primary.ux * clampedProj + primary.nx * backOffset;
-  let finalZ =
-    primary.faceStartZ + primary.uz * clampedProj + primary.nz * backOffset;
-
-  // Проверка за втора перпендикулярна стена (снапване в ъгъл на стая / Г-образна кухня)
-  const rotY = primary.targetRotY;
-  // Локалната ос +X на обекта в световни координати е (cos(rotY), -sin(rotY))
+  // Изчисляване на визуални размерни линии от левия и десния край на мебела към стените
+  const guides: WallDistanceGuide[] = [];
   const rightX = Math.cos(rotY);
   const rightZ = -Math.sin(rotY);
+  const backX = -Math.sin(rotY);
+  const backZ = -Math.cos(rotY);
 
-  for (const sec of candidates) {
-    if (sec.wall.id === primary.wall.id) continue;
-    // Проверяваме дали втората стена е приблизително перпендикулярна на основната
-    const dotNormals = Math.abs(primary.nx * sec.nx + primary.nz * sec.nz);
-    if (dotNormals > 0.2) continue;
+  // Точка на левия и десния край (близо до задната линия на мебела)
+  const sampleBackShift = Math.min(backOffset * 0.5, 0.22);
+  const leftEdgeX = finalX - rightX * halfW + backX * sampleBackShift;
+  const leftEdgeZ = finalZ - rightZ * halfW + backZ * sampleBackShift;
 
-    // Втората стена може да е отляво или отдясно на обекта
-    const sideDot = rightX * sec.nx + rightZ * sec.nz;
-    if (Math.abs(sideDot) < 0.8) continue;
+  const rightEdgeX = finalX + rightX * halfW + backX * sampleBackShift;
+  const rightEdgeZ = finalZ + rightZ * halfW + backZ * sampleBackShift;
 
-    // Разстояние от центъра на обекта до повърхността на страничната стена
-    const sidePerpDist =
-      (finalX - sec.faceStartX) * sec.nx + (finalZ - sec.faceStartZ) * sec.nz;
+  const leftHit = raycastToNearestWall(leftEdgeX, leftEdgeZ, -rightX, -rightZ, walls, 6.0);
+  if (leftHit && leftHit.dist <= 5.0) {
+    guides.push({
+      start: [leftEdgeX, leftEdgeZ],
+      end: [leftHit.hitX, leftHit.hitZ],
+      distanceM: leftHit.dist,
+      snapped: leftHit.dist < 0.015,
+    });
+  }
 
-    const desiredSideOffset = halfW;
-    if (Math.abs(sidePerpDist - desiredSideOffset) <= snapRadius) {
-      const correction = desiredSideOffset - sidePerpDist;
-      finalX += sec.nx * correction;
-      finalZ += sec.nz * correction;
-      break;
-    }
+  const rightHit = raycastToNearestWall(rightEdgeX, rightEdgeZ, rightX, rightZ, walls, 6.0);
+  if (rightHit && rightHit.dist <= 5.0) {
+    guides.push({
+      start: [rightEdgeX, rightEdgeZ],
+      end: [rightHit.hitX, rightHit.hitZ],
+      distanceM: rightHit.dist,
+      snapped: rightHit.dist < 0.015,
+    });
   }
 
   return {
@@ -179,6 +283,8 @@ export function snapFurnitureToWalls(
       Number(finalZ.toFixed(4)),
     ],
     rotationY: Number(rotY.toFixed(4)),
-    snapped: true,
+    snapped,
+    cornerSnapped,
+    guides,
   };
 }

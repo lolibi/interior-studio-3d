@@ -137,6 +137,7 @@ export type ParametricFurnitureKind = 'wardrobe' | 'kitchen';
 export type FrontStyleType = 'flat' | 'shaker' | 'gola';
 export type HandleStyleType = 'vertical' | 'horizontal' | 'knob' | 'none';
 export type WardrobeDoorOpeningType = 'hinged' | 'sliding';
+export type WardrobeInteriorLayout = 'rail-and-shelves' | 'shelves-only' | 'mixed';
 export type KitchenShapeType = 'straight' | 'l-left' | 'l-right';
 export type KitchenLayoutMode =
   | 'base-only'
@@ -144,6 +145,7 @@ export type KitchenLayoutMode =
   | 'wall-only'
   | 'tall-column';
 export type KitchenModuleType = 'doors' | 'drawers' | 'oven' | 'sink';
+export type KitchenHoodType = 'chimney' | 'integrated' | 'none';
 
 export interface WardrobeSpec {
   widthCm: number;
@@ -156,6 +158,8 @@ export interface WardrobeSpec {
   hasTopBridge: boolean;
   topBridgeHeightCm: number;
   bottomDrawersCount: number;
+  interiorLayout?: WardrobeInteriorLayout;
+  doorsOpen?: boolean;
   frontStyle: FrontStyleType;
   handleStyle: HandleStyleType;
   corpusColor: string;
@@ -184,6 +188,12 @@ export interface KitchenSpec {
   tallCabinetHeightCm: number;
   moduleCount: number;
   modulePattern: KitchenModuleType[];
+  hoodType?: KitchenHoodType;
+  hasUnderCabinetLed?: boolean;
+  /** Сила на LED осветлението под горните шкафове в проценти (0 - 200%) */
+  ledIntensity?: number;
+  tallColumnAppliances?: boolean;
+  doorsOpen?: boolean;
   frontStyle: FrontStyleType;
   handleStyle: HandleStyleType;
   corpusColor: string;
@@ -215,6 +225,8 @@ export const DEFAULT_WARDROBE_SPEC: WardrobeSpec = {
   hasTopBridge: false,
   topBridgeHeightCm: 45,
   bottomDrawersCount: 0,
+  interiorLayout: 'mixed',
+  doorsOpen: false,
   frontStyle: 'flat',
   handleStyle: 'vertical',
   corpusColor: '#d6c7b2',
@@ -243,6 +255,11 @@ export const DEFAULT_KITCHEN_SPEC: KitchenSpec = {
   tallCabinetHeightCm: 215,
   moduleCount: 4,
   modulePattern: ['doors', 'drawers', 'oven', 'sink'],
+  hoodType: 'chimney',
+  hasUnderCabinetLed: true,
+  ledIntensity: 100,
+  tallColumnAppliances: true,
+  doorsOpen: false,
   frontStyle: 'flat',
   handleStyle: 'horizontal',
   corpusColor: '#e2e8f0',
