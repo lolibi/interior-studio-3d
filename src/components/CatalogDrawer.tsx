@@ -18,6 +18,7 @@ export interface CatalogDrawerProps {
   currentUser: AuthUser | null;
   systemSettings: SystemSettings | null;
   onRefreshCatalog: () => Promise<void>;
+  onOpenParametricBuilder: () => void;
   onSelectModel: (model: CatalogModel) => void;
   onApplyTextureToSelected: (texture: CatalogTexture) => void;
   onApplyFloorTexture: (texture: CatalogTexture) => void;
@@ -42,6 +43,7 @@ export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
   currentUser,
   systemSettings,
   onRefreshCatalog,
+  onOpenParametricBuilder,
   onSelectModel,
   onApplyTextureToSelected,
   onApplyFloorTexture,
@@ -49,14 +51,12 @@ export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
 }) => {
   const [tab, setTab] = useState<'models' | 'textures'>('models');
 
-  // Филтри за 3D модели в каталога
   const [modelSearch, setModelSearch] = useState('');
   const [modelCategory, setModelCategory] = useState<string>('all');
   const [modelColor, setModelColor] = useState<string>('all');
   const [modelMaterial, setModelMaterial] = useState<string>('all');
   const [modelPage, setModelPage] = useState<number>(1);
 
-  // Филтри за текстури в каталога
   const [textureSearch, setTextureSearch] = useState('');
   const [textureCategory, setTextureCategory] = useState<string>('all');
   const [textureColor, setTextureColor] = useState<string>('all');
@@ -210,6 +210,25 @@ export const CatalogDrawer: React.FC<CatalogDrawerProps> = ({
 
   return (
     <aside className="catalog-drawer">
+      <div
+        style={{
+          padding: '10px 10px 6px',
+          backgroundColor: '#0f172a',
+          borderBottom: '1px solid #1e293b',
+          flexShrink: 0,
+        }}
+      >
+        <button
+          type="button"
+          className="btn btn-active"
+          style={{ width: '100%', padding: '7px 10px', fontSize: '12px', fontWeight: 600 }}
+          onClick={onOpenParametricBuilder}
+          title="Създай гардероб или кухня по индивидуални размери"
+        >
+          ✨ Създай Гардероб / Кухня
+        </button>
+      </div>
+
       <div className="catalog-tabs">
         <button
           type="button"

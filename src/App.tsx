@@ -15,22 +15,22 @@ import type {
   TransformTool,
 } from './types/editor';
 import {
-  createRectangleRoomWalls,
-  createRoomFromTemplate,
+  createDefaultRoomConfig,
+  createStarterWalls,
+  DEFAULT_OVERLAY_SETTINGS,
   getWallAngleDeg,
   getWallLengthM,
   isSameSurface,
-  ROOM_TEMPLATES,
 } from './types/room';
 import type {
   FloorZone,
   OpeningType,
   RoomConfig,
-  RoomTemplateKey,
   SelectedFloorVertex,
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
+  ViewportOverlaySettings,
   WallOpening,
   WallSegment,
 } from './types/room';
@@ -58,41 +58,71 @@ import type { DiscoveredMaterialSlot } from './components/SceneItemMesh';
 import { ParametricBuilderModal } from './components/ParametricBuilderModal';
 import { ProjectBomModal } from './components/ProjectBomModal';
 import { AuthModal } from './components/AuthModal';
-import { AdminDashboardPage } from './components/AdminDashboardPage';
+import { AdminPage } from './components/AdminPage';
 
 interface SceneHistorySnapshot {
   room: RoomConfig;
   objects: SceneObject[];
 }
 
-function createInitialRoom(): RoomConfig {
-  return {
-    walls: createRectangleRoomWalls(4.5, 3.8, 0.15),
-    ceilingHeightM: 2.65,
-    ceilingColor: '#f8fafc',
-    showCeiling: false,
-    floorZones: [],
-    openings: [],
-  };
-}
-
 function normalizeLoadedRoom(rawRoom: any): RoomConfig {
+  const base = createDefaultRoomConfig();
   if (!rawRoom || typeof rawRoom !== 'object') {
-    return createInitialRoom();
+    return base;
   }
 
   // Съвместимост със стари проекти, запазени като правоъгълник (widthM / depthM / heightM)
   if (!Array.isArray(rawRoom.walls)) {
-    const w = Number(rawRoom.widthM) > 0 ? Number(rawRoom.widthM) : 4.5;
-    const d = Number(rawRoom.depthM) > 0 ? Number(rawRoom.depthM) : 3.8;
+    const w = Number(rawRoom.widthM) > 0 ? Number(rawRoom.widthM) : 5.0;
+    const d = Number(rawRoom.depthM) > 0 ? Number(rawRoom.depthM) : 4.0;
     const h = Number(rawRoom.heightM) > 0 ? Number(rawRoom.heightM) : 2.65;
-    const walls = createRectangleRoomWalls(w, d, 0.15).map((wall) => ({
-      ...wall,
-      frontColor: rawRoom.wallColor || '#f1f5f9',
-      backColor: rawRoom.wallColor || '#f1f5f9',
-      frontTextureId: rawRoom.wallTextureId || undefined,
-      backTextureId: rawRoom.wallTextureId || undefined,
-    }));
+
+    const walls: WallSegment[] = [
+      {
+        id: 'wall-migrated-1',
+        start: [-w / 2, -d / 2],
+        end: [w / 2, -d / 2],
+        thicknessM: 0.15,
+        frontColor: rawRoom.wallColor || '#f1f5f9',
+        backColor: rawRoom.wallColor || '#f1f5f9',
+        frontTextureId: rawRoom.wallTextureId || undefined,
+        backTextureId: rawRoom.wallTextureId || undefined,
+        openings: [],
+      },
+      {
+        id: 'wall-migrated-2',
+        start: [w / 2, -d / 2],
+        end: [w / 2, d / 2],
+        thicknessM: 0.15,
+        frontColor: rawRoom.wallColor || '#f1f5f9',
+        backColor: rawRoom.wallColor || '#f1f5f9',
+        frontTextureId: rawRoom.wallTextureId || undefined,
+        backTextureId: rawRoom.wallTextureId || undefined,
+        openings: [],
+      },
+      {
+        id: 'wall-migrated-3',
+        start: [w / 2, d / 2],
+        end: [-w / 2, d / 2],
+        thicknessM: 0.15,
+        frontColor: rawRoom.wallColor || '#f1f5f9',
+        backColor: rawRoom.wallColor || '#f1f5f9',
+        frontTextureId: rawRoom.wallTextureId || undefined,
+        backTextureId: rawRoom.wallTextureId || undefined,
+        openings: [],
+      },
+      {
+        id: 'wall-migrated-4',
+        start: [-w / 2, d / 2],
+        end: [-w / 2, -d / 2],
+        thicknessM: 0.15,
+        frontColor: rawRoom.wallColor || '#f1f5f9',
+        backColor: rawRoom.wallColor || '#f1f5f9',
+        frontTextureId: rawRoom.wallTextureId || undefined,
+        backTextureId: rawRoom.wallTextureId || undefined,
+        openings: [],
+      },
+    ];
 
     const floorZones: FloorZone[] =
       rawRoom.floorTextureId || rawRoom.floorColor
@@ -107,26 +137,40 @@ function normalizeLoadedRoom(rawRoom: any): RoomConfig {
                 [-w / 2, d / 2],
               ],
               color: rawRoom.floorColor || '#b08968',
+              roughness: 0.55,
+              metalness: 0.05,
               textureId: rawRoom.floorTextureId || undefined,
             },
           ]
         : [];
 
     return {
+      ...base,
       walls,
       ceilingHeightM: h,
-      ceilingColor: '#f8fafc',
-      showCeiling: false,
       floorZones,
-      openings: [],
     };
   }
 
   return {
+    templateId: rawRoom.templateId ?? null,
+    templateName: rawRoom.templateName ?? null,
+    ceilingHeightM:
+      Number(rawRoom.ceilingHeightM) > 0 ? Number(rawRoom.ceilingHeightM) : 2.65,
+    defaultThicknessM:
+      Number(rawRoom.defaultThicknessM) > 0
+        ? Number(rawRoom.defaultThicknessM)
+        : 0.15,
+    ceilingColor: rawRoom.ceilingColor || '#f8fafc',
+    showCeiling: Boolean(rawRoom.showCeiling),
     walls: rawRoom.walls.map((w: any, idx: number) => ({
       id: w.id || `wall-${idx}-${Date.now()}`,
-      start: Array.isArray(w.start) ? [Number(w.start[0]) || 0, Number(w.start[1]) || 0] : [0, 0],
-      end: Array.isArray(w.end) ? [Number(w.end[0]) || 0, Number(w.end[1]) || 0] : [1, 0],
+      start: Array.isArray(w.start)
+        ? [Number(w.start[0]) || 0, Number(w.start[1]) || 0]
+        : [0, 0],
+      end: Array.isArray(w.end)
+        ? [Number(w.end[0]) || 0, Number(w.end[1]) || 0]
+        : [1, 0],
       thicknessM: Number(w.thicknessM) > 0 ? Number(w.thicknessM) : 0.15,
       frontColor: w.frontColor || '#f1f5f9',
       backColor: w.backColor || '#f1f5f9',
@@ -146,13 +190,24 @@ function normalizeLoadedRoom(rawRoom: any): RoomConfig {
       endUvw: w.endUvw,
       openings: Array.isArray(w.openings) ? w.openings : [],
     })),
-    ceilingHeightM:
-      Number(rawRoom.ceilingHeightM) > 0 ? Number(rawRoom.ceilingHeightM) : 2.65,
-    ceilingColor: rawRoom.ceilingColor || '#f8fafc',
-    showCeiling: Boolean(rawRoom.showCeiling),
-    floorZones: Array.isArray(rawRoom.floorZones) ? rawRoom.floorZones : [],
     openings: Array.isArray(rawRoom.openings) ? rawRoom.openings : [],
-    floorplan: rawRoom.floorplan,
+    floorZones: Array.isArray(rawRoom.floorZones)
+      ? rawRoom.floorZones.map((z: any, idx: number) => ({
+          id: z.id || `zone-${idx}-${Date.now()}`,
+          name: z.name || `Зона ${idx + 1}`,
+          points: Array.isArray(z.points) ? z.points : [],
+          color: z.color || '#b08968',
+          roughness: typeof z.roughness === 'number' ? z.roughness : 0.55,
+          metalness: typeof z.metalness === 'number' ? z.metalness : 0.05,
+          textureId: z.textureId ?? undefined,
+          textureRotationDeg: z.textureRotationDeg,
+          uvw: z.uvw,
+        }))
+      : [],
+    savedCameras: Array.isArray(rawRoom.savedCameras)
+      ? rawRoom.savedCameras
+      : [],
+    floorplan: rawRoom.floorplan ?? null,
   };
 }
 
@@ -165,13 +220,25 @@ function normalizeLoadedObjects(rawObjects: any): SceneObject[] {
     name: o.name || 'Обект',
     category: o.category || 'other',
     position: Array.isArray(o.position)
-      ? [Number(o.position[0]) || 0, Number(o.position[1]) || 0, Number(o.position[2]) || 0]
+      ? [
+          Number(o.position[0]) || 0,
+          Number(o.position[1]) || 0,
+          Number(o.position[2]) || 0,
+        ]
       : [0, 0, 0],
     rotation: Array.isArray(o.rotation)
-      ? [Number(o.rotation[0]) || 0, Number(o.rotation[1]) || 0, Number(o.rotation[2]) || 0]
+      ? [
+          Number(o.rotation[0]) || 0,
+          Number(o.rotation[1]) || 0,
+          Number(o.rotation[2]) || 0,
+        ]
       : [0, 0, 0],
     scale: Array.isArray(o.scale)
-      ? [Number(o.scale[0]) || 1, Number(o.scale[1]) || 1, Number(o.scale[2]) || 1]
+      ? [
+          Number(o.scale[0]) || 1,
+          Number(o.scale[1]) || 1,
+          Number(o.scale[2]) || 1,
+        ]
       : [1, 1, 1],
   }));
 }
@@ -184,7 +251,9 @@ export function App() {
 
   // Потребителска сесия
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(
+    null
+  );
   const [authModalOpen, setAuthModalOpen] = useState(false);
 
   // Каталог от сървъра
@@ -217,24 +286,28 @@ export function App() {
     canUndo,
     canRedo,
   } = useHistoryState<SceneHistorySnapshot>({
-    room: createInitialRoom(),
+    room: createDefaultRoomConfig(),
     objects: [],
   });
 
   const room = sceneState.room;
   const sceneObjects = sceneState.objects;
 
-  // Инструменти и изглед
+  // Инструменти, изглед и настройки на работното поле
   const [activeTool, setActiveTool] = useState<EditorTool>('select');
   const [placementMode, setPlacementMode] = useState<PlacementMode>('free');
   const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
+  const [overlaySettings, setOverlaySettings] =
+    useState<ViewportOverlaySettings>(DEFAULT_OVERLAY_SETTINGS);
   const [catalogOpen, setCatalogOpen] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<ViewportCameraMode>('3d');
-  const [unit] = useState<DisplayUnit>('m');
   const [roomPanelOpen, setRoomPanelOpen] = useState<boolean>(false);
 
+  const unit: DisplayUnit = overlaySettings.dimensionUnit;
+
   // Модали
-  const [parametricModalOpen, setParametricModalOpen] = useState<boolean>(false);
+  const [parametricModalOpen, setParametricModalOpen] =
+    useState<boolean>(false);
   const [editingParametricObj, setEditingParametricObj] =
     useState<SceneObject | null>(null);
   const [bomModalOpen, setBomModalOpen] = useState<boolean>(false);
@@ -384,17 +457,22 @@ export function App() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchMe()
-      .then((res) => {
-        setCurrentUser(res.user);
-        setSystemSettings(res.settings);
-      })
-      .catch(() => {});
-    refreshCatalogAndScenes();
-  }, [refreshCatalogAndScenes]);
+  const refreshMe = useCallback(async () => {
+    try {
+      const res = await fetchMe();
+      setCurrentUser(res.user);
+      setSystemSettings(res.settings);
+    } catch {
+      // ignore
+    }
+  }, []);
 
-  // Клавишни комбинации (Escape, Undo, Redo, Delete)
+  useEffect(() => {
+    refreshMe();
+    refreshCatalogAndScenes();
+  }, [refreshMe, refreshCatalogAndScenes]);
+
+  // Клавишни комбинации (Escape, Undo, Redo)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -480,7 +558,7 @@ export function App() {
 
   const handleResetScene = () => {
     resetHistory({
-      room: createInitialRoom(),
+      room: createDefaultRoomConfig(),
       objects: [],
     });
     setCurrentSceneId(undefined);
@@ -509,7 +587,7 @@ export function App() {
         id: `wall-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         start: last,
         end: pt,
-        thicknessM: 0.15,
+        thicknessM: room.defaultThicknessM || 0.15,
         frontColor: '#f1f5f9',
         backColor: '#f1f5f9',
         openings: [],
@@ -526,7 +604,6 @@ export function App() {
         true
       );
 
-      // Ако затворим контура към началната точка, приключваме веригата
       if (
         prev.length >= 2 &&
         Math.hypot(pt[0] - prev[0][0], pt[1] - prev[0][1]) < 0.08
@@ -553,6 +630,8 @@ export function App() {
           name: `Зона ${(room.floorZones ?? []).length + 1}`,
           points: prev,
           color: '#b08968',
+          roughness: 0.55,
+          metalness: 0.05,
         };
         setSceneState(
           (curr) => ({
@@ -594,7 +673,7 @@ export function App() {
                     widthM: Number((curr.room.floorplan.widthM * ratio).toFixed(2)),
                     depthM: Number((curr.room.floorplan.depthM * ratio).toFixed(2)),
                   }
-                : undefined,
+                : null,
             },
           }),
           true
@@ -642,6 +721,8 @@ export function App() {
       name: `Под ${(room.floorZones ?? []).length + 1}`,
       points,
       color: options?.textureId ? '#ffffff' : '#b08968',
+      roughness: 0.55,
+      metalness: 0.05,
       textureId: options?.textureId || undefined,
     };
 
@@ -706,13 +787,25 @@ export function App() {
               if (side === 'end') updated.endUvw = undefined;
             } else if (patch.uvwPatch) {
               if (side === 'front')
-                updated.frontUvw = { ...(updated.frontUvw ?? {}), ...patch.uvwPatch };
+                updated.frontUvw = {
+                  ...(updated.frontUvw ?? {}),
+                  ...patch.uvwPatch,
+                };
               if (side === 'back')
-                updated.backUvw = { ...(updated.backUvw ?? {}), ...patch.uvwPatch };
+                updated.backUvw = {
+                  ...(updated.backUvw ?? {}),
+                  ...patch.uvwPatch,
+                };
               if (side === 'start')
-                updated.startUvw = { ...(updated.startUvw ?? {}), ...patch.uvwPatch };
+                updated.startUvw = {
+                  ...(updated.startUvw ?? {}),
+                  ...patch.uvwPatch,
+                };
               if (side === 'end')
-                updated.endUvw = { ...(updated.endUvw ?? {}), ...patch.uvwPatch };
+                updated.endUvw = {
+                  ...(updated.endUvw ?? {}),
+                  ...patch.uvwPatch,
+                };
             }
           }
           return updated;
@@ -795,7 +888,9 @@ export function App() {
     if (targetMode === 'selected') {
       if (selectedSurfaces.length > 0) {
         handleApplySurfaceBatch({ textureId: texture.id, color: '#ffffff' });
-        showStatus(`Приложена текстура „${texture.name}“ върху избраните повърхности.`);
+        showStatus(
+          `Приложена текстура „${texture.name}“ върху избраните повърхности.`
+        );
         return;
       }
       if (selectedObject) {
@@ -821,7 +916,9 @@ export function App() {
           }),
           true
         );
-        showStatus(`Приложена текстура „${texture.name}“ върху ${selectedObject.name}.`);
+        showStatus(
+          `Приложена текстура „${texture.name}“ върху ${selectedObject.name}.`
+        );
         return;
       }
       showStatus('Първо избери стена, под или 3D обект в сцената.');
@@ -830,7 +927,9 @@ export function App() {
 
     if (targetMode === 'floor') {
       if ((room.floorZones ?? []).length === 0) {
-        showStatus('Кликни върху пода в 3D, за да се създаде подова зона, или очертай зона.');
+        showStatus(
+          'Кликни върху пода в 3D, за да се създаде подова зона, или очертай зона.'
+        );
         return;
       }
       setSceneState(
@@ -919,19 +1018,19 @@ export function App() {
     showStatus(`Създаден параметричен модул: ${name}`);
   };
 
+  // АДМИН СТРАНИЦА (/admin)
   if (isAdminRoute) {
     return (
-      <AdminDashboardPage
+      <AdminPage
         currentUser={currentUser}
         systemSettings={systemSettings}
-        onBackToEditor={() => {
+        onSystemSettingsUpdated={(next) => setSystemSettings(next)}
+        onRefreshCurrentUser={refreshMe}
+        onCatalogUpdated={refreshCatalogAndScenes}
+        onExitToStudio={() => {
           window.history.pushState({}, '', '/');
           setIsAdminRoute(false);
           refreshCatalogAndScenes();
-        }}
-        onAuthUpdated={(user, settings) => {
-          setCurrentUser(user);
-          setSystemSettings(settings);
         }}
       />
     );
@@ -943,6 +1042,7 @@ export function App() {
         activeTool={activeTool}
         placementMode={placementMode}
         snapEnabled={snapEnabled}
+        overlaySettings={overlaySettings}
         catalogOpen={catalogOpen}
         viewMode={viewMode}
         isDrawingWalls={isDrawingWalls}
@@ -959,6 +1059,9 @@ export function App() {
         onSelectTool={setActiveTool}
         onSelectPlacementMode={setPlacementMode}
         onToggleSnap={() => setSnapEnabled((s) => !s)}
+        onUpdateOverlaySettings={(patch) =>
+          setOverlaySettings((prev) => ({ ...prev, ...patch }))
+        }
         onToggleCatalog={() => setCatalogOpen((c) => !c)}
         onToggleViewMode={(mode) => setViewMode(mode)}
         onToggleDrawWalls={() => {
@@ -968,7 +1071,7 @@ export function App() {
               setIsDrawingFloorZone(false);
               setIsCalibratingPlan(false);
               setViewMode('top');
-              showStatus('Кликни по плана за стени. Esc или Enter за край.');
+              showStatus('Кликни по плана за стени. Esc за край.');
             } else {
               setDraftPoints([]);
               setHoverPoint(null);
@@ -983,7 +1086,9 @@ export function App() {
               setIsDrawingWalls(false);
               setIsCalibratingPlan(false);
               setViewMode('top');
-              showStatus('Очертай ъглите на подовата зона и затвори в първата точка.');
+              showStatus(
+                'Очертай ъглите на подовата зона и затвори в първата точка.'
+              );
             } else {
               setZoneDraftPoints([]);
               setHoverPoint(null);
@@ -992,10 +1097,6 @@ export function App() {
           });
         }}
         onToggleRoomPanel={() => setRoomPanelOpen((p) => !p)}
-        onOpenParametricBuilder={() => {
-          setEditingParametricObj(null);
-          setParametricModalOpen(true);
-        }}
         onOpenBomModal={() => setBomModalOpen(true)}
         onOpenAdminPage={() => {
           window.history.pushState({}, '', '/admin');
@@ -1030,34 +1131,34 @@ export function App() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ fontSize: '11.5px', color: '#94a3b8', fontWeight: 600 }}>
-              Шаблон стая:
+            <span
+              style={{ fontSize: '11.5px', color: '#94a3b8', fontWeight: 600 }}
+            >
+              Шаблон:
             </span>
-            {(Object.keys(ROOM_TEMPLATES) as RoomTemplateKey[]).map((key) => (
-              <button
-                key={key}
-                type="button"
-                className="btn"
-                style={{ fontSize: '11px', padding: '4px 8px' }}
-                onClick={() => {
-                  const walls = createRoomFromTemplate(key);
-                  setSceneState(
-                    (curr) => ({
-                      ...curr,
-                      room: {
-                        ...curr.room,
-                        walls,
-                        floorZones: [],
-                      },
-                    }),
-                    true
-                  );
-                  showStatus(`Зареден шаблон: ${ROOM_TEMPLATES[key].label}`);
-                }}
-              >
-                {ROOM_TEMPLATES[key].label}
-              </button>
-            ))}
+            <button
+              type="button"
+              className="btn"
+              style={{ fontSize: '11px', padding: '4px 8px' }}
+              onClick={() => {
+                setSceneState(
+                  (curr) => ({
+                    ...curr,
+                    room: {
+                      ...curr.room,
+                      walls: createStarterWalls(
+                        curr.room.defaultThicknessM || 0.15
+                      ),
+                      floorZones: [],
+                    },
+                  }),
+                  true
+                );
+                showStatus('Заредена е правоъгълна стая 5 × 4 м.');
+              }}
+            >
+              Правоъгълна 5 × 4 м
+            </button>
           </div>
 
           <div className="divider-v" />
@@ -1115,6 +1216,7 @@ export function App() {
                             imageUrl: url,
                             widthM: 10,
                             depthM: 8,
+                            aspectRatio: 1.25,
                             offsetX: 0,
                             offsetZ: 0,
                             rotationDeg: 0,
@@ -1128,7 +1230,9 @@ export function App() {
                     setViewMode('top');
                     showStatus('2D планът е качен като подложка.');
                   } catch (err: any) {
-                    showStatus(`❌ ${err?.message || 'Грешка при качване на плана.'}`);
+                    showStatus(
+                      `❌ ${err?.message || 'Грешка при качване на плана.'}`
+                    );
                   }
                 }}
               />
@@ -1144,7 +1248,9 @@ export function App() {
                     setIsCalibratingPlan((p) => !p);
                     setCalibPoints([]);
                     setViewMode('top');
-                    showStatus('Кликни двата края на известна стена върху снимката.');
+                    showStatus(
+                      'Кликни двата края на известна стена върху снимката.'
+                    );
                   }}
                 >
                   📏 Калибрирай мащаб
@@ -1175,14 +1281,16 @@ export function App() {
                                 ...curr.room.floorplan,
                                 visible: !curr.room.floorplan.visible,
                               }
-                            : undefined,
+                            : null,
                         },
                       }),
                       true
                     )
                   }
                 >
-                  {room.floorplan.visible ? '👁 Скрий подложка' : '👁 Покажи подложка'}
+                  {room.floorplan.visible
+                    ? '👁 Скрий подложка'
+                    : '👁 Покажи подложка'}
                 </button>
               </>
             )}
@@ -1190,7 +1298,7 @@ export function App() {
         </div>
       )}
 
-      <div className="workspace-main">
+      <div className="workspace-body">
         {catalogOpen && (
           <CatalogDrawer
             models={models}
@@ -1202,6 +1310,10 @@ export function App() {
             currentUser={currentUser}
             systemSettings={systemSettings}
             onRefreshCatalog={refreshCatalogAndScenes}
+            onOpenParametricBuilder={() => {
+              setEditingParametricObj(null);
+              setParametricModalOpen(true);
+            }}
             onSelectModel={handleSelectCatalogModel}
             onApplyTextureToSelected={(tex) =>
               handleApplyTextureFromCatalog('selected', tex)
@@ -1215,9 +1327,11 @@ export function App() {
           />
         )}
 
-        <main className="viewport-container">
+        <main className="canvas-stage">
           <Viewport3D
             room={room}
+            viewMode={viewMode}
+            overlaySettings={overlaySettings}
             models={models}
             textures={textures}
             sceneObjects={sceneObjects}
@@ -1232,7 +1346,6 @@ export function App() {
             linkedVertexJoint={linkedVertexJoint}
             autoStraightenVertices={autoStraightenVertices}
             transformTool={transformTool}
-            cameraMode={viewMode}
             isDrawingWalls={isDrawingWalls}
             draftPoints={draftPoints}
             isDrawingFloorZone={isDrawingFloorZone}
@@ -1244,7 +1357,7 @@ export function App() {
             onFloorDrawClick={handleFloorDrawClick}
             onFloorZoneDrawClick={handleFloorZoneDrawClick}
             onCalibFloorClick={handleCalibFloorClick}
-            onSelectInstance={(id) => {
+            onSelectObject={(id) => {
               setSelectedInstanceId(id);
               if (id) {
                 setSelectedWallId(null);
@@ -1260,6 +1373,33 @@ export function App() {
                 setSelectedFloorZoneId(null);
                 setSelectedStandaloneOpeningId(null);
               }
+            }}
+            onInlineUpdateWallLength={(wallId, nextLengthM) => {
+              setSceneState(
+                (curr) => ({
+                  ...curr,
+                  room: {
+                    ...curr.room,
+                    walls: curr.room.walls.map((w) => {
+                      if (w.id !== wallId) return w;
+                      const deg = getWallAngleDeg(w);
+                      const rad = (deg * Math.PI) / 180;
+                      return {
+                        ...w,
+                        end: [
+                          Number(
+                            (w.start[0] + Math.cos(rad) * nextLengthM).toFixed(3)
+                          ),
+                          Number(
+                            (w.start[1] + Math.sin(rad) * nextLengthM).toFixed(3)
+                          ),
+                        ],
+                      };
+                    }),
+                  },
+                }),
+                true
+              );
             }}
             onSelectSurface={handleSelectSurface}
             onClearSurfaceSelection={() => setSelectedSurfaces([])}
@@ -1404,9 +1544,16 @@ export function App() {
           onWallThicknessInputChange={setWallThicknessInput}
           onCommitSelectedWallChanges={() => {
             if (!selectedWall) return;
-            const len = Math.max(0.1, parseFloat(wallLengthInput) || getWallLengthM(selectedWall));
-            const deg = parseFloat(wallAngleInput) ?? getWallAngleDeg(selectedWall);
-            const thick = Math.max(0.05, parseFloat(wallThicknessInput) || selectedWall.thicknessM);
+            const len = Math.max(
+              0.1,
+              parseFloat(wallLengthInput) || getWallLengthM(selectedWall)
+            );
+            const deg =
+              parseFloat(wallAngleInput) ?? getWallAngleDeg(selectedWall);
+            const thick = Math.max(
+              0.05,
+              parseFloat(wallThicknessInput) || selectedWall.thicknessM
+            );
             const rad = (deg * Math.PI) / 180;
             const nextEnd: [number, number] = [
               Number((selectedWall.start[0] + Math.cos(rad) * len).toFixed(3)),
@@ -1448,7 +1595,9 @@ export function App() {
                 ...curr,
                 room: {
                   ...curr.room,
-                  walls: curr.room.walls.filter((w) => w.id !== selectedWall.id),
+                  walls: curr.room.walls.filter(
+                    (w) => w.id !== selectedWall.id
+                  ),
                 },
               }),
               true
@@ -1464,7 +1613,10 @@ export function App() {
             const newOp: WallOpening = {
               id: `op-${Date.now()}`,
               type,
-              offsetFromStartM: Math.max(0.1, Number(((wLen - opW) / 2).toFixed(2))),
+              offsetFromStartM: Math.max(
+                0.1,
+                Number(((wLen - opW) / 2).toFixed(2))
+              ),
               widthM: opW,
               heightM: type === 'door' ? 2.05 : 1.35,
               sillHeightM: type === 'door' ? 0 : 0.9,
@@ -1843,18 +1995,16 @@ export function App() {
       )}
 
       {/* МОДАЛ ЗА ВХОД / РЕГИСТРАЦИЯ */}
-      {authModalOpen && (
-        <AuthModal
-          systemSettings={systemSettings}
-          onClose={() => setAuthModalOpen(false)}
-          onSuccess={(user, settings) => {
-            setCurrentUser(user);
-            setSystemSettings(settings);
-            setAuthModalOpen(false);
-            refreshCatalogAndScenes();
-          }}
-        />
-      )}
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthenticated={async (user, settings) => {
+          setCurrentUser(user);
+          if (settings) setSystemSettings(settings);
+          setAuthModalOpen(false);
+          await refreshCatalogAndScenes();
+        }}
+      />
     </div>
   );
 }

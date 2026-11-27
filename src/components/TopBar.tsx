@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { EditorTool, PlacementMode } from '../types/editor';
+import type { ViewportOverlaySettings } from '../types/room';
 import type { AuthUser, SystemSettings } from '../types/auth';
 import type { CloudSceneListItem } from '../utils/apiClient';
 import type { ViewportCameraMode } from './Viewport3D';
@@ -9,6 +10,7 @@ export interface TopBarProps {
   activeTool: EditorTool;
   placementMode: PlacementMode;
   snapEnabled: boolean;
+  overlaySettings: ViewportOverlaySettings;
   catalogOpen: boolean;
   viewMode: ViewportCameraMode;
   isDrawingWalls: boolean;
@@ -25,12 +27,12 @@ export interface TopBarProps {
   onSelectTool: (tool: EditorTool) => void;
   onSelectPlacementMode: (mode: PlacementMode) => void;
   onToggleSnap: () => void;
+  onUpdateOverlaySettings: (patch: Partial<ViewportOverlaySettings>) => void;
   onToggleCatalog: () => void;
   onToggleViewMode: (mode: ViewportCameraMode) => void;
   onToggleDrawWalls: () => void;
   onToggleDrawFloorZone: () => void;
   onToggleRoomPanel: () => void;
-  onOpenParametricBuilder: () => void;
   onOpenBomModal: () => void;
   onOpenAdminPage: () => void;
   onOpenAuthModal: () => void;
@@ -47,6 +49,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   activeTool,
   placementMode,
   snapEnabled,
+  overlaySettings,
   catalogOpen,
   viewMode,
   isDrawingWalls,
@@ -63,12 +66,12 @@ export const TopBar: React.FC<TopBarProps> = ({
   onSelectTool,
   onSelectPlacementMode,
   onToggleSnap,
+  onUpdateOverlaySettings,
   onToggleCatalog,
   onToggleViewMode,
   onToggleDrawWalls,
   onToggleDrawFloorZone,
   onToggleRoomPanel,
-  onOpenParametricBuilder,
   onOpenBomModal,
   onOpenAdminPage,
   onOpenAuthModal,
@@ -80,6 +83,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onRedo,
   onResetScene,
 }) => {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const showAdminBtn = canAccessAdminPanel(currentUser);
 
   return (
@@ -117,7 +121,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           type="button"
           className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
           onClick={onToggleDrawWalls}
-          title="Чертаене на стени по плана (клик за точки, Esc/Enter за край)"
+          title="Чертаене на стени по плана (клик за точки, Esc за край)"
         >
           🧱 {isDrawingWalls ? 'Приключи стени' : 'Чертай стени'}
         </button>
@@ -138,17 +142,6 @@ export const TopBar: React.FC<TopBarProps> = ({
           title="Шаблони на стаи, височина таван и 2D подложка"
         >
           🏠 Стая и подложка
-        </button>
-
-        <div className="divider-v" />
-
-        <button
-          type="button"
-          className="btn"
-          onClick={onOpenParametricBuilder}
-          title="Създай гардероб или кухня по размери"
-        >
-          ✨ Гардероб / Кухня
         </button>
 
         <button
@@ -204,11 +197,11 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         <button
           type="button"
-          className={`btn ${snapEnabled ? 'btn-active' : ''}`}
-          onClick={onToggleSnap}
-          title="Магнитно прилепване"
+          className={`btn ${settingsOpen ? 'btn-active' : ''}`}
+          onClick={() => setSettingsOpen((p) => !p)}
+          title="Настройки на изгледа, размерите и снапването"
         >
-          🧲 Snap {snapEnabled ? 'ON' : 'OFF'}
+          ⚙ Настройки
         </button>
 
         <button
@@ -284,7 +277,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             onClick={onOpenAdminPage}
             title="Отвори самостоятелната страница за управление (/admin)"
           >
-            ⚙ Админ страница
+            🛠 Админ
           </button>
         )}
 
@@ -312,6 +305,113 @@ export const TopBar: React.FC<TopBarProps> = ({
           </button>
         )}
       </div>
+
+      {settingsOpen && (
+        <div className="settings-popover">
+          <div className="section-label" style={{ marginBottom: 0 }}>
+            Настройки на работното поле
+          </div>
+
+          <label className="settings-row">
+            <span>📏 Размери на стените</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.showWallDimensions}
+              onChange={(e) =>
+                onUpdateOverlaySettings({ showWallDimensions: e.target.checked })
+              }
+            />
+          </label>
+
+          <label className="settings-row">
+            <span>📐 Дебелина на стените</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.showWallThicknessLabels}
+              onChange={(e) =>
+                onUpdateOverlaySettings({
+                  showWallThicknessLabels: e.target.checked,
+                })
+              }
+            />
+          </label>
+
+          <label className="settings-row">
+            <span>⬛ Площи на стаите (м²)</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.showRoomAreas}
+              onChange={(e) =>
+                onUpdateOverlaySettings({ showRoomAreas: e.target.checked })
+              }
+            />
+          </label>
+
+          <label className="settings-row">
+            <span>🔵 Ъглови точки (дръжки)</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.showVertexHandles}
+              onChange={(e) =>
+                onUpdateOverlaySettings({ showVertexHandles: e.target.checked })
+              }
+            />
+          </label>
+
+          <label className="settings-row">
+            <span>🚪 Отваряне на врати в 2D</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.show2DDoorSwings}
+              onChange={(e) =>
+                onUpdateOverlaySettings({ show2DDoorSwings: e.target.checked })
+              }
+            />
+          </label>
+
+          <label className="settings-row">
+            <span>🧲 Магнитно прилепване (Snap)</span>
+            <input
+              type="checkbox"
+              checked={snapEnabled}
+              onChange={onToggleSnap}
+            />
+          </label>
+
+          <label className="settings-row">
+            <span># Подова мрежа</span>
+            <input
+              type="checkbox"
+              checked={overlaySettings.showGrid}
+              onChange={(e) =>
+                onUpdateOverlaySettings({ showGrid: e.target.checked })
+              }
+            />
+          </label>
+
+          <div className="settings-row">
+            <span>Мерни единици</span>
+            <div style={{ display: 'flex', gap: '4px' }}>
+              <button
+                type="button"
+                className={`btn ${overlaySettings.dimensionUnit === 'm' ? 'btn-active' : ''}`}
+                style={{ padding: '3px 8px', fontSize: '11px' }}
+                onClick={() => onUpdateOverlaySettings({ dimensionUnit: 'm' })}
+              >
+                Метри (м)
+              </button>
+              <button
+                type="button"
+                className={`btn ${overlaySettings.dimensionUnit === 'cm' ? 'btn-active' : ''}`}
+                style={{ padding: '3px 8px', fontSize: '11px' }}
+                onClick={() => onUpdateOverlaySettings({ dimensionUnit: 'cm' })}
+              >
+                Сантиметри (см)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {statusMessage && (
         <div className="topbar-status" role="status">
