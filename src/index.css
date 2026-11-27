@@ -10,7 +10,7 @@ body,
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background-color: #0f172a;
+  background-color: #020617;
   color: #f1f5f9;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   font-size: 13px;
@@ -22,61 +22,30 @@ body,
   flex-direction: column;
   width: 100vw;
   height: 100vh;
+  overflow: hidden;
 }
 
-/* Горна лента с инструменти */
-.topbar {
-  height: 48px;
-  background-color: #1e293b;
-  border-bottom: 1px solid #334155;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 14px;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.topbar-group {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-title {
-  font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.3px;
-  color: #f8fafc;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brand-badge {
-  font-size: 11px;
-  font-weight: 600;
-  background-color: #2563eb;
-  color: #ffffff;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
+/* Бутони и полета */
 .btn {
-  background-color: #334155;
+  background-color: #1e293b;
   color: #e2e8f0;
-  border: 1px solid #475569;
+  border: 1px solid #334155;
   border-radius: 6px;
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: 5px 9px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   transition: background-color 0.15s, border-color 0.15s;
 }
 
 .btn:hover:not(:disabled) {
-  background-color: #475569;
-  border-color: #64748b;
+  background-color: #334155;
+  border-color: #475569;
 }
 
 .btn:disabled {
@@ -100,66 +69,14 @@ body,
   color: #fecaca;
 }
 
-.btn-danger:hover:not(:disabled) {
-  background-color: #991b1b;
-}
-
-/* Основна работна зона (3 панела) */
-.workspace {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  width: 100%;
-}
-
-/* Ляв панел: Библиотека */
-.sidebar-left {
-  width: 280px;
-  background-color: #1e293b;
-  border-right: 1px solid #334155;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-/* Десен панел: Настройки на обект */
-.sidebar-right {
-  width: 300px;
-  background-color: #1e293b;
-  border-left: 1px solid #334155;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.panel-header {
-  padding: 12px 14px;
-  border-bottom: 1px solid #334155;
-  font-weight: 600;
-  font-size: 13px;
-  color: #f8fafc;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.panel-body {
-  padding: 12px 14px;
-  overflow-y: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
 .input-control,
 .select-control {
   width: 100%;
-  background-color: #0f172a;
+  background-color: #020617;
   color: #f1f5f9;
   border: 1px solid #334155;
   border-radius: 6px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   font-size: 12px;
 }
 
@@ -169,60 +86,246 @@ body,
   border-color: #3b82f6;
 }
 
-/* Централен 3D прозорец */
-.viewport-container {
-  flex: 1;
+/* Горна лента (TopBar) */
+.topbar {
   position: relative;
-  min-width: 0;
-  height: 100%;
-  background-color: #111827;
+  min-height: 46px;
+  background-color: #0f172a;
+  border-bottom: 1px solid #1e293b;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  z-index: 20;
 }
 
-.viewport-hint {
-  position: absolute;
-  bottom: 12px;
-  left: 12px;
-  background-color: rgba(15, 23, 42, 0.8);
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.divider-v {
+  width: 1px;
+  height: 20px;
+  background-color: #334155;
+  margin: 0 2px;
+}
+
+.topbar-select {
+  width: auto;
+  min-width: 145px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+}
+
+.topbar-title-input {
+  width: 145px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.topbar-user-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: #1e293b;
   border: 1px solid #334155;
-  color: #94a3b8;
-  padding: 6px 10px;
   border-radius: 6px;
-  font-size: 11px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  color: #cbd5e1;
+}
+
+.topbar-status {
+  position: fixed;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(15, 23, 42, 0.94);
+  border: 1px solid #38bdf8;
+  color: #f8fafc;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  z-index: 150;
   pointer-events: none;
 }
 
-.empty-state-box {
+/* Основна 3-колонна работна зона */
+.workspace-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.canvas-stage {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  position: relative;
+  background-color: #020617;
+}
+
+/* Ляв панел: Каталог с 3D модели и текстури */
+.catalog-drawer {
+  width: 280px;
+  min-width: 280px;
+  background-color: #0b1120;
+  border-right: 1px solid #1e293b;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.catalog-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid #1e293b;
   background-color: #0f172a;
-  border: 1px dashed #334155;
-  border-radius: 8px;
-  padding: 16px;
-  text-align: center;
-  color: #94a3b8;
-  line-height: 1.5;
+  flex-shrink: 0;
 }
 
-.section-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: #94a3b8;
-  margin-bottom: 6px;
-}
-
-.axis-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+.catalog-alert {
+  margin: 8px 10px 0;
+  padding: 8px;
+  background-color: rgba(244, 63, 94, 0.14);
+  border: 1px solid rgba(244, 63, 94, 0.4);
+  border-radius: 6px;
+  color: #fecdd3;
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 6px;
 }
 
-.axis-field {
+.catalog-body {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.axis-field span {
-  font-size: 11px;
+.catalog-filters {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+
+.catalog-grid {
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  overflow-y: auto;
+  flex: 1;
+  align-content: start;
+}
+
+.catalog-card {
+  background-color: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 7px;
+  color: #f1f5f9;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s, transform 0.1s;
+}
+
+.catalog-card:hover {
+  border-color: #38bdf8;
+}
+
+.catalog-card-locked {
+  opacity: 0.75;
+}
+
+.catalog-card-thumb {
+  position: relative;
+  width: 100%;
+  height: 82px;
+  border-radius: 6px;
+  background-color: #ffffff;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.catalog-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.catalog-badge-premium {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background-color: #f59e0b;
+  color: #020617;
+  font-size: 9.5px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.catalog-card-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.catalog-card-meta {
+  font-size: 10.5px;
   color: #94a3b8;
+}
+
+.catalog-card-sub {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.catalog-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.catalog-pagination {
+  padding: 8px 10px;
+  border-top: 1px solid #1e293b;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: #0f172a;
+  flex-shrink: 0;
 }

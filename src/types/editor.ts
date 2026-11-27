@@ -1,47 +1,8 @@
-import type { RoomConfig } from './room';
-
-export type ModelCategory =
-  | 'sofas'
-  | 'armchairs'
-  | 'chairs'
-  | 'tables'
-  | 'beds'
-  | 'wardrobes'
-  | 'kitchen'
-  | 'lighting'
-  | 'bathroom'
-  | 'decor'
-  | 'doors'
-  | 'windows';
-
-export const CATEGORY_LABELS: Record<ModelCategory, string> = {
-  sofas: 'Дивани',
-  armchairs: 'Фотьойли',
-  chairs: 'Столове',
-  tables: 'Маси',
-  beds: 'Легла',
-  wardrobes: 'Гардероби и шкафове',
-  kitchen: 'Кухня',
-  lighting: 'Осветление',
-  bathroom: 'Баня',
-  decor: 'Декор',
-  doors: 'Врати',
-  windows: 'Прозорци',
-};
-
-/** Категории мебели, които се снапват магнитно към стените и ъглите */
-export const WALL_SNAP_CATEGORIES: ModelCategory[] = [
-  'wardrobes',
-  'kitchen',
-  'decor',
-  'bathroom',
-  'doors',
-  'windows',
-];
-
-export type ScaleMode = 'fixed' | 'constrained' | 'free';
+export type EditorTool = 'select' | 'move' | 'rotate' | 'scale';
 export type TransformTool = 'translate' | 'rotate' | 'scale';
-export type DisplayUnit = 'cm' | 'm';
+export type PlacementMode = 'free' | 'wall' | 'grid';
+export type ScaleMode = 'fixed' | 'constrained' | 'free';
+export type DisplayUnit = 'm' | 'cm';
 
 export interface DimensionsCm {
   width: number;
@@ -57,57 +18,43 @@ export interface ScaleConstraints {
   maxCm: DimensionsCm;
 }
 
-export interface MaterialOverride {
-  color: string;
-  textureId?: string | null;
-  roughness?: number;
-  metalness?: number;
+export interface CatalogCategoryItem {
+  id: string;
+  slug: string;
+  name: string;
+  scope: 'model' | 'texture';
+  sortOrder?: number;
+  snapToWall?: boolean;
 }
 
 export interface CatalogModel {
   id: string;
   name: string;
-  category: ModelCategory;
-  glbUrl?: string;
-  glbFileKey?: string;
-  previewUrl?: string;
+  sku?: string;
+  category: string;
+  color?: string;
+  material?: string;
+  style?: string;
+  tags?: string[];
   dimensionsCm: DimensionsCm;
   scaleMode: ScaleMode;
-  scaleConstraints: ScaleConstraints;
-  colorHex?: string;
-  isActive: boolean;
-  isBuiltIn?: boolean;
-  isCustomPreset?: boolean;
-  isPremium?: boolean;
-  defaultMaterialOverrides?: Record<string, MaterialOverride>;
-}
-
-export interface CreateModelInput {
-  name: string;
-  category: ModelCategory;
+  scaleConstraints?: ScaleConstraints;
   glbUrl?: string;
   previewUrl?: string;
-  dimensionsCm: DimensionsCm;
-  scaleMode: ScaleMode;
-  scaleConstraints: ScaleConstraints;
-  colorHex?: string;
   isActive: boolean;
   isPremium?: boolean;
 }
 
-export type TextureCategory = 'wall' | 'floor' | 'tiles' | 'furniture';
-
-export const TEXTURE_CATEGORY_LABELS: Record<TextureCategory, string> = {
-  wall: 'Стени / Тапети',
-  floor: 'Подове / Паркет',
-  tiles: 'Плочки / Гранитогрес',
-  furniture: 'Мебели / Текстил',
-};
+export type CreateModelInput = Omit<CatalogModel, 'id'>;
 
 export interface CatalogTexture {
   id: string;
   name: string;
-  category: TextureCategory;
+  sku?: string;
+  category: string;
+  color?: string;
+  finish?: string;
+  tags?: string[];
   mapUrl: string;
   normalUrl?: string;
   roughnessUrl?: string;
@@ -119,35 +66,22 @@ export interface CatalogTexture {
   isPremium?: boolean;
 }
 
-export interface CreateTextureInput {
-  name: string;
-  category: TextureCategory;
-  mapUrl: string;
-  normalUrl?: string;
-  roughnessUrl?: string;
-  tileWidthM: number;
-  tileHeightM: number;
+export type CreateTextureInput = Omit<CatalogTexture, 'id'>;
+
+export interface MaterialOverride {
+  color?: string;
+  textureId?: string;
   roughness?: number;
   metalness?: number;
-  isActive?: boolean;
-  isPremium?: boolean;
 }
-
-/* ============================================================================
-   ПАРАМЕТРИЧЕН ГЕНЕРАТОР ЗА ГАРДЕРОБИ И КУХНИ
-   ============================================================================ */
 
 export type ParametricFurnitureKind = 'wardrobe' | 'kitchen';
-export type FrontStyleType = 'flat' | 'shaker' | 'gola';
-export type HandleStyleType = 'vertical' | 'horizontal' | 'knob' | 'none';
 export type WardrobeDoorOpeningType = 'hinged' | 'sliding';
-export type WardrobeInteriorLayout = 'rail-and-shelves' | 'shelves-only' | 'mixed';
+export type WardrobeInteriorLayout = 'mixed' | 'shelves-only' | 'rail-and-shelves';
+export type FrontStyleType = 'flat' | 'shaker' | 'gola';
+export type HandleStyleType = 'bar' | 'vertical' | 'horizontal' | 'knob' | 'none';
 export type KitchenShapeType = 'straight' | 'l-left' | 'l-right';
-export type KitchenLayoutMode =
-  | 'base-only'
-  | 'base-and-wall'
-  | 'wall-only'
-  | 'tall-column';
+export type KitchenLayoutMode = 'base-and-wall' | 'base-only' | 'wall-only' | 'tall-column';
 export type KitchenModuleType = 'doors' | 'drawers' | 'oven' | 'sink';
 export type KitchenHoodType = 'chimney' | 'integrated' | 'none';
 
@@ -155,61 +89,58 @@ export interface WardrobeSpec {
   widthCm: number;
   heightCm: number;
   depthCm: number;
+  plinthHeightCm: number;
+  plinthColor: string;
+  hasTopBridge: boolean;
+  topBridgeHeightCm: number;
   doorCount: number;
   doorType: WardrobeDoorOpeningType;
   mirrorDoorIndices?: number[];
-  plinthHeightCm: number;
-  hasTopBridge: boolean;
-  topBridgeHeightCm: number;
   bottomDrawersCount: number;
   interiorLayout?: WardrobeInteriorLayout;
   doorsOpen?: boolean;
-  frontStyle: FrontStyleType;
-  handleStyle: HandleStyleType;
   corpusColor: string;
   corpusTextureId?: string | null;
   frontColor: string;
   frontTextureId?: string | null;
+  frontStyle: FrontStyleType;
+  handleStyle: HandleStyleType;
   handleColor: string;
-  plinthColor: string;
 }
 
 export interface KitchenSpec {
-  shape?: KitchenShapeType;
   widthCm: number;
-  wingWidthCm?: number;
-  wingModuleCount?: number;
   depthCm: number;
-  layoutMode: KitchenLayoutMode;
   baseHeightCm: number;
   plinthHeightCm: number;
+  plinthColor: string;
   countertopThicknessCm: number;
-  countertopOverhangCm: number;
-  hasBacksplash: boolean;
-  backsplashHeightCm: number;
+  countertopColor: string;
+  countertopTextureId?: string | null;
   wallCabinetHeightCm: number;
   wallCabinetDepthCm: number;
-  tallCabinetHeightCm: number;
+  backsplashHeightCm: number;
+  backsplashColor: string;
+  backsplashTextureId?: string | null;
+  shape: KitchenShapeType;
+  wingWidthCm?: number;
   moduleCount: number;
+  wingModuleCount?: number;
+  layoutMode: KitchenLayoutMode;
+  tallCabinetHeightCm: number;
+  tallColumnAppliances?: boolean;
   modulePattern: KitchenModuleType[];
   hoodType?: KitchenHoodType;
-  hasUnderCabinetLed?: boolean;
-  /** Сила на LED осветлението под горните шкафове в проценти (0 - 200%) */
-  ledIntensity?: number;
-  tallColumnAppliances?: boolean;
   doorsOpen?: boolean;
-  frontStyle: FrontStyleType;
-  handleStyle: HandleStyleType;
   corpusColor: string;
   corpusTextureId?: string | null;
   frontColor: string;
   frontTextureId?: string | null;
-  countertopColor: string;
-  countertopTextureId?: string | null;
-  backsplashColor: string;
-  backsplashTextureId?: string | null;
-  plinthColor: string;
+  frontStyle: FrontStyleType;
+  handleStyle: HandleStyleType;
   handleColor: string;
+  hasUnderCabinetLed?: boolean;
+  ledIntensity?: number;
 }
 
 export interface ParametricFurnitureConfig {
@@ -218,88 +149,135 @@ export interface ParametricFurnitureConfig {
   kitchen?: KitchenSpec;
 }
 
-export const DEFAULT_WARDROBE_SPEC: WardrobeSpec = {
-  widthCm: 180,
-  heightCm: 220,
-  depthCm: 60,
-  doorCount: 3,
-  doorType: 'hinged',
-  mirrorDoorIndices: [],
-  plinthHeightCm: 8,
-  hasTopBridge: false,
-  topBridgeHeightCm: 45,
-  bottomDrawersCount: 0,
-  interiorLayout: 'mixed',
-  doorsOpen: false,
-  frontStyle: 'flat',
-  handleStyle: 'vertical',
-  corpusColor: '#d6c7b2',
-  corpusTextureId: null,
-  frontColor: '#f8fafc',
-  frontTextureId: null,
-  handleColor: '#1e293b',
-  plinthColor: '#cbbba4',
-};
+export type ParametricObjectData = ParametricFurnitureConfig;
 
-export const DEFAULT_KITCHEN_SPEC: KitchenSpec = {
-  shape: 'straight',
-  widthCm: 240,
-  wingWidthCm: 160,
-  wingModuleCount: 2,
-  depthCm: 60,
-  layoutMode: 'base-and-wall',
-  baseHeightCm: 86,
-  plinthHeightCm: 10,
-  countertopThicknessCm: 3.8,
-  countertopOverhangCm: 2,
-  hasBacksplash: true,
-  backsplashHeightCm: 60,
-  wallCabinetHeightCm: 72,
-  wallCabinetDepthCm: 34,
-  tallCabinetHeightCm: 215,
-  moduleCount: 4,
-  modulePattern: ['doors', 'drawers', 'oven', 'sink'],
-  hoodType: 'chimney',
-  hasUnderCabinetLed: true,
-  ledIntensity: 100,
-  tallColumnAppliances: true,
-  doorsOpen: false,
-  frontStyle: 'flat',
-  handleStyle: 'horizontal',
-  corpusColor: '#e2e8f0',
-  corpusTextureId: null,
-  frontColor: '#f1f5f9',
-  frontTextureId: null,
-  countertopColor: '#334155',
-  countertopTextureId: null,
-  backsplashColor: '#cbd5e1',
-  backsplashTextureId: null,
-  plinthColor: '#1e293b',
-  handleColor: '#0f172a',
-};
-
-export interface SceneObject {
+export interface PlacedObject {
+  id?: string;
   instanceId: string;
   modelId: string;
   name?: string;
+  category?: string;
   position: [number, number, number];
   rotation: [number, number, number];
   scale: [number, number, number];
   mirrored?: boolean;
+  dimensionsCm?: DimensionsCm;
+  scaleMode?: ScaleMode;
+  scaleConstraints?: ScaleConstraints;
+  glbUrl?: string;
+  colorOverride?: string;
+  textureOverrideId?: string;
   materialOverrides?: Record<string, MaterialOverride>;
   parametric?: ParametricFurnitureConfig;
 }
 
-export interface SavedSceneSummary {
-  id: string;
-  title: string;
-  updatedAt?: string;
+export type SceneObject = PlacedObject;
+
+export interface LegacyRoomConfig {
+  widthM?: number;
+  depthM?: number;
+  heightM?: number;
+  floorColor?: string;
+  wallColor?: string;
+  floorTextureId?: string;
+  wallTextureId?: string;
 }
 
 export interface SavedScene {
-  id: string;
-  title: string;
-  objects: SceneObject[];
-  room?: RoomConfig;
-  updatedAt?: string;
+  version?: number;
+  savedAt?: string;
+  id?: string;
+  title?: string;
+  objects: PlacedObject[];
+  room: any;
 }
+
+export const WALL_SNAP_CATEGORIES: string[] = [
+  'sofas',
+  'wardrobes',
+  'kitchen',
+  'beds',
+  'cabinets',
+  'tv-units',
+];
+
+export const DEFAULT_WARDROBE_SPEC: WardrobeSpec = {
+  widthCm: 180,
+  heightCm: 220,
+  depthCm: 60,
+  plinthHeightCm: 8,
+  plinthColor: '#cbd5e1',
+  hasTopBridge: false,
+  topBridgeHeightCm: 45,
+  doorCount: 3,
+  doorType: 'hinged',
+  mirrorDoorIndices: [1],
+  bottomDrawersCount: 0,
+  interiorLayout: 'mixed',
+  doorsOpen: false,
+  corpusColor: '#e2e8f0',
+  corpusTextureId: null,
+  frontColor: '#f8fafc',
+  frontTextureId: null,
+  frontStyle: 'flat',
+  handleStyle: 'vertical',
+  handleColor: '#0f172a',
+};
+
+export const DEFAULT_KITCHEN_SPEC: KitchenSpec = {
+  widthCm: 240,
+  depthCm: 60,
+  baseHeightCm: 85,
+  plinthHeightCm: 10,
+  plinthColor: '#334155',
+  countertopThicknessCm: 4,
+  countertopColor: '#cbd5e1',
+  countertopTextureId: null,
+  wallCabinetHeightCm: 72,
+  wallCabinetDepthCm: 34,
+  backsplashHeightCm: 60,
+  backsplashColor: '#e2e8f0',
+  backsplashTextureId: null,
+  shape: 'straight',
+  wingWidthCm: 160,
+  moduleCount: 4,
+  wingModuleCount: 2,
+  layoutMode: 'base-and-wall',
+  tallCabinetHeightCm: 215,
+  tallColumnAppliances: true,
+  modulePattern: ['doors', 'drawers', 'oven', 'sink'],
+  hoodType: 'chimney',
+  doorsOpen: false,
+  corpusColor: '#f1f5f9',
+  corpusTextureId: null,
+  frontColor: '#f8fafc',
+  frontTextureId: null,
+  frontStyle: 'flat',
+  handleStyle: 'horizontal',
+  handleColor: '#0f172a',
+  hasUnderCabinetLed: true,
+  ledIntensity: 100,
+};
+
+export const DEFAULT_CATEGORY_LABELS: Record<string, string> = {
+  sofas: 'Дивани',
+  armchairs: 'Фотьойли',
+  tables: 'Маси',
+  chairs: 'Столове',
+  beds: 'Легла',
+  wardrobes: 'Гардероби',
+  kitchen: 'Кухня',
+  lighting: 'Осветление',
+  decor: 'Декорация',
+  other: 'Други',
+};
+
+export const DEFAULT_TEXTURE_CATEGORY_LABELS: Record<string, string> = {
+  floor: 'Подове',
+  wall: 'Стени',
+  wood: 'Дървесина',
+  stone: 'Камък и мрамор',
+  fabric: 'Текстил и дамаски',
+  metal: 'Метали',
+  other: 'Други',
+};

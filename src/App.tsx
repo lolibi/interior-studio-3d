@@ -1,350 +1,245 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CATEGORY_LABELS } from './types/editor';
+import {
+  DEFAULT_CATEGORY_LABELS,
+  DEFAULT_TEXTURE_CATEGORY_LABELS,
+} from './types/editor';
 import type {
   CatalogModel,
   CatalogTexture,
   DisplayUnit,
+  EditorTool,
   MaterialOverride,
-  ModelCategory,
   ParametricFurnitureConfig,
-  SavedSceneSummary,
+  PlacementMode,
   SceneObject,
   TransformTool,
 } from './types/editor';
 import {
-  DEFAULT_OVERLAY_SETTINGS,
-  calibrateFloorplanByTwoPoints,
-  computeEndpointFromAngleAndLength,
-  createDefaultRoomConfig,
+  createRectangleRoomWalls,
+  createRoomFromTemplate,
   getWallAngleDeg,
   getWallLengthM,
   isSameSurface,
-  straightenWallOrthogonal,
-  toggleSurfaceInList,
-  updateWallGeometry,
+  ROOM_TEMPLATES,
 } from './types/room';
 import type {
-  ApartmentTemplate,
   FloorZone,
   OpeningType,
   RoomConfig,
+  RoomTemplateKey,
   SelectedFloorVertex,
   SelectedWallVertex,
   StandaloneOpening,
   SurfaceTarget,
-  ViewportOverlaySettings,
   WallOpening,
   WallSegment,
 } from './types/room';
+import type { AuthUser, SystemSettings } from './types/auth';
+import {
+  fetchCategories,
+  fetchMe,
+  fetchModels,
+  fetchTextures,
+  listScenes,
+  loadScene,
+  logoutUser,
+  saveScene,
+  uploadFloorplanFile,
+} from './utils/apiClient';
+import type { CloudSceneListItem } from './utils/apiClient';
+import { useHistoryState } from './hooks/useHistoryState';
+import { TopBar } from './components/TopBar';
+import { CatalogDrawer } from './components/CatalogDrawer';
 import { Viewport3D } from './components/Viewport3D';
 import type { ViewportCameraMode } from './components/Viewport3D';
 import { RightInspector } from './components/RightInspector';
 import type { SurfaceBatchPatch } from './components/RightInspector';
 import type { DiscoveredMaterialSlot } from './components/SceneItemMesh';
-import { AdminPanel } from './components/AdminPanel';
 import { ParametricBuilderModal } from './components/ParametricBuilderModal';
 import { ProjectBomModal } from './components/ProjectBomModal';
-import { AuthGateModal } from './components/AuthGateModal';
-import type { AuthUser, SystemSettings } from './types/auth';
-import { getEffectivePermissions } from './utils/permissions';
-import {
-  DEFAULT_CATALOG_MODELS,
-  loadCatalog,
-  saveCatalog,
-} from './utils/modelStorage';
-import {
-  deleteUserFurniturePreset,
-  loadUserFurniturePresets,
-  saveUserFurniturePreset,
-} from './utils/userPresetsStorage';
-import type { UserFurniturePreset } from './utils/userPresetsStorage';
-import {
-  fetchApartmentTemplates,
-  fetchCurrentUser,
-  fetchModels,
-  fetchSceneById,
-  fetchScenes,
-  fetchTextures,
-  logoutUser,
-  saveSceneToServer,
-  uploadFloorplanImage,
-} from './utils/apiClient';
+import { AuthModal } from './components/AuthModal';
+import { AdminDashboardPage } from './components/AdminDashboardPage';
 
-type LeftTab = 'catalog' | 'materials' | 'room';
-type TopPopover = 'settings' | 'project' | null;
-
-interface ProjectSnapshot {
+interface SceneHistorySnapshot {
   room: RoomConfig;
-  sceneObjects: SceneObject[];
+  objects: SceneObject[];
 }
 
-const STORAGE_KEY_PROJECT = 'interior_configurator_project_v1';
-const STORAGE_KEY_OVERLAYS = 'interior_configurator_overlays_v1';
+function createInitialRoom(): RoomConfig {
+  return {
+    walls: createRectangleRoomWalls(4.5, 3.8, 0.15),
+    ceilingHeightM: 2.65,
+    ceilingColor: '#f8fafc',
+    showCeiling: false,
+    floorZones: [],
+    openings: [],
+  };
+}
+
+function normalizeLoadedRoom(rawRoom: any): RoomConfig {
+  if (!rawRoom || typeof rawRoom !== 'object') {
+    return createInitialRoom();
+  }
+
+  // Съвместимост със стари проекти, запазени като правоъгълник (widthM / depthM / heightM)
+  if (!Array.isArray(rawRoom.walls)) {
+    const w = Number(rawRoom.widthM) > 0 ? Number(rawRoom.widthM) : 4.5;
+    const d = Number(rawRoom.depthM) > 0 ? Number(rawRoom.depthM) : 3.8;
+    const h = Number(rawRoom.heightM) > 0 ? Number(rawRoom.heightM) : 2.65;
+    const walls = createRectangleRoomWalls(w, d, 0.15).map((wall) => ({
+      ...wall,
+      frontColor: rawRoom.wallColor || '#f1f5f9',
+      backColor: rawRoom.wallColor || '#f1f5f9',
+      frontTextureId: rawRoom.wallTextureId || undefined,
+      backTextureId: rawRoom.wallTextureId || undefined,
+    }));
+
+    const floorZones: FloorZone[] =
+      rawRoom.floorTextureId || rawRoom.floorColor
+        ? [
+            {
+              id: 'zone-migrated-main',
+              name: 'Основен под',
+              points: [
+                [-w / 2, -d / 2],
+                [w / 2, -d / 2],
+                [w / 2, d / 2],
+                [-w / 2, d / 2],
+              ],
+              color: rawRoom.floorColor || '#b08968',
+              textureId: rawRoom.floorTextureId || undefined,
+            },
+          ]
+        : [];
+
+    return {
+      walls,
+      ceilingHeightM: h,
+      ceilingColor: '#f8fafc',
+      showCeiling: false,
+      floorZones,
+      openings: [],
+    };
+  }
+
+  return {
+    walls: rawRoom.walls.map((w: any, idx: number) => ({
+      id: w.id || `wall-${idx}-${Date.now()}`,
+      start: Array.isArray(w.start) ? [Number(w.start[0]) || 0, Number(w.start[1]) || 0] : [0, 0],
+      end: Array.isArray(w.end) ? [Number(w.end[0]) || 0, Number(w.end[1]) || 0] : [1, 0],
+      thicknessM: Number(w.thicknessM) > 0 ? Number(w.thicknessM) : 0.15,
+      frontColor: w.frontColor || '#f1f5f9',
+      backColor: w.backColor || '#f1f5f9',
+      startColor: w.startColor,
+      endColor: w.endColor,
+      frontTextureId: w.frontTextureId,
+      backTextureId: w.backTextureId,
+      startTextureId: w.startTextureId,
+      endTextureId: w.endTextureId,
+      frontTileHeightM: w.frontTileHeightM,
+      backTileHeightM: w.backTileHeightM,
+      startTileHeightM: w.startTileHeightM,
+      endTileHeightM: w.endTileHeightM,
+      frontUvw: w.frontUvw,
+      backUvw: w.backUvw,
+      startUvw: w.startUvw,
+      endUvw: w.endUvw,
+      openings: Array.isArray(w.openings) ? w.openings : [],
+    })),
+    ceilingHeightM:
+      Number(rawRoom.ceilingHeightM) > 0 ? Number(rawRoom.ceilingHeightM) : 2.65,
+    ceilingColor: rawRoom.ceilingColor || '#f8fafc',
+    showCeiling: Boolean(rawRoom.showCeiling),
+    floorZones: Array.isArray(rawRoom.floorZones) ? rawRoom.floorZones : [],
+    openings: Array.isArray(rawRoom.openings) ? rawRoom.openings : [],
+    floorplan: rawRoom.floorplan,
+  };
+}
+
+function normalizeLoadedObjects(rawObjects: any): SceneObject[] {
+  if (!Array.isArray(rawObjects)) return [];
+  return rawObjects.map((o: any, idx: number) => ({
+    ...o,
+    instanceId: o.instanceId || o.id || `inst-loaded-${idx}-${Date.now()}`,
+    modelId: o.modelId || 'unknown-model',
+    name: o.name || 'Обект',
+    category: o.category || 'other',
+    position: Array.isArray(o.position)
+      ? [Number(o.position[0]) || 0, Number(o.position[1]) || 0, Number(o.position[2]) || 0]
+      : [0, 0, 0],
+    rotation: Array.isArray(o.rotation)
+      ? [Number(o.rotation[0]) || 0, Number(o.rotation[1]) || 0, Number(o.rotation[2]) || 0]
+      : [0, 0, 0],
+    scale: Array.isArray(o.scale)
+      ? [Number(o.scale[0]) || 1, Number(o.scale[1]) || 1, Number(o.scale[2]) || 1]
+      : [1, 1, 1],
+  }));
+}
 
 export function App() {
-  const [models, setModels] = useState<CatalogModel[]>(() => loadCatalog());
+  // Навигация към /admin страницата
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() =>
+    window.location.pathname.startsWith('/admin')
+  );
+
+  // Потребителска сесия
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  // Каталог от сървъра
+  const [models, setModels] = useState<CatalogModel[]>([]);
   const [textures, setTextures] = useState<CatalogTexture[]>([]);
-  const [templates, setTemplates] = useState<ApartmentTemplate[]>([]);
-  const [savedScenes, setSavedScenes] = useState<SavedSceneSummary[]>([]);
-  const [userPresets, setUserPresets] = useState<UserFurniturePreset[]>(() =>
-    loadUserFurniturePresets()
+  const [categoryLabels, setCategoryLabels] = useState<Record<string, string>>(
+    DEFAULT_CATEGORY_LABELS
   );
-  const [isAdminOpen, setIsAdminOpen] = useState(false);
-  const [isBomOpen, setIsBomOpen] = useState(false);
-  const [isSyncingServer, setIsSyncingServer] = useState(false);
+  const [textureCategoryLabels, setTextureCategoryLabels] = useState<
+    Record<string, string>
+  >(DEFAULT_TEXTURE_CATEGORY_LABELS);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [pendingUser, setPendingUser] = useState<AuthUser | null>(null);
-  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(
-    null
-  );
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-
-  const permissions = useMemo(
-    () => getEffectivePermissions(authUser, systemSettings),
-    [authUser, systemSettings]
-  );
-
-  const refreshAuthSession = useCallback(async () => {
-    try {
-      const res = await fetchCurrentUser();
-      setSystemSettings(res.settings);
-      if (res.authenticated && res.user) {
-        setAuthUser(res.user);
-        setPendingUser(null);
-      } else if (res.requiresApproval && res.user) {
-        setAuthUser(null);
-        setPendingUser(res.user);
-      } else {
-        setAuthUser(null);
-        setPendingUser(null);
-      }
-    } catch {
-      // keep state if transient network issue
-    } finally {
-      setIsCheckingAuth(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refreshAuthSession();
-  }, [refreshAuthSession]);
-
-  const [parametricBuilderState, setParametricBuilderState] = useState<{
-    isOpen: boolean;
-    editingInstanceId?: string;
-    initialConfig?: ParametricFurnitureConfig;
-    initialName?: string;
-  }>({ isOpen: false });
-
-  // Падащи менюта в горната лента („Настройки“ и „Проект“)
-  const [openTopPopover, setOpenTopPopover] = useState<TopPopover>(null);
-  const settingsPopoverRef = useRef<HTMLDivElement | null>(null);
-  const projectPopoverRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!openTopPopover) return;
-    const handleOutsideClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        openTopPopover === 'settings' &&
-        settingsPopoverRef.current &&
-        !settingsPopoverRef.current.contains(target)
-      ) {
-        setOpenTopPopover(null);
-      }
-      if (
-        openTopPopover === 'project' &&
-        projectPopoverRef.current &&
-        !projectPopoverRef.current.contains(target)
-      ) {
-        setOpenTopPopover(null);
-      }
-    };
-    window.addEventListener('mousedown', handleOutsideClick);
-    return () => window.removeEventListener('mousedown', handleOutsideClick);
-  }, [openTopPopover]);
-
-  const [overlaySettings, setOverlaySettings] =
-    useState<ViewportOverlaySettings>(() => {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY_OVERLAYS);
-        if (raw) {
-          return { ...DEFAULT_OVERLAY_SETTINGS, ...JSON.parse(raw) };
-        }
-      } catch {
-        // ignore
-      }
-      return DEFAULT_OVERLAY_SETTINGS;
-    });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY_OVERLAYS,
-        JSON.stringify(overlaySettings)
-      );
-    } catch {
-      // ignore
-    }
-  }, [overlaySettings]);
-
-  const toggleOverlay = (key: keyof ViewportOverlaySettings) => {
-    setOverlaySettings((prev) => ({
-      ...prev,
-      [key]: !prev[key],
-    }));
-  };
-
-  const refreshServerCatalogs = useCallback(async () => {
-    setIsSyncingServer(true);
-    try {
-      const [srvModels, srvTextures, srvTemplates, srvScenes] =
-        await Promise.allSettled([
-          fetchModels(),
-          fetchTextures(),
-          fetchApartmentTemplates(),
-          fetchScenes(),
-        ]);
-
-      if (srvModels.status === 'fulfilled' && srvModels.value.length > 0) {
-        setModels(srvModels.value);
-        saveCatalog(srvModels.value);
-      } else if (models.length === 0) {
-        setModels(DEFAULT_CATALOG_MODELS);
-      }
-
-      if (srvTextures.status === 'fulfilled') {
-        setTextures(srvTextures.value.filter((t) => t.isActive !== false));
-      }
-
-      if (srvTemplates.status === 'fulfilled') {
-        setTemplates(srvTemplates.value);
-      }
-
-      if (srvScenes.status === 'fulfilled') {
-        setSavedScenes(srvScenes.value);
-      }
-    } finally {
-      setIsSyncingServer(false);
-    }
-  }, [models.length]);
-
-  useEffect(() => {
-    void refreshServerCatalogs();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const syncNow = () => {
-      if (document.visibilityState === 'visible') {
-        void refreshServerCatalogs();
-      }
-    };
-
-    const intervalId = window.setInterval(syncNow, 30000);
-    window.addEventListener('focus', syncNow);
-    document.addEventListener('visibilitychange', syncNow);
-
-    return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener('focus', syncNow);
-      document.removeEventListener('visibilitychange', syncNow);
-    };
-  }, [refreshServerCatalogs]);
-
+  // Облачни проекти
+  const [cloudScenes, setCloudScenes] = useState<CloudSceneListItem[]>([]);
   const [currentSceneId, setCurrentSceneId] = useState<string | undefined>(
     undefined
   );
-  const [currentSceneTitle, setCurrentSceneTitle] = useState(
-    'Нов интериорен проект'
-  );
+  const [sceneTitle, setSceneTitle] = useState<string>('Нов интериорен проект');
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const [room, setRoom] = useState<RoomConfig>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_PROJECT);
-      if (raw) {
-        const parsed = JSON.parse(raw) as ProjectSnapshot;
-        if (parsed?.room?.walls) return parsed.room;
-      }
-    } catch {
-      // ignore
-    }
-    return createDefaultRoomConfig();
+  // История (Undo / Redo) за стаята и обектите
+  const {
+    state: sceneState,
+    set: setSceneState,
+    undo,
+    redo,
+    resetHistory,
+    canUndo,
+    canRedo,
+  } = useHistoryState<SceneHistorySnapshot>({
+    room: createInitialRoom(),
+    objects: [],
   });
 
-  const [sceneObjects, setSceneObjects] = useState<SceneObject[]>(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY_PROJECT);
-      if (raw) {
-        const parsed = JSON.parse(raw) as ProjectSnapshot;
-        if (Array.isArray(parsed?.sceneObjects)) return parsed.sceneObjects;
-      }
-    } catch {
-      // ignore
-    }
-    return [];
-  });
+  const room = sceneState.room;
+  const sceneObjects = sceneState.objects;
 
-  const [undoStack, setUndoStack] = useState<ProjectSnapshot[]>([]);
-  const [redoStack, setRedoStack] = useState<ProjectSnapshot[]>([]);
-
-  const pushHistory = useCallback(
-    (nextRoom: RoomConfig, nextObjects: SceneObject[]) => {
-      setUndoStack((prev) => [...prev.slice(-29), { room, sceneObjects }]);
-      setRedoStack([]);
-      setRoom(nextRoom);
-      setSceneObjects(nextObjects);
-    },
-    [room, sceneObjects]
-  );
-
-  const handleUndo = useCallback(() => {
-    setUndoStack((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      setRedoStack((r) => [...r, { room, sceneObjects }]);
-      setRoom(last.room);
-      setSceneObjects(last.sceneObjects);
-      return prev.slice(0, -1);
-    });
-  }, [room, sceneObjects]);
-
-  const handleRedo = useCallback(() => {
-    setRedoStack((prev) => {
-      if (prev.length === 0) return prev;
-      const next = prev[prev.length - 1];
-      setUndoStack((u) => [...u, { room, sceneObjects }]);
-      setRoom(next.room);
-      setSceneObjects(next.sceneObjects);
-      return prev.slice(0, -1);
-    });
-  }, [room, sceneObjects]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY_PROJECT,
-        JSON.stringify({ room, sceneObjects })
-      );
-    } catch {
-      // ignore
-    }
-  }, [room, sceneObjects]);
-
-  const [leftTab, setLeftTab] = useState<LeftTab>('catalog');
-  const [categoryFilter, setCategoryFilter] = useState<
-    ModelCategory | 'all' | 'presets'
-  >('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [materialCategoryFilter, setMaterialCategoryFilter] = useState<
-    'all' | 'wall' | 'floor' | 'tiles'
-  >('all');
-
+  // Инструменти и изглед
+  const [activeTool, setActiveTool] = useState<EditorTool>('select');
+  const [placementMode, setPlacementMode] = useState<PlacementMode>('free');
+  const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
+  const [catalogOpen, setCatalogOpen] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<ViewportCameraMode>('3d');
-  const [transformTool, setTransformTool] = useState<TransformTool>('translate');
-  const [unit, setUnit] = useState<DisplayUnit>('cm');
+  const [unit] = useState<DisplayUnit>('m');
+  const [roomPanelOpen, setRoomPanelOpen] = useState<boolean>(false);
 
+  // Модали
+  const [parametricModalOpen, setParametricModalOpen] = useState<boolean>(false);
+  const [editingParametricObj, setEditingParametricObj] =
+    useState<SceneObject | null>(null);
+  const [bomModalOpen, setBomModalOpen] = useState<boolean>(false);
+
+  // Селекция на обекти, стени, отвори, подови зони и повърхности
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(
     null
   );
@@ -352,9 +247,8 @@ export function App() {
   const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(
     null
   );
-  const [selectedStandaloneOpeningId, setSelectedStandaloneOpeningId] = useState<
-    string | null
-  >(null);
+  const [selectedStandaloneOpeningId, setSelectedStandaloneOpeningId] =
+    useState<string | null>(null);
   const [selectedFloorZoneId, setSelectedFloorZoneId] = useState<string | null>(
     null
   );
@@ -363,41 +257,44 @@ export function App() {
     useState<SelectedWallVertex | null>(null);
   const [selectedFloorVertex, setSelectedFloorVertex] =
     useState<SelectedFloorVertex | null>(null);
+  const [linkedVertexJoint, setLinkedVertexJoint] = useState<boolean>(true);
+  const [autoStraightenVertices, setAutoStraightenVertices] =
+    useState<boolean>(true);
 
-  const [draggedTextureId, setDraggedTextureId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!draggedTextureId) return;
-    const clearDrag = () => setDraggedTextureId(null);
-    window.addEventListener('pointerup', clearDrag);
-    return () => window.removeEventListener('pointerup', clearDrag);
-  }, [draggedTextureId]);
-
-  const [isDrawingWalls, setIsDrawingWalls] = useState(false);
+  // Чертаене на стени, подови зони и калибрация на 2D подложка
+  const [isDrawingWalls, setIsDrawingWalls] = useState<boolean>(false);
   const [draftPoints, setDraftPoints] = useState<[number, number][]>([]);
-  const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
-  const [typedWallLength, setTypedWallLength] = useState('');
-
-  const [isDrawingFloorZone, setIsDrawingFloorZone] = useState(false);
-  const [zoneDraftPoints, setZoneDraftPoints] = useState<[number, number][]>([]);
-
-  const [isCalibratingPlan, setIsCalibratingPlan] = useState(false);
+  const [isDrawingFloorZone, setIsDrawingFloorZone] = useState<boolean>(false);
+  const [zoneDraftPoints, setZoneDraftPoints] = useState<[number, number][]>(
+    []
+  );
+  const [isCalibratingPlan, setIsCalibratingPlan] = useState<boolean>(false);
   const [calibPoints, setCalibPoints] = useState<[number, number][]>([]);
+  const [calibRealLengthM, setCalibRealLengthM] = useState<string>('4.0');
+  const [hoverPoint, setHoverPoint] = useState<[number, number] | null>(null);
 
-  const [linkedVertexJoint, setLinkedVertexJoint] = useState(true);
-  const [autoStraightenVertices, setAutoStraightenVertices] = useState(true);
-
-  const [wallLengthInput, setWallLengthInput] = useState('');
-  const [wallAngleInput, setWallAngleInput] = useState('');
-  const [wallThicknessInput, setWallThicknessInput] = useState('');
-
-  const [discoveredSlotsByInstance, setDiscoveredSlotsByInstance] = useState<
+  // Динамично открити слотове на материали в GLB моделите
+  const [discoveredMaterialsMap, setDiscoveredMaterialsMap] = useState<
     Record<string, DiscoveredMaterialSlot[]>
   >({});
 
-  const fileInputPlanRef = useRef<HTMLInputElement | null>(null);
-  const fileInputImportRef = useRef<HTMLInputElement | null>(null);
+  // Текстови полета за размерите на избраната стена
+  const [wallLengthInput, setWallLengthInput] = useState<string>('');
+  const [wallAngleInput, setWallAngleInput] = useState<string>('');
+  const [wallThicknessInput, setWallThicknessInput] = useState<string>('');
 
+  const statusTimerRef = useRef<number | null>(null);
+  const showStatus = useCallback((msg: string) => {
+    setStatusMessage(msg);
+    if (statusTimerRef.current) {
+      window.clearTimeout(statusTimerRef.current);
+    }
+    statusTimerRef.current = window.setTimeout(() => {
+      setStatusMessage(null);
+    }, 3500);
+  }, []);
+
+  // Производни селектирани елементи
   const selectedWall = useMemo(
     () => room.walls.find((w) => w.id === selectedWallId) ?? null,
     [room.walls, selectedWallId]
@@ -417,17 +314,15 @@ export function App() {
   );
 
   const selectedObject = useMemo(
-    () => sceneObjects.find((o) => o.instanceId === selectedInstanceId) ?? null,
+    () =>
+      sceneObjects.find((o) => o.instanceId === selectedInstanceId) ?? null,
     [sceneObjects, selectedInstanceId]
   );
 
-  const selectedModel = useMemo(
-    () =>
-      selectedObject
-        ? models.find((m) => m.id === selectedObject.modelId) ?? null
-        : null,
-    [selectedObject, models]
-  );
+  const selectedModel = useMemo(() => {
+    if (!selectedObject) return null;
+    return models.find((m) => m.id === selectedObject.modelId) ?? null;
+  }, [selectedObject, models]);
 
   useEffect(() => {
     if (!selectedWall) return;
@@ -436,2063 +331,949 @@ export function App() {
     setWallThicknessInput(String(selectedWall.thicknessM));
   }, [selectedWall]);
 
-  const clearAllSelections = useCallback(() => {
+  const transformTool: TransformTool =
+    activeTool === 'rotate'
+      ? 'rotate'
+      : activeTool === 'scale'
+        ? 'scale'
+        : 'translate';
+
+  // Зареждане на сесия, каталог и облачни проекти
+  const refreshCatalogAndScenes = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError(null);
+    try {
+      const [modelsRes, texturesRes, modelCats, texCats] = await Promise.all([
+        fetchModels(),
+        fetchTextures(),
+        fetchCategories('model').catch(() => []),
+        fetchCategories('texture').catch(() => []),
+      ]);
+
+      setModels(modelsRes);
+      setTextures(texturesRes);
+
+      if (modelCats.length > 0) {
+        const map: Record<string, string> = { ...DEFAULT_CATEGORY_LABELS };
+        modelCats.forEach((c) => {
+          map[c.slug] = c.name;
+        });
+        setCategoryLabels(map);
+      }
+
+      if (texCats.length > 0) {
+        const map: Record<string, string> = {
+          ...DEFAULT_TEXTURE_CATEGORY_LABELS,
+        };
+        texCats.forEach((c) => {
+          map[c.slug] = c.name;
+        });
+        setTextureCategoryLabels(map);
+      }
+    } catch (err: any) {
+      setCatalogError(err?.message || 'Грешка при зареждане на каталога.');
+    } finally {
+      setCatalogLoading(false);
+    }
+
+    try {
+      const scenes = await listScenes();
+      setCloudScenes(scenes);
+    } catch {
+      // ignore if unauthenticated
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMe()
+      .then((res) => {
+        setCurrentUser(res.user);
+        setSystemSettings(res.settings);
+      })
+      .catch(() => {});
+    refreshCatalogAndScenes();
+  }, [refreshCatalogAndScenes]);
+
+  // Клавишни комбинации (Escape, Undo, Redo, Delete)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        setIsDrawingWalls(false);
+        setDraftPoints([]);
+        setIsDrawingFloorZone(false);
+        setZoneDraftPoints([]);
+        setIsCalibratingPlan(false);
+        setCalibPoints([]);
+        setHoverPoint(null);
+        setSelectedInstanceId(null);
+        setSelectedWallId(null);
+        setSelectedOpeningId(null);
+        setSelectedStandaloneOpeningId(null);
+        setSelectedFloorZoneId(null);
+        setSelectedWallVertex(null);
+        setSelectedFloorVertex(null);
+        setSelectedSurfaces([]);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
+
+  // Облачно запазване и зареждане
+  const handleSaveCloud = async () => {
+    try {
+      const res = await saveScene({
+        id: currentSceneId,
+        title: sceneTitle.trim() || 'Проект без име',
+        objects: sceneObjects,
+        room,
+      });
+      setCurrentSceneId(res.id);
+      setSceneTitle(res.title);
+      showStatus(`☁ Проектът „${res.title}“ е запазен в облака.`);
+      const updatedList = await listScenes();
+      setCloudScenes(updatedList);
+    } catch (err: any) {
+      showStatus(`❌ ${err?.message || 'Грешка при запазване.'}`);
+    }
+  };
+
+  const handleLoadCloud = async (id: string) => {
+    try {
+      const loaded = await loadScene(id);
+      const safeRoom = normalizeLoadedRoom(loaded.room);
+      const safeObjects = normalizeLoadedObjects(loaded.objects);
+
+      resetHistory({
+        room: safeRoom,
+        objects: safeObjects,
+      });
+      setCurrentSceneId(loaded.id || id);
+      setSceneTitle(loaded.title || 'Зареден проект');
+      setSelectedInstanceId(null);
+      setSelectedWallId(null);
+      setSelectedOpeningId(null);
+      setSelectedStandaloneOpeningId(null);
+      setSelectedFloorZoneId(null);
+      setSelectedSurfaces([]);
+      showStatus(`☁ Зареден проект: ${loaded.title || id}`);
+    } catch (err: any) {
+      showStatus(`❌ ${err?.message || 'Неуспешно зареждане на проекта.'}`);
+    }
+  };
+
+  const handleResetScene = () => {
+    resetHistory({
+      room: createInitialRoom(),
+      objects: [],
+    });
+    setCurrentSceneId(undefined);
+    setSceneTitle('Нов интериорен проект');
     setSelectedInstanceId(null);
     setSelectedWallId(null);
     setSelectedOpeningId(null);
     setSelectedStandaloneOpeningId(null);
     setSelectedFloorZoneId(null);
     setSelectedSurfaces([]);
-    setSelectedWallVertex(null);
-    setSelectedFloorVertex(null);
-  }, []);
+    showStatus('Създадена е нова празна стая.');
+  };
 
-  const handleStartNewProject = useCallback(() => {
-    const hasChanges =
-      sceneObjects.length > 0 ||
-      room.walls.length !== 4 ||
-      (room.openings?.length ?? 0) > 0 ||
-      (room.floorZones?.length ?? 0) > 0 ||
-      Boolean(currentSceneId);
-
-    if (
-      hasChanges &&
-      !window.confirm(
-        'Създаване на нов проект? Незапазените промени по текущата сцена ще бъдат изчистени.'
-      )
-    ) {
-      return;
-    }
-
-    setOpenTopPopover(null);
-    setIsDrawingWalls(false);
-    setDraftPoints([]);
-    setTypedWallLength('');
-    setIsDrawingFloorZone(false);
-    setZoneDraftPoints([]);
-    setIsCalibratingPlan(false);
-    setCalibPoints([]);
-    setCurrentSceneId(undefined);
-    setCurrentSceneTitle('Нов интериорен проект');
-    pushHistory(createDefaultRoomConfig(), []);
-    clearAllSelections();
-  }, [
-    sceneObjects.length,
-    room.walls.length,
-    room.openings?.length,
-    room.floorZones?.length,
-    currentSceneId,
-    pushHistory,
-    clearAllSelections,
-  ]);
-
-  const handleInlineUpdateWallLength = useCallback(
-    (wallId: string, nextLengthM: number) => {
-      if (Number.isNaN(nextLengthM) || nextLengthM < 0.05 || nextLengthM > 50) {
-        return;
+  // Чертаене на стени по пода
+  const handleFloorDrawClick = (pt: [number, number]) => {
+    setDraftPoints((prev) => {
+      if (prev.length === 0) {
+        return [pt];
       }
-      const nextWalls = room.walls.map((w) => {
-        if (w.id !== wallId) return w;
-        const ang = getWallAngleDeg(w);
-        return updateWallGeometry(w, nextLengthM, ang);
-      });
-      pushHistory({ ...room, walls: nextWalls }, sceneObjects);
-    },
-    [room, sceneObjects, pushHistory]
-  );
-
-  const handleSelectSurface = useCallback(
-    (target: SurfaceTarget, additive: boolean) => {
-      setSelectedInstanceId(null);
-      setSelectedStandaloneOpeningId(null);
-      setSelectedOpeningId(null);
-
-      if (additive) {
-        setSelectedSurfaces((prev) => {
-          const next = toggleSurfaceInList(prev, target);
-          if (next.length === 1) {
-            const only = next[0];
-            setSelectedWallId(only.kind === 'wall' ? only.wallId : null);
-            setSelectedFloorZoneId(only.kind === 'floor' ? only.zoneId : null);
-          } else {
-            setSelectedWallId(null);
-            setSelectedFloorZoneId(null);
-          }
-          return next;
-        });
-      } else {
-        setSelectedSurfaces([target]);
-        if (target.kind === 'wall') {
-          setSelectedWallId(target.wallId);
-          setSelectedFloorZoneId(null);
-          setSelectedFloorVertex(null);
-        } else {
-          setSelectedWallId(null);
-          setSelectedFloorZoneId(target.zoneId);
-        }
-      }
-    },
-    []
-  );
-
-  const handleClearSurfaceSelection = useCallback(() => {
-    setSelectedSurfaces([]);
-  }, []);
-
-  const applyPatchToTargets = useCallback(
-    (targets: SurfaceTarget[], patch: SurfaceBatchPatch) => {
-      if (patch.textureId) {
-        const tex = textures.find((t) => t.id === patch.textureId);
-        if (tex?.isPremium && !permissions.canUsePremiumCatalog) {
-          window.alert(
-            `Текстурата „${tex.name}“ е налична за платените планове. Текущ план: ${permissions.planLabel}.`
-          );
-          return;
-        }
-      }
-
-      if (targets.length === 0) return;
-
-      const nextWalls = room.walls.map((w) => {
-        const matchFront = targets.some((t) =>
-          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'front' })
-        );
-        const matchBack = targets.some((t) =>
-          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'back' })
-        );
-        const matchStart = targets.some((t) =>
-          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'start' })
-        );
-        const matchEnd = targets.some((t) =>
-          isSameSurface(t, { kind: 'wall', wallId: w.id, side: 'end' })
-        );
-        if (!matchFront && !matchBack && !matchStart && !matchEnd) return w;
-
-        const updated = { ...w };
-
-        if (matchFront) {
-          if (patch.color !== undefined) updated.frontColor = patch.color;
-          if ('textureId' in patch)
-            updated.frontTextureId = patch.textureId || undefined;
-          if (patch.tileHeightM !== undefined)
-            updated.frontTileHeightM = patch.tileHeightM;
-          if (patch.resetUvw) {
-            updated.frontUvw = undefined;
-          } else if (patch.uvwPatch) {
-            updated.frontUvw = { ...(updated.frontUvw ?? {}), ...patch.uvwPatch };
-          }
-        }
-
-        if (matchBack) {
-          if (patch.color !== undefined) updated.backColor = patch.color;
-          if ('textureId' in patch)
-            updated.backTextureId = patch.textureId || undefined;
-          if (patch.tileHeightM !== undefined)
-            updated.backTileHeightM = patch.tileHeightM;
-          if (patch.resetUvw) {
-            updated.backUvw = undefined;
-          } else if (patch.uvwPatch) {
-            updated.backUvw = { ...(updated.backUvw ?? {}), ...patch.uvwPatch };
-          }
-        }
-
-        if (matchStart) {
-          if (patch.color !== undefined) updated.startColor = patch.color;
-          if ('textureId' in patch)
-            updated.startTextureId = patch.textureId || undefined;
-          if (patch.tileHeightM !== undefined)
-            updated.startTileHeightM = patch.tileHeightM;
-          if (patch.resetUvw) {
-            updated.startUvw = undefined;
-          } else if (patch.uvwPatch) {
-            updated.startUvw = { ...(updated.startUvw ?? {}), ...patch.uvwPatch };
-          }
-        }
-
-        if (matchEnd) {
-          if (patch.color !== undefined) updated.endColor = patch.color;
-          if ('textureId' in patch)
-            updated.endTextureId = patch.textureId || undefined;
-          if (patch.tileHeightM !== undefined)
-            updated.endTileHeightM = patch.tileHeightM;
-          if (patch.resetUvw) {
-            updated.endUvw = undefined;
-          } else if (patch.uvwPatch) {
-            updated.endUvw = { ...(updated.endUvw ?? {}), ...patch.uvwPatch };
-          }
-        }
-
-        return updated;
-      });
-
-      const nextZones = (room.floorZones ?? []).map((z) => {
-        const matchZone = targets.some((t) =>
-          isSameSurface(t, { kind: 'floor', zoneId: z.id })
-        );
-        if (!matchZone) return z;
-
-        const updated: FloorZone = { ...z };
-        if (patch.color !== undefined) updated.color = patch.color;
-        if ('textureId' in patch)
-          updated.textureId = patch.textureId || undefined;
-        if (patch.roughness !== undefined) updated.roughness = patch.roughness;
-        if (patch.metalness !== undefined) updated.metalness = patch.metalness;
-        if (patch.resetUvw) {
-          updated.uvw = undefined;
-          updated.textureRotationDeg = 0;
-        } else if (patch.uvwPatch) {
-          updated.uvw = { ...(updated.uvw ?? {}), ...patch.uvwPatch };
-          if (patch.uvwPatch.rotationDeg !== undefined) {
-            updated.textureRotationDeg = patch.uvwPatch.rotationDeg;
-          }
-        }
-        return updated;
-      });
-
-      pushHistory({ ...room, walls: nextWalls, floorZones: nextZones }, sceneObjects);
-    },
-    [room, sceneObjects, pushHistory, textures, permissions]
-  );
-
-  const handleDropTextureOnSurface = useCallback(
-    (target: SurfaceTarget, textureId: string) => {
-      const targetIsInSelection = selectedSurfaces.some((s) =>
-        isSameSurface(s, target)
-      );
-      const targetsToPaint =
-        targetIsInSelection && selectedSurfaces.length > 1
-          ? selectedSurfaces
-          : [target];
-
-      applyPatchToTargets(targetsToPaint, { textureId });
-
-      if (!targetIsInSelection) {
-        setSelectedSurfaces([target]);
-        if (target.kind === 'wall') {
-          setSelectedWallId(target.wallId);
-          setSelectedFloorZoneId(null);
-        } else {
-          setSelectedWallId(null);
-          setSelectedFloorZoneId(target.zoneId);
-        }
-      }
-      setDraggedTextureId(null);
-    },
-    [selectedSurfaces, applyPatchToTargets]
-  );
-
-  const handleUpdateFloorZoneVertex = useCallback(
-    (zoneId: string, pointIndex: number, nextPoint: [number, number]) => {
-      const nextZones = (room.floorZones ?? []).map((z) => {
-        if (z.id !== zoneId) return z;
-        const pts = z.points.map((pt, idx) =>
-          idx === pointIndex ? nextPoint : pt
-        );
-        return { ...z, points: pts };
-      });
-      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-    },
-    [room, sceneObjects, pushHistory]
-  );
-
-  const handleInsertFloorZoneVertexAfter = useCallback(
-    (zoneId: string, pointIndex: number) => {
-      const nextZones = (room.floorZones ?? []).map((z) => {
-        if (z.id !== zoneId || z.points.length < 2) return z;
-        const curr = z.points[pointIndex];
-        const next = z.points[(pointIndex + 1) % z.points.length];
-        if (!curr || !next) return z;
-
-        const mid: [number, number] = [
-          Number(((curr[0] + next[0]) / 2).toFixed(3)),
-          Number(((curr[1] + next[1]) / 2).toFixed(3)),
-        ];
-        const pts = [...z.points];
-        pts.splice(pointIndex + 1, 0, mid);
-        return { ...z, points: pts };
-      });
-      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-      setSelectedFloorVertex({ zoneId, pointIndex: pointIndex + 1 });
-    },
-    [room, sceneObjects, pushHistory]
-  );
-
-  const handleDeleteFloorZoneVertex = useCallback(
-    (zoneId: string, pointIndex: number) => {
-      const nextZones = (room.floorZones ?? []).map((z) => {
-        if (z.id !== zoneId || z.points.length <= 3) return z;
-        return {
-          ...z,
-          points: z.points.filter((_, idx) => idx !== pointIndex),
-        };
-      });
-      pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-      setSelectedFloorVertex(null);
-    },
-    [room, sceneObjects, pushHistory]
-  );
-
-  const handleFloorDrawClick = useCallback(
-    (pt: [number, number]) => {
-      setTypedWallLength('');
-      if (draftPoints.length === 0) {
-        setDraftPoints([pt]);
-        return;
-      }
-
-      const prevPt = draftPoints[draftPoints.length - 1];
-      if (Math.hypot(pt[0] - prevPt[0], pt[1] - prevPt[1]) < 0.05) {
-        return;
+      const last = prev[prev.length - 1];
+      if (Math.hypot(pt[0] - last[0], pt[1] - last[1]) < 0.05) {
+        return prev;
       }
 
       const newWall: WallSegment = {
         id: `wall-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        start: prevPt,
+        start: last,
         end: pt,
-        thicknessM: room.defaultThicknessM,
+        thicknessM: 0.15,
+        frontColor: '#f1f5f9',
+        backColor: '#f1f5f9',
         openings: [],
       };
 
-      pushHistory({ ...room, walls: [...room.walls, newWall] }, sceneObjects);
-
-      const firstPt = draftPoints[0];
-      if (
-        draftPoints.length >= 3 &&
-        Math.hypot(pt[0] - firstPt[0], pt[1] - firstPt[1]) < 0.05
-      ) {
-        setDraftPoints([]);
-        setIsDrawingWalls(false);
-      } else {
-        setDraftPoints([...draftPoints, pt]);
-      }
-    },
-    [draftPoints, room, sceneObjects, pushHistory]
-  );
-
-  const handleFloorZoneDrawClick = useCallback(
-    (pt: [number, number]) => {
-      if (zoneDraftPoints.length >= 3) {
-        const first = zoneDraftPoints[0];
-        if (Math.hypot(pt[0] - first[0], pt[1] - first[1]) < 0.08) {
-          const newZone: FloorZone = {
-            id: `zone-${Date.now()}`,
-            name: `Подова зона ${(room.floorZones ?? []).length + 1}`,
-            points: [...zoneDraftPoints],
-            color: '#b08968',
-            roughness: 0.55,
-            metalness: 0.05,
-          };
-          pushHistory(
-            { ...room, floorZones: [...(room.floorZones ?? []), newZone] },
-            sceneObjects
-          );
-          setZoneDraftPoints([]);
-          setIsDrawingFloorZone(false);
-          setSelectedFloorZoneId(newZone.id);
-          setSelectedSurfaces([{ kind: 'floor', zoneId: newZone.id }]);
-          return;
-        }
-      }
-      setZoneDraftPoints((prev) => [...prev, pt]);
-    },
-    [zoneDraftPoints, room, sceneObjects, pushHistory]
-  );
-
-  const handleCalibFloorClick = useCallback(
-    (pt: [number, number]) => {
-      if (!room.floorplan) return;
-      if (calibPoints.length === 0) {
-        setCalibPoints([pt]);
-        return;
-      }
-
-      const p1 = calibPoints[0];
-      const distNow = Math.hypot(pt[0] - p1[0], pt[1] - p1[1]);
-      if (distNow < 0.05) return;
-
-      const rawStr = window.prompt(
-        `Реално разстояние между двете точки в метри (сега е ${distNow.toFixed(2)} м):`,
-        distNow.toFixed(2)
-      );
-      if (rawStr) {
-        const realM = parseFloat(rawStr.replace(',', '.'));
-        if (!Number.isNaN(realM) && realM > 0.05) {
-          const calibrated = calibrateFloorplanByTwoPoints(
-            room.floorplan,
-            p1,
-            pt,
-            realM
-          );
-          pushHistory({ ...room, floorplan: calibrated }, sceneObjects);
-        }
-      }
-      setCalibPoints([]);
-      setIsCalibratingPlan(false);
-    },
-    [calibPoints, room, sceneObjects, pushHistory]
-  );
-
-  const handleAddModelToScene = useCallback(
-    (model: CatalogModel) => {
-      if (model.isPremium && !permissions.canUsePremiumCatalog) {
-        window.alert(
-          `Моделът „${model.name}“ е наличен за платените планове. Текущ план: ${permissions.planLabel}.`
-        );
-        return;
-      }
-
-      const id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const offset = (sceneObjects.length % 5) * 0.25;
-      const newObj: SceneObject = {
-        instanceId: id,
-        modelId: model.id,
-        name: model.name,
-        position: [offset, 0, offset],
-        rotation: [0, 0, 0],
-        scale: [1, 1, 1],
-        mirrored: false,
-        materialOverrides: model.defaultMaterialOverrides
-          ? { ...model.defaultMaterialOverrides }
-          : {},
-      };
-      pushHistory(room, [...sceneObjects, newObj]);
-      clearAllSelections();
-      setSelectedInstanceId(id);
-    },
-    [room, sceneObjects, pushHistory, clearAllSelections, permissions]
-  );
-
-  const handleAddPresetToScene = useCallback(
-    (preset: UserFurniturePreset) => {
-      const baseModel = models.find((m) => m.id === preset.baseModelId);
-      if (!baseModel) {
-        window.alert('Базовият 3D модел за този вариант вече не е в каталога.');
-        return;
-      }
-      const id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const newObj: SceneObject = {
-        instanceId: id,
-        modelId: baseModel.id,
-        name: preset.name,
-        position: [0.2, 0, 0.2],
-        rotation: [0, 0, 0],
-        scale: [...preset.scale],
-        mirrored: preset.mirrored,
-        materialOverrides: { ...preset.materialOverrides },
-      };
-      pushHistory(room, [...sceneObjects, newObj]);
-      clearAllSelections();
-      setSelectedInstanceId(id);
-    },
-    [models, room, sceneObjects, pushHistory, clearAllSelections]
-  );
-
-  const handleSaveObjectAsPreset = useCallback(
-    (obj: SceneObject, baseModel: CatalogModel) => {
-      const customName = window.prompt(
-        'Име на запазения вариант в „Мои варианти“:',
-        `${obj.name || baseModel.name} (Вариант)`
-      );
-      if (!customName || !customName.trim()) return;
-
-      const updated = saveUserFurniturePreset({
-        name: customName.trim(),
-        baseModelId: baseModel.id,
-        scale: [...obj.scale],
-        mirrored: Boolean(obj.mirrored),
-        materialOverrides: obj.materialOverrides
-          ? { ...obj.materialOverrides }
-          : {},
-      });
-      setUserPresets(updated);
-    },
-    []
-  );
-
-  const handleAddStandaloneOpening = useCallback(
-    (type: OpeningType) => {
-      const newOp: StandaloneOpening = {
-        id: `op-${Date.now()}`,
-        type,
-        position: [0, 0],
-        rotationDeg: 0,
-        widthM: type === 'door' ? 0.9 : 1.4,
-        heightM: type === 'door' ? 2.05 : 1.35,
-        sillHeightM: type === 'door' ? 0 : 0.9,
-        thicknessM: room.defaultThicknessM,
-        swing: type === 'door' ? 'left-in' : undefined,
-        frameColor: '#f1f5f9',
-      };
-      pushHistory(
-        { ...room, openings: [...(room.openings ?? []), newOp] },
-        sceneObjects
-      );
-      clearAllSelections();
-      setSelectedStandaloneOpeningId(newOp.id);
-    },
-    [room, sceneObjects, pushHistory, clearAllSelections]
-  );
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-      if (isDrawingWalls && draftPoints.length > 0) {
-        if (/^[0-9.,]$/.test(e.key)) {
-          e.preventDefault();
-          setTypedWallLength((prev) => prev + e.key.replace(',', '.'));
-          return;
-        }
-        if (e.key === 'Backspace' && typedWallLength.length > 0) {
-          e.preventDefault();
-          setTypedWallLength((prev) => prev.slice(0, -1));
-          return;
-        }
-        if (e.key === 'Enter' && typedWallLength.length > 0 && hoverPoint) {
-          e.preventDefault();
-          const parsedVal = parseFloat(typedWallLength);
-          if (!Number.isNaN(parsedVal) && parsedVal > 0.02) {
-            const lenM =
-              overlaySettings.dimensionUnit === 'cm'
-                ? parsedVal / 100
-                : parsedVal;
-            const lastPt = draftPoints[draftPoints.length - 1];
-            const dx = hoverPoint[0] - lastPt[0];
-            const dz = hoverPoint[1] - lastPt[1];
-            const angDeg =
-              Math.hypot(dx, dz) > 0.005
-                ? (Math.atan2(dz, dx) * 180) / Math.PI
-                : 0;
-            const exactEnd = computeEndpointFromAngleAndLength(
-              lastPt,
-              lenM,
-              angDeg
-            );
-            handleFloorDrawClick(exactEnd);
-          }
-          setTypedWallLength('');
-          return;
-        }
-      }
-
-      if (e.key === 'Escape') {
-        setOpenTopPopover(null);
-        setIsBomOpen(false);
-        setParametricBuilderState({ isOpen: false });
-        setIsDrawingWalls(false);
-        setDraftPoints([]);
-        setTypedWallLength('');
-        setIsDrawingFloorZone(false);
-        setZoneDraftPoints([]);
-        setIsCalibratingPlan(false);
-        setCalibPoints([]);
-        clearAllSelections();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) handleRedo();
-        else handleUndo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        handleRedo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-        if (selectedObject) {
-          e.preventDefault();
-          const copy: SceneObject = {
-            ...selectedObject,
-            instanceId: `obj-${Date.now()}`,
-            position: [
-              selectedObject.position[0] + 0.35,
-              selectedObject.position[1],
-              selectedObject.position[2] + 0.35,
-            ],
-          };
-          pushHistory(room, [...sceneObjects, copy]);
-          setSelectedInstanceId(copy.instanceId);
-        }
-      } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedObject) {
-          pushHistory(
-            room,
-            sceneObjects.filter((o) => o.instanceId !== selectedObject.instanceId)
-          );
-          setSelectedInstanceId(null);
-        } else if (selectedStandaloneOpening) {
-          pushHistory(
-            {
-              ...room,
-              openings: (room.openings ?? []).filter(
-                (o) => o.id !== selectedStandaloneOpening.id
-              ),
-            },
-            sceneObjects
-          );
-          setSelectedStandaloneOpeningId(null);
-        } else if (selectedWall) {
-          pushHistory(
-            {
-              ...room,
-              walls: room.walls.filter((w) => w.id !== selectedWall.id),
-            },
-            sceneObjects
-          );
-          setSelectedWallId(null);
-          setSelectedSurfaces([]);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [
-    isDrawingWalls,
-    draftPoints,
-    typedWallLength,
-    hoverPoint,
-    overlaySettings.dimensionUnit,
-    handleFloorDrawClick,
-    selectedObject,
-    selectedStandaloneOpening,
-    selectedWall,
-    room,
-    sceneObjects,
-    pushHistory,
-    handleUndo,
-    handleRedo,
-    clearAllSelections,
-  ]);
-
-  const handleUploadFloorplanImage = async (file: File) => {
-    let finalUrl = '';
-    try {
-      const uploaded = await uploadFloorplanImage(file);
-      finalUrl = uploaded.url;
-    } catch {
-      finalUrl = await new Promise<string>((resolve) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result || ''));
-        r.readAsDataURL(file);
-      });
-    }
-
-    if (!finalUrl) return;
-    const img = new Image();
-    img.onload = () => {
-      const aspect =
-        img.width > 0 && img.height > 0 ? img.width / img.height : 1.4;
-      const depthM = 10;
-      const widthM = Number((depthM * aspect).toFixed(2));
-      pushHistory(
-        {
-          ...room,
-          floorplan: {
-            imageUrl: finalUrl,
-            widthM,
-            depthM,
-            aspectRatio: aspect,
-            offsetX: 0,
-            offsetZ: 0,
-            rotationDeg: 0,
-            opacity: 0.65,
-            visible: true,
+      setSceneState(
+        (curr) => ({
+          ...curr,
+          room: {
+            ...curr.room,
+            walls: [...curr.room.walls, newWall],
           },
-        },
-        sceneObjects
+        }),
+        true
       );
+
+      // Ако затворим контура към началната точка, приключваме веригата
+      if (
+        prev.length >= 2 &&
+        Math.hypot(pt[0] - prev[0][0], pt[1] - prev[0][1]) < 0.08
+      ) {
+        setIsDrawingWalls(false);
+        setHoverPoint(null);
+        showStatus('Контурът на помещението е затворен.');
+        return [];
+      }
+
+      return [...prev, pt];
+    });
+  };
+
+  // Чертаене на подова зона
+  const handleFloorZoneDrawClick = (pt: [number, number]) => {
+    setZoneDraftPoints((prev) => {
+      if (
+        prev.length >= 3 &&
+        Math.hypot(pt[0] - prev[0][0], pt[1] - prev[0][1]) < 0.12
+      ) {
+        const newZone: FloorZone = {
+          id: `zone-${Date.now()}`,
+          name: `Зона ${(room.floorZones ?? []).length + 1}`,
+          points: prev,
+          color: '#b08968',
+        };
+        setSceneState(
+          (curr) => ({
+            ...curr,
+            room: {
+              ...curr.room,
+              floorZones: [...(curr.room.floorZones ?? []), newZone],
+            },
+          }),
+          true
+        );
+        setSelectedFloorZoneId(newZone.id);
+        setIsDrawingFloorZone(false);
+        setHoverPoint(null);
+        showStatus('Подовата зона е създадена.');
+        return [];
+      }
+      return [...prev, pt];
+    });
+  };
+
+  // Калибрация на 2D архитектурна подложка
+  const handleCalibFloorClick = (pt: [number, number]) => {
+    setCalibPoints((prev) => {
+      if (prev.length === 0) return [pt];
+      const p1 = prev[0];
+      const measuredDistM = Math.hypot(pt[0] - p1[0], pt[1] - p1[1]);
+      const realDistM = parseFloat(calibRealLengthM.replace(',', '.'));
+      if (measuredDistM > 0.05 && realDistM > 0.1 && room.floorplan) {
+        const ratio = realDistM / measuredDistM;
+        setSceneState(
+          (curr) => ({
+            ...curr,
+            room: {
+              ...curr.room,
+              floorplan: curr.room.floorplan
+                ? {
+                    ...curr.room.floorplan,
+                    widthM: Number((curr.room.floorplan.widthM * ratio).toFixed(2)),
+                    depthM: Number((curr.room.floorplan.depthM * ratio).toFixed(2)),
+                  }
+                : undefined,
+            },
+          }),
+          true
+        );
+        showStatus(`Мащабът на подложката е калибриран (${realDistM} м).`);
+      }
+      setIsCalibratingPlan(false);
+      setHoverPoint(null);
+      return [];
+    });
+  };
+
+  // Селекция на повърхности (стени / подови зони)
+  const handleSelectSurface = (target: SurfaceTarget, additive: boolean) => {
+    setSelectedInstanceId(null);
+    setSelectedStandaloneOpeningId(null);
+
+    if (target.kind === 'wall') {
+      setSelectedWallId(target.wallId);
+      setSelectedFloorZoneId(null);
+    } else {
+      setSelectedFloorZoneId(target.zoneId);
+      setSelectedWallId(null);
+    }
+
+    setSelectedSurfaces((prev) => {
+      if (!additive) return [target];
+      const exists = prev.some((s) => isSameSurface(s, target));
+      return exists
+        ? prev.filter((s) => !isSameSurface(s, target))
+        : [...prev, target];
+    });
+  };
+
+  const handleMaterializeAutoFloorZone = (
+    points: [number, number][],
+    options?: {
+      textureId?: string | null;
+      selectZone?: boolean;
+      additive?: boolean;
+    }
+  ): string | null => {
+    const newZone: FloorZone = {
+      id: `zone-${Date.now()}`,
+      name: `Под ${(room.floorZones ?? []).length + 1}`,
+      points,
+      color: options?.textureId ? '#ffffff' : '#b08968',
+      textureId: options?.textureId || undefined,
     };
-    img.src = finalUrl;
-  };
 
-  const handleSaveCloudProject = async () => {
-    const title = window.prompt('Име на проекта за запис:', currentSceneTitle);
-    if (!title || !title.trim()) return;
-    try {
-      const res = await saveSceneToServer({
-        id: currentSceneId,
-        title: title.trim(),
-        objects: sceneObjects,
-        room,
-      });
-      setCurrentSceneId(res.id || currentSceneId);
-      setCurrentSceneTitle(res.title || title.trim());
-      setOpenTopPopover(null);
-      await refreshServerCatalogs();
-      window.alert('Проектът е запазен успешно!');
-    } catch (err) {
-      window.alert(
-        err instanceof Error ? err.message : 'Грешка при запис на проекта.'
+    setSceneState(
+      (curr) => ({
+        ...curr,
+        room: {
+          ...curr.room,
+          floorZones: [...(curr.room.floorZones ?? []), newZone],
+        },
+      }),
+      true
+    );
+
+    if (options?.selectZone) {
+      handleSelectSurface(
+        { kind: 'floor', zoneId: newZone.id },
+        Boolean(options.additive)
       );
     }
+    return newZone.id;
   };
 
-  const handleLoadCloudProject = async (id: string) => {
-    try {
-      const loaded = await fetchSceneById(id);
-      setCurrentSceneId(loaded.id);
-      setCurrentSceneTitle(loaded.title);
-      setOpenTopPopover(null);
-      pushHistory(loaded.room ?? createDefaultRoomConfig(), loaded.objects ?? []);
-      clearAllSelections();
-    } catch (err) {
-      window.alert(
-        err instanceof Error ? err.message : 'Грешка при зареждане на проекта.'
-      );
-    }
+  const handleApplySurfaceBatch = (patch: SurfaceBatchPatch) => {
+    if (selectedSurfaces.length === 0) return;
+
+    setSceneState(
+      (curr) => {
+        const nextWalls = curr.room.walls.map((w) => {
+          const matchingSides = selectedSurfaces.filter(
+            (s): s is Extract<SurfaceTarget, { kind: 'wall' }> =>
+              s.kind === 'wall' && s.wallId === w.id
+          );
+          if (matchingSides.length === 0) return w;
+
+          let updated = { ...w };
+          for (const m of matchingSides) {
+            const side = m.side;
+            if (patch.color !== undefined) {
+              if (side === 'front') updated.frontColor = patch.color;
+              if (side === 'back') updated.backColor = patch.color;
+              if (side === 'start') updated.startColor = patch.color;
+              if (side === 'end') updated.endColor = patch.color;
+            }
+            if (patch.textureId !== undefined) {
+              const tid = patch.textureId || undefined;
+              if (side === 'front') updated.frontTextureId = tid;
+              if (side === 'back') updated.backTextureId = tid;
+              if (side === 'start') updated.startTextureId = tid;
+              if (side === 'end') updated.endTextureId = tid;
+            }
+            if (patch.tileHeightM !== undefined) {
+              if (side === 'front') updated.frontTileHeightM = patch.tileHeightM;
+              if (side === 'back') updated.backTileHeightM = patch.tileHeightM;
+              if (side === 'start') updated.startTileHeightM = patch.tileHeightM;
+              if (side === 'end') updated.endTileHeightM = patch.tileHeightM;
+            }
+            if (patch.resetUvw) {
+              if (side === 'front') updated.frontUvw = undefined;
+              if (side === 'back') updated.backUvw = undefined;
+              if (side === 'start') updated.startUvw = undefined;
+              if (side === 'end') updated.endUvw = undefined;
+            } else if (patch.uvwPatch) {
+              if (side === 'front')
+                updated.frontUvw = { ...(updated.frontUvw ?? {}), ...patch.uvwPatch };
+              if (side === 'back')
+                updated.backUvw = { ...(updated.backUvw ?? {}), ...patch.uvwPatch };
+              if (side === 'start')
+                updated.startUvw = { ...(updated.startUvw ?? {}), ...patch.uvwPatch };
+              if (side === 'end')
+                updated.endUvw = { ...(updated.endUvw ?? {}), ...patch.uvwPatch };
+            }
+          }
+          return updated;
+        });
+
+        const nextZones = (curr.room.floorZones ?? []).map((z) => {
+          const isMatched = selectedSurfaces.some(
+            (s) => s.kind === 'floor' && s.zoneId === z.id
+          );
+          if (!isMatched) return z;
+
+          return {
+            ...z,
+            color: patch.color !== undefined ? patch.color : z.color,
+            textureId:
+              patch.textureId !== undefined
+                ? patch.textureId || undefined
+                : z.textureId,
+            roughness:
+              patch.roughness !== undefined ? patch.roughness : z.roughness,
+            metalness:
+              patch.metalness !== undefined ? patch.metalness : z.metalness,
+            uvw: patch.resetUvw
+              ? undefined
+              : patch.uvwPatch
+                ? { ...(z.uvw ?? {}), ...patch.uvwPatch }
+                : z.uvw,
+          };
+        });
+
+        return {
+          ...curr,
+          room: {
+            ...curr.room,
+            walls: nextWalls,
+            floorZones: nextZones,
+          },
+        };
+      },
+      true
+    );
   };
 
-  const handleApplyApartmentTemplate = (tpl: ApartmentTemplate) => {
-    if (
-      !window.confirm(
-        `Зареждане на шаблон „${tpl.name}“? Текущите стени ще бъдат заменени.`
-      )
-    ) {
+  // Добавяне на модел от каталога
+  const handleSelectCatalogModel = (model: CatalogModel) => {
+    const newObj: SceneObject = {
+      instanceId: `inst-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      modelId: model.id,
+      name: model.name,
+      category: model.category,
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      dimensionsCm: model.dimensionsCm,
+      scaleMode: model.scaleMode,
+      scaleConstraints: model.scaleConstraints,
+      glbUrl: model.glbUrl,
+    };
+
+    setSceneState(
+      (curr) => ({
+        ...curr,
+        objects: [...curr.objects, newObj],
+      }),
+      true
+    );
+    setSelectedInstanceId(newObj.instanceId);
+    setSelectedWallId(null);
+    setSelectedFloorZoneId(null);
+    setSelectedSurfaces([]);
+    setActiveTool('move');
+    showStatus(`Добавен модел: ${model.name}`);
+  };
+
+  // Прилагане на текстура от каталога върху избрания обект, под или стени
+  const handleApplyTextureFromCatalog = (
+    targetMode: 'selected' | 'floor' | 'walls',
+    texture: CatalogTexture
+  ) => {
+    if (targetMode === 'selected') {
+      if (selectedSurfaces.length > 0) {
+        handleApplySurfaceBatch({ textureId: texture.id, color: '#ffffff' });
+        showStatus(`Приложена текстура „${texture.name}“ върху избраните повърхности.`);
+        return;
+      }
+      if (selectedObject) {
+        const slots = discoveredMaterialsMap[selectedObject.instanceId] ?? [];
+        const targetKey = slots[0]?.key || 'default';
+        setSceneState(
+          (curr) => ({
+            ...curr,
+            objects: curr.objects.map((o) =>
+              o.instanceId === selectedObject.instanceId
+                ? {
+                    ...o,
+                    materialOverrides: {
+                      ...(o.materialOverrides ?? {}),
+                      [targetKey]: {
+                        color: '#ffffff',
+                        textureId: texture.id,
+                      },
+                    },
+                  }
+                : o
+            ),
+          }),
+          true
+        );
+        showStatus(`Приложена текстура „${texture.name}“ върху ${selectedObject.name}.`);
+        return;
+      }
+      showStatus('Първо избери стена, под или 3D обект в сцената.');
       return;
     }
-    setOpenTopPopover(null);
-    pushHistory(
-      {
-        templateId: tpl.id,
-        templateName: tpl.name,
-        ceilingHeightM: tpl.ceilingHeightM,
-        defaultThicknessM: tpl.defaultThicknessM,
-        ceilingColor: '#f8fafc',
-        showCeiling: false,
-        walls: tpl.walls ?? [],
-        openings: tpl.openings ?? [],
-        floorZones: tpl.floorZones ?? [],
-        savedCameras: [],
-        floorplan: null,
-      },
-      sceneObjects
-    );
-    clearAllSelections();
-  };
 
-  const handleExportProject = () => {
-    const data = JSON.stringify({ room, sceneObjects }, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `interior-project-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setOpenTopPopover(null);
-  };
-
-  const handleImportProject = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result || '')) as ProjectSnapshot;
-        if (parsed?.room?.walls) {
-          pushHistory(parsed.room, parsed.sceneObjects ?? []);
-          clearAllSelections();
-          setOpenTopPopover(null);
-        }
-      } catch {
-        window.alert('Невалиден JSON файл на проект.');
+    if (targetMode === 'floor') {
+      if ((room.floorZones ?? []).length === 0) {
+        showStatus('Кликни върху пода в 3D, за да се създаде подова зона, или очертай зона.');
+        return;
       }
+      setSceneState(
+        (curr) => ({
+          ...curr,
+          room: {
+            ...curr.room,
+            floorZones: (curr.room.floorZones ?? []).map((z) => ({
+              ...z,
+              color: '#ffffff',
+              textureId: texture.id,
+            })),
+          },
+        }),
+        true
+      );
+      showStatus(`Настилката „${texture.name}“ е приложена върху подовете.`);
+      return;
+    }
+
+    if (targetMode === 'walls') {
+      setSceneState(
+        (curr) => ({
+          ...curr,
+          room: {
+            ...curr.room,
+            walls: curr.room.walls.map((w) => ({
+              ...w,
+              frontColor: '#ffffff',
+              backColor: '#ffffff',
+              frontTextureId: texture.id,
+              backTextureId: texture.id,
+            })),
+          },
+        }),
+        true
+      );
+      showStatus(`Облицовката „${texture.name}“ е приложена върху стените.`);
+    }
+  };
+
+  // Параметрични мебели (създаване / редакция)
+  const handleConfirmParametric = (
+    name: string,
+    config: ParametricFurnitureConfig
+  ) => {
+    if (editingParametricObj) {
+      setSceneState(
+        (curr) => ({
+          ...curr,
+          objects: curr.objects.map((o) =>
+            o.instanceId === editingParametricObj.instanceId
+              ? { ...o, name, parametric: config }
+              : o
+          ),
+        }),
+        true
+      );
+      setEditingParametricObj(null);
+      setParametricModalOpen(false);
+      showStatus(`Обновен параметричен модул: ${name}`);
+      return;
+    }
+
+    const newObj: SceneObject = {
+      instanceId: `param-${Date.now()}`,
+      modelId: 'parametric-custom',
+      name,
+      category: config.kind === 'kitchen' ? 'kitchen' : 'wardrobes',
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      parametric: config,
     };
-    reader.readAsText(file);
+
+    setSceneState(
+      (curr) => ({
+        ...curr,
+        objects: [...curr.objects, newObj],
+      }),
+      true
+    );
+    setSelectedInstanceId(newObj.instanceId);
+    setParametricModalOpen(false);
+    setActiveTool('move');
+    showStatus(`Създаден параметричен модул: ${name}`);
   };
 
-  const filteredModels = useMemo(() => {
-    return models.filter((m) => {
-      if (!m.isActive) return false;
-      if (categoryFilter === 'presets') return false;
-      if (categoryFilter !== 'all' && m.category !== categoryFilter) {
-        return false;
-      }
-      if (
-        searchQuery.trim() &&
-        !m.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
-      ) {
-        return false;
-      }
-      return true;
-    });
-  }, [models, categoryFilter, searchQuery]);
-
-  const filteredSurfaceTextures = useMemo(() => {
-    return textures.filter((t) => {
-      if (t.category === 'furniture') return false;
-      if (
-        materialCategoryFilter !== 'all' &&
-        t.category !== materialCategoryFilter
-      ) {
-        return false;
-      }
-      if (
-        searchQuery.trim() &&
-        !t.name.toLowerCase().includes(searchQuery.trim().toLowerCase())
-      ) {
-        return false;
-      }
-      return true;
-    });
-  }, [textures, materialCategoryFilter, searchQuery]);
-
-  const discoveredSlotsForSelected = selectedObject
-    ? discoveredSlotsByInstance[selectedObject.instanceId] ?? []
-    : [];
+  if (isAdminRoute) {
+    return (
+      <AdminDashboardPage
+        currentUser={currentUser}
+        systemSettings={systemSettings}
+        onBackToEditor={() => {
+          window.history.pushState({}, '', '/');
+          setIsAdminRoute(false);
+          refreshCatalogAndScenes();
+        }}
+        onAuthUpdated={(user, settings) => {
+          setCurrentUser(user);
+          setSystemSettings(settings);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app-shell">
-      {/* ГОРНА ЛЕНТА */}
-      <header className="topbar">
-        <div className="topbar-group">
-          <div className="brand-title">
-            3D Интериорно Студио
-            <span className="brand-badge">AUTO</span>
-          </div>
+      <TopBar
+        activeTool={activeTool}
+        placementMode={placementMode}
+        snapEnabled={snapEnabled}
+        catalogOpen={catalogOpen}
+        viewMode={viewMode}
+        isDrawingWalls={isDrawingWalls}
+        isDrawingFloorZone={isDrawingFloorZone}
+        roomPanelOpen={roomPanelOpen}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        sceneTitle={sceneTitle}
+        currentSceneId={currentSceneId}
+        cloudScenes={cloudScenes}
+        currentUser={currentUser}
+        systemSettings={systemSettings}
+        statusMessage={statusMessage}
+        onSelectTool={setActiveTool}
+        onSelectPlacementMode={setPlacementMode}
+        onToggleSnap={() => setSnapEnabled((s) => !s)}
+        onToggleCatalog={() => setCatalogOpen((c) => !c)}
+        onToggleViewMode={(mode) => setViewMode(mode)}
+        onToggleDrawWalls={() => {
+          setIsDrawingWalls((prev) => {
+            const next = !prev;
+            if (next) {
+              setIsDrawingFloorZone(false);
+              setIsCalibratingPlan(false);
+              setViewMode('top');
+              showStatus('Кликни по плана за стени. Esc или Enter за край.');
+            } else {
+              setDraftPoints([]);
+              setHoverPoint(null);
+            }
+            return next;
+          });
+        }}
+        onToggleDrawFloorZone={() => {
+          setIsDrawingFloorZone((prev) => {
+            const next = !prev;
+            if (next) {
+              setIsDrawingWalls(false);
+              setIsCalibratingPlan(false);
+              setViewMode('top');
+              showStatus('Очертай ъглите на подовата зона и затвори в първата точка.');
+            } else {
+              setZoneDraftPoints([]);
+              setHoverPoint(null);
+            }
+            return next;
+          });
+        }}
+        onToggleRoomPanel={() => setRoomPanelOpen((p) => !p)}
+        onOpenParametricBuilder={() => {
+          setEditingParametricObj(null);
+          setParametricModalOpen(true);
+        }}
+        onOpenBomModal={() => setBomModalOpen(true)}
+        onOpenAdminPage={() => {
+          window.history.pushState({}, '', '/admin');
+          setIsAdminRoute(true);
+        }}
+        onOpenAuthModal={() => setAuthModalOpen(true)}
+        onLogout={async () => {
+          await logoutUser();
+          setCurrentUser(null);
+          showStatus('Излязохте от профила си.');
+        }}
+        onSceneTitleChange={setSceneTitle}
+        onSaveCloud={handleSaveCloud}
+        onLoadCloud={handleLoadCloud}
+        onUndo={undo}
+        onRedo={redo}
+        onResetScene={handleResetScene}
+      />
 
-          <button
-            type="button"
-            className={`btn ${viewMode === '3d' ? 'btn-active' : ''}`}
-            onClick={() => setViewMode('3d')}
-          >
-            3D Изглед
-          </button>
-          <button
-            type="button"
-            className={`btn ${viewMode === 'top' ? 'btn-active' : ''}`}
-            onClick={() => setViewMode('top')}
-          >
-            2D План
-          </button>
-
-          <button
-            type="button"
-            className={`btn ${transformTool === 'translate' ? 'btn-active' : ''}`}
-            onClick={() => setTransformTool('translate')}
-          >
-            Премести
-          </button>
-          <button
-            type="button"
-            className={`btn ${transformTool === 'rotate' ? 'btn-active' : ''}`}
-            onClick={() => setTransformTool('rotate')}
-          >
-            Завърти
-          </button>
-          <button
-            type="button"
-            className={`btn ${transformTool === 'scale' ? 'btn-active' : ''}`}
-            onClick={() => setTransformTool('scale')}
-          >
-            Мащаб
-          </button>
-
-          {/* ПАДАЩО МЕНЮ: НАСТРОЙКИ */}
-          <div ref={settingsPopoverRef} style={{ position: 'relative' }}>
-            <button
-              type="button"
-              className={`btn ${openTopPopover === 'settings' ? 'btn-active' : ''}`}
-              onClick={() =>
-                setOpenTopPopover((prev) =>
-                  prev === 'settings' ? null : 'settings'
-                )
-              }
-            >
-              ⚙ Настройки ▾
-            </button>
-
-            {openTopPopover === 'settings' && (
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 6px)',
-                  left: 0,
-                  width: '300px',
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: '8px',
-                  padding: '12px',
-                  zIndex: 100,
-                  boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '10px',
+      {/* ПАНЕЛ ЗА ШАБЛОНИ НА СТАЯ, ТАВАН И 2D ПОДЛОЖКА */}
+      {roomPanelOpen && (
+        <div
+          style={{
+            backgroundColor: '#0f172a',
+            borderBottom: '1px solid #334155',
+            padding: '10px 16px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: '14px',
+            zIndex: 25,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11.5px', color: '#94a3b8', fontWeight: 600 }}>
+              Шаблон стая:
+            </span>
+            {(Object.keys(ROOM_TEMPLATES) as RoomTemplateKey[]).map((key) => (
+              <button
+                key={key}
+                type="button"
+                className="btn"
+                style={{ fontSize: '11px', padding: '4px 8px' }}
+                onClick={() => {
+                  const walls = createRoomFromTemplate(key);
+                  setSceneState(
+                    (curr) => ({
+                      ...curr,
+                      room: {
+                        ...curr.room,
+                        walls,
+                        floorZones: [],
+                      },
+                    }),
+                    true
+                  );
+                  showStatus(`Зареден шаблон: ${ROOM_TEMPLATES[key].label}`);
                 }}
               >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Котиране и визуални слоеве
-                </div>
+                {ROOM_TEMPLATES[key].label}
+              </button>
+            ))}
+          </div>
 
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
+          <div className="divider-v" />
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11.5px', color: '#94a3b8' }}>
+              Височина таван (м):
+            </span>
+            <input
+              type="number"
+              step={0.05}
+              min={2}
+              max={6}
+              className="input-control"
+              style={{ width: '72px' }}
+              value={room.ceilingHeightM}
+              onChange={(e) => {
+                const h = parseFloat(e.target.value);
+                if (h >= 1.5 && h <= 8) {
+                  setSceneState(
+                    (curr) => ({
+                      ...curr,
+                      room: { ...curr.room, ceilingHeightM: h },
+                    }),
+                    true
+                  );
+                }
+              }}
+            />
+          </div>
+
+          <div className="divider-v" />
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <label
+              className="btn"
+              style={{ fontSize: '11px', padding: '4px 8px', cursor: 'pointer' }}
+            >
+              🗺 Качи 2D план (снимка)
+              <input
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const url = await uploadFloorplanFile(file);
+                    setSceneState(
+                      (curr) => ({
+                        ...curr,
+                        room: {
+                          ...curr.room,
+                          floorplan: {
+                            imageUrl: url,
+                            widthM: 10,
+                            depthM: 8,
+                            offsetX: 0,
+                            offsetZ: 0,
+                            rotationDeg: 0,
+                            opacity: 0.45,
+                            visible: true,
+                          },
+                        },
+                      }),
+                      true
+                    );
+                    setViewMode('top');
+                    showStatus('2D планът е качен като подложка.');
+                  } catch (err: any) {
+                    showStatus(`❌ ${err?.message || 'Грешка при качване на плана.'}`);
+                  }
+                }}
+              />
+            </label>
+
+            {room.floorplan && (
+              <>
+                <button
+                  type="button"
+                  className={`btn ${isCalibratingPlan ? 'btn-active' : ''}`}
+                  style={{ fontSize: '11px', padding: '4px 8px' }}
+                  onClick={() => {
+                    setIsCalibratingPlan((p) => !p);
+                    setCalibPoints([]);
+                    setViewMode('top');
+                    showStatus('Кликни двата края на известна стена върху снимката.');
                   }}
                 >
-                  <span>Размерни линии (коти) на стените</span>
+                  📏 Калибрирай мащаб
+                </button>
+                {isCalibratingPlan && (
                   <input
-                    type="checkbox"
-                    checked={overlaySettings.showWallDimensions}
-                    onChange={() => toggleOverlay('showWallDimensions')}
+                    type="number"
+                    step={0.1}
+                    className="input-control"
+                    style={{ width: '68px' }}
+                    value={calibRealLengthM}
+                    onChange={(e) => setCalibRealLengthM(e.target.value)}
+                    title="Реална дължина в метри"
                   />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Квадратура на стаите (м²)</span>
-                  <input
-                    type="checkbox"
-                    checked={overlaySettings.showRoomAreas}
-                    onChange={() => toggleOverlay('showRoomAreas')}
-                  />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>2D дъги на отваряне на вратите</span>
-                  <input
-                    type="checkbox"
-                    checked={overlaySettings.show2DDoorSwings}
-                    onChange={() => toggleOverlay('show2DDoorSwings')}
-                  />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Дебелина на стената в котите</span>
-                  <input
-                    type="checkbox"
-                    checked={overlaySettings.showWallThicknessLabels}
-                    onChange={() => toggleOverlay('showWallThicknessLabels')}
-                  />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Подова координатна мрежа (Grid)</span>
-                  <input
-                    type="checkbox"
-                    checked={overlaySettings.showGrid}
-                    onChange={() => toggleOverlay('showGrid')}
-                  />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Ъглови маркери (въртекси)</span>
-                  <input
-                    type="checkbox"
-                    checked={overlaySettings.showVertexHandles}
-                    onChange={() => toggleOverlay('showVertexHandles')}
-                  />
-                </label>
-
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    paddingTop: '8px',
-                    borderTop: '1px solid #1e293b',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                  }}
-                >
-                  <span>Единица на котите</span>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    <button
-                      type="button"
-                      className={`btn ${overlaySettings.dimensionUnit === 'm' ? 'btn-active' : ''}`}
-                      style={{ padding: '3px 8px', fontSize: '11px' }}
-                      onClick={() =>
-                        setOverlaySettings((p) => ({ ...p, dimensionUnit: 'm' }))
-                      }
-                    >
-                      Метри (м)
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn ${overlaySettings.dimensionUnit === 'cm' ? 'btn-active' : ''}`}
-                      style={{ padding: '3px 8px', fontSize: '11px' }}
-                      onClick={() =>
-                        setOverlaySettings((p) => ({
-                          ...p,
-                          dimensionUnit: 'cm',
-                        }))
-                      }
-                    >
-                      СМ
-                    </button>
-                  </div>
-                </div>
-
-                <div
-                  className="section-label"
-                  style={{
-                    marginBottom: 0,
-                    paddingTop: '8px',
-                    borderTop: '1px solid #1e293b',
-                  }}
-                >
-                  Поведение при редакция на ъгли
-                </div>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Свързани ъгли (движи съседните стени)</span>
-                  <input
-                    type="checkbox"
-                    checked={linkedVertexJoint}
-                    onChange={() => setLinkedVertexJoint((p) => !p)}
-                  />
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    fontSize: '12px',
-                    color: '#e2e8f0',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span>Магнитно изправяне (90° / 180°)</span>
-                  <input
-                    type="checkbox"
-                    checked={autoStraightenVertices}
-                    onChange={() => setAutoStraightenVertices((p) => !p)}
-                  />
-                </label>
-
+                )}
                 <button
                   type="button"
                   className="btn"
-                  style={{ fontSize: '11px', marginTop: '2px' }}
-                  onClick={() => setOverlaySettings(DEFAULT_OVERLAY_SETTINGS)}
-                >
-                  Възстанови стандартните настройки
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="topbar-group">
-          <button
-            type="button"
-            className="btn"
-            disabled={undoStack.length === 0}
-            onClick={handleUndo}
-            title="Назад (Ctrl+Z)"
-          >
-            ↶ Undo
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={redoStack.length === 0}
-            onClick={handleRedo}
-            title="Напред (Ctrl+Y)"
-          >
-            ↷ Redo
-          </button>
-
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setUnit((u) => (u === 'cm' ? 'm' : 'cm'))}
-          >
-            {unit === 'cm' ? 'СМ' : 'М'}
-          </button>
-
-          <button
-            type="button"
-            className={`btn ${isBomOpen ? 'btn-active' : ''}`}
-            onClick={() => {
-              if (!permissions.canExportBom) {
-                window.alert(
-                  `Спецификацията и разкроят (BOM) са достъпни в платените планове. Текущ план: ${permissions.planLabel}.`
-                );
-                return;
-              }
-              setOpenTopPopover(null);
-              setIsBomOpen(true);
-            }}
-            title={
-              permissions.canExportBom
-                ? 'Автоматична спецификация, квадратури и разкрой (CSV / PDF)'
-                : 'Изисква платен план'
-            }
-          >
-            {permissions.canExportBom ? '📋 Спецификация' : '🔒 Спецификация'}
-          </button>
-
-          {/* ПАДАЩО МЕНЮ: ПРОЕКТ (всички контроли за проекта събрани тук) */}
-          <div ref={projectPopoverRef} style={{ position: 'relative' }}>
-            <button
-              type="button"
-              className={`btn ${openTopPopover === 'project' ? 'btn-active' : ''}`}
-              onClick={() =>
-                setOpenTopPopover((prev) =>
-                  prev === 'project' ? null : 'project'
-                )
-              }
-              title={`Текущ проект: ${currentSceneTitle}`}
-            >
-              📁 Проект: {currentSceneTitle} ▾
-            </button>
-
-            {openTopPopover === 'project' && (
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 6px)',
-                  right: 0,
-                  width: '310px',
-                  maxHeight: '78vh',
-                  overflowY: 'auto',
-                  backgroundColor: '#0f172a',
-                  border: '1px solid #334155',
-                  borderRadius: '8px',
-                  padding: '12px',
-                  zIndex: 100,
-                  boxShadow: '0 14px 34px rgba(0, 0, 0, 0.65)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '10px',
-                }}
-              >
-                <div className="section-label" style={{ marginBottom: 0 }}>
-                  Управление на проекта
-                </div>
-
-                <div style={{ display: 'flex', gap: '6px' }}>
-                  <button
-                    type="button"
-                    className="btn"
-                    style={{ flex: 1, fontSize: '11.5px' }}
-                    onClick={handleStartNewProject}
-                  >
-                    + Нов проект
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-active"
-                    style={{ flex: 1, fontSize: '11.5px' }}
-                    onClick={() => void handleSaveCloudProject()}
-                  >
-                    ☁ Запази в облака
-                  </button>
-                </div>
-
-                {savedScenes.length > 0 && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '5px',
-                      paddingTop: '8px',
-                      borderTop: '1px solid #1e293b',
-                    }}
-                  >
-                    <div className="section-label" style={{ marginBottom: 0 }}>
-                      Запазени проекти ({savedScenes.length})
-                    </div>
-                    {savedScenes.map((sc) => (
-                      <button
-                        key={sc.id}
-                        type="button"
-                        className={`btn ${currentSceneId === sc.id ? 'btn-active' : ''}`}
-                        style={{
-                          textAlign: 'left',
-                          fontSize: '11.5px',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                        onClick={() => void handleLoadCloudProject(sc.id)}
-                      >
-                        📂 {sc.title}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {templates.length > 0 && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '5px',
-                      paddingTop: '8px',
-                      borderTop: '1px solid #1e293b',
-                    }}
-                  >
-                    <div className="section-label" style={{ marginBottom: 0 }}>
-                      Готови шаблони апартаменти ({templates.length})
-                    </div>
-                    {templates.map((tpl) => (
-                      <button
-                        key={tpl.id}
-                        type="button"
-                        className="btn"
-                        style={{ textAlign: 'left', fontSize: '11.5px' }}
-                        onClick={() => handleApplyApartmentTemplate(tpl)}
-                      >
-                        🏢 {tpl.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px',
-                    paddingTop: '8px',
-                    borderTop: '1px solid #1e293b',
-                  }}
-                >
-                  <div className="section-label" style={{ marginBottom: 0 }}>
-                    Локален файл (JSON)
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ flex: 1, fontSize: '11px' }}
-                      onClick={handleExportProject}
-                    >
-                      ⬇ Експорт JSON
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ flex: 1, fontSize: '11px' }}
-                      onClick={() => fileInputImportRef.current?.click()}
-                    >
-                      ⬆ Импорт JSON
-                    </button>
-                  </div>
-                  <input
-                    ref={fileInputImportRef}
-                    type="file"
-                    accept=".json"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) handleImportProject(f);
-                      e.target.value = '';
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          {permissions.canAccessAdminPanel && (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setIsAdminOpen(true)}
-            >
-              ⚙ Админ панел
-            </button>
-          )}
-
-          {authUser && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '3px 8px',
-                borderRadius: '6px',
-                backgroundColor: '#0f172a',
-                border: '1px solid #334155',
-                fontSize: '11px',
-                color: '#e2e8f0',
-              }}
-              title={`${authUser.name} (${authUser.email}) • ${permissions.planLabel}`}
-            >
-              <span style={{ fontWeight: 600 }}>{authUser.name}</span>
-              <span
-                style={{
-                  padding: '1px 6px',
-                  borderRadius: '999px',
-                  backgroundColor: '#1e293b',
-                  color: '#38bdf8',
-                  fontSize: '10px',
-                }}
-              >
-                {permissions.planLabel}
-              </span>
-              <span
-                style={{
-                  padding: '1px 6px',
-                  borderRadius: '999px',
-                  backgroundColor: '#1e293b',
-                  color: '#fbbf24',
-                  fontSize: '10px',
-                }}
-                title="Налични AI кредити"
-              >
-                ⚡ {authUser.totalAvailableCredits}
-              </span>
-              <button
-                type="button"
-                className="btn"
-                style={{ padding: '2px 6px', fontSize: '10px' }}
-                onClick={async () => {
-                  await logoutUser();
-                  setAuthUser(null);
-                  setPendingUser(null);
-                }}
-                title="Изход от профила"
-              >
-                Изход
-              </button>
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* РАБОТНА ЗОНА */}
-      <div className="workspace">
-        {/* ЛЯВ ПАНЕЛ — САМО МЕБЕЛИ, МАТЕРИАЛИ И СТЕНИ */}
-        <aside className="sidebar-left">
-          <div className="panel-header" style={{ padding: '6px', gap: '4px' }}>
-            <button
-              type="button"
-              className={`btn ${leftTab === 'catalog' ? 'btn-active' : ''}`}
-              style={{ flex: 1, padding: '6px 4px', fontSize: '11px' }}
-              onClick={() => setLeftTab('catalog')}
-            >
-              Мебели
-            </button>
-            <button
-              type="button"
-              className={`btn ${leftTab === 'materials' ? 'btn-active' : ''}`}
-              style={{ flex: 1, padding: '6px 4px', fontSize: '11px' }}
-              onClick={() => setLeftTab('materials')}
-            >
-              Материали
-            </button>
-            <button
-              type="button"
-              className={`btn ${leftTab === 'room' ? 'btn-active' : ''}`}
-              style={{ flex: 1, padding: '6px 4px', fontSize: '11px' }}
-              onClick={() => setLeftTab('room')}
-            >
-              Стени
-            </button>
-          </div>
-
-          <div className="panel-body">
-            {leftTab === 'catalog' && (
-              <>
-                <button
-                  type="button"
-                  className="btn btn-active"
-                  style={{
-                    width: '100%',
-                    padding: '8px 10px',
-                    fontWeight: 700,
-                    fontSize: '12px',
-                  }}
-                  onClick={() => {
-                    if (!permissions.canUseParametricGenerators) {
-                      window.alert(
-                        `Параметричният генератор за кухня и гардероб е достъпен в платените планове. Текущ план: ${permissions.planLabel}.`
-                      );
-                      return;
-                    }
-                    setParametricBuilderState({ isOpen: true });
-                  }}
-                >
-                  {permissions.canUseParametricGenerators
-                    ? '✨ Генератор: Кухня / Гардероб'
-                    : '🔒 Генератор: Кухня / Гардероб'}
-                </button>
-
-                <input
-                  type="text"
-                  className="input-control"
-                  placeholder="Търси мебел..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                  <button
-                    type="button"
-                    className={`btn ${categoryFilter === 'all' ? 'btn-active' : ''}`}
-                    style={{ fontSize: '10px', padding: '3px 6px' }}
-                    onClick={() => setCategoryFilter('all')}
-                  >
-                    Всички
-                  </button>
-                  <button
-                    type="button"
-                    className={`btn ${categoryFilter === 'presets' ? 'btn-active' : ''}`}
-                    style={{ fontSize: '10px', padding: '3px 6px' }}
-                    onClick={() => setCategoryFilter('presets')}
-                  >
-                    ★ Мои варианти ({userPresets.length})
-                  </button>
-                  {(Object.keys(CATEGORY_LABELS) as ModelCategory[]).map((cat) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      className={`btn ${categoryFilter === cat ? 'btn-active' : ''}`}
-                      style={{ fontSize: '10px', padding: '3px 6px' }}
-                      onClick={() => setCategoryFilter(cat)}
-                    >
-                      {CATEGORY_LABELS[cat]}
-                    </button>
-                  ))}
-                </div>
-
-                {categoryFilter === 'presets' ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {userPresets.length === 0 ? (
-                      <div className="empty-state-box">
-                        Нямате запазени варианти. Променете цветовете на мебел и натиснете „★ Запази в Мои варианти“.
-                      </div>
-                    ) : (
-                      userPresets.map((preset) => (
-                        <div
-                          key={preset.id}
-                          style={{
-                            backgroundColor: '#0f172a',
-                            border: '1px solid #38bdf8',
-                            borderRadius: '6px',
-                            padding: '8px',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '6px',
-                          }}
-                        >
-                          <div style={{ fontWeight: 600, fontSize: '12px', color: '#f8fafc' }}>
-                            {preset.name}
-                          </div>
-                          <div style={{ display: 'flex', gap: '6px' }}>
-                            <button
-                              type="button"
-                              className="btn btn-active"
-                              style={{ flex: 1, fontSize: '11px' }}
-                              onClick={() => handleAddPresetToScene(preset)}
-                            >
-                              + Добави
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-danger"
-                              style={{ fontSize: '11px', padding: '4px 8px' }}
-                              onClick={() =>
-                                setUserPresets(deleteUserFurniturePreset(preset.id))
+                  style={{ fontSize: '11px', padding: '4px 8px' }}
+                  onClick={() =>
+                    setSceneState(
+                      (curr) => ({
+                        ...curr,
+                        room: {
+                          ...curr.room,
+                          floorplan: curr.room.floorplan
+                            ? {
+                                ...curr.room.floorplan,
+                                visible: !curr.room.floorplan.visible,
                               }
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {filteredModels.map((model) => (
-                      <div
-                        key={model.id}
-                        style={{
-                          backgroundColor: '#0f172a',
-                          border: '1px solid #334155',
-                          borderRadius: '6px',
-                          padding: '8px',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: '6px',
-                        }}
-                      >
-                        {model.previewUrl && (
-                          <img
-                            src={model.previewUrl}
-                            alt={model.name}
-                            style={{
-                              width: '100%',
-                              height: '72px',
-                              objectFit: 'cover',
-                              borderRadius: '4px',
-                            }}
-                          />
-                        )}
-                        <div style={{ fontWeight: 600, fontSize: '12px', color: '#f8fafc' }}>
-                          {model.name}{' '}
-                          {model.isPremium && (
-                            <span style={{ color: '#fbbf24', fontSize: '10px' }}>
-                              ★ PRO
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '10px', color: '#94a3b8' }}>
-                          {model.dimensionsCm.width} × {model.dimensionsCm.depth} ×{' '}
-                          {model.dimensionsCm.height} см
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-active"
-                          style={{ fontSize: '11px' }}
-                          onClick={() => handleAddModelToScene(model)}
-                        >
-                          + Добави в сцената
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-
-            {leftTab === 'materials' && (
-              <>
-                <div className="empty-state-box" style={{ textAlign: 'left', padding: '10px' }}>
-                  <strong style={{ color: '#38bdf8' }}>Drag & Drop в 3D:</strong> Натисни и задръж върху текстура по-долу, след което пусни директно върху стена или под в 3D.
-                </div>
-
-                <input
-                  type="text"
-                  className="input-control"
-                  placeholder="Търси тапет, паркет, плочки..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-
-                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                  {(
-                    [
-                      { id: 'all', label: 'Всички' },
-                      { id: 'wall', label: 'Стени / Тапети' },
-                      { id: 'floor', label: 'Паркет / Под' },
-                      { id: 'tiles', label: 'Плочки' },
-                    ] as const
-                  ).map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      className={`btn ${materialCategoryFilter === f.id ? 'btn-active' : ''}`}
-                      style={{ fontSize: '10px', padding: '3px 6px' }}
-                      onClick={() => setMaterialCategoryFilter(f.id)}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-
-                {filteredSurfaceTextures.length === 0 ? (
-                  <div className="empty-state-box">
-                    {isSyncingServer
-                      ? 'Зареждане на PBR текстури от сървъра...'
-                      : 'Няма намерени текстури. Можете да качите нови през „⚙ Админ панел“.'}
-                  </div>
-                ) : (
-                  <div
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '1fr 1fr',
-                      gap: '8px',
-                      userSelect: 'none',
-                    }}
-                  >
-                    {filteredSurfaceTextures.map((tex) => {
-                      const isDraggingThis = draggedTextureId === tex.id;
-                      return (
-                        <div
-                          key={tex.id}
-                          onPointerDown={() => setDraggedTextureId(tex.id)}
-                          style={{
-                            backgroundColor: '#0f172a',
-                            border: `1.5px solid ${isDraggingThis ? '#34d399' : '#334155'}`,
-                            borderRadius: '6px',
-                            padding: '6px',
-                            cursor: 'grab',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '4px',
-                          }}
-                        >
-                          <img
-                            src={tex.mapUrl}
-                            alt={tex.name}
-                            draggable={false}
-                            style={{
-                              width: '100%',
-                              height: '54px',
-                              objectFit: 'cover',
-                              borderRadius: '4px',
-                              pointerEvents: 'none',
-                            }}
-                          />
-                          <div
-                            style={{
-                              fontSize: '11px',
-                              fontWeight: 600,
-                              color: '#f8fafc',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {tex.name}
-                          </div>
-                          <div style={{ fontSize: '9px', color: '#94a3b8' }}>
-                            {Math.round(tex.tileWidthM * 100)}×
-                            {Math.round(tex.tileHeightM * 100)} см
-                          </div>
-                          {selectedSurfaces.length > 0 && (
-                            <button
-                              type="button"
-                              className="btn btn-active"
-                              style={{ fontSize: '10px', padding: '2px 4px' }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                applyPatchToTargets(selectedSurfaces, {
-                                  textureId: tex.id,
-                                });
-                              }}
-                            >
-                              Приложи ({selectedSurfaces.length})
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </>
-            )}
-
-            {leftTab === 'room' && (
-              <>
-                <div
-                  style={{
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '10px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
+                            : undefined,
+                        },
+                      }),
+                      true
+                    )
+                  }
                 >
-                  <div className="section-label" style={{ marginBottom: 0 }}>
-                    Чертане на стени и зони
-                  </div>
-
-                  <button
-                    type="button"
-                    className={`btn ${isDrawingWalls ? 'btn-active' : ''}`}
-                    onClick={() => {
-                      setIsDrawingFloorZone(false);
-                      setZoneDraftPoints([]);
-                      setIsCalibratingPlan(false);
-                      setCalibPoints([]);
-                      setTypedWallLength('');
-                      setIsDrawingWalls((prev) => {
-                        if (prev) setDraftPoints([]);
-                        return !prev;
-                      });
-                    }}
-                  >
-                    {isDrawingWalls
-                      ? '■ Спри чертането на стени (Esc)'
-                      : '✎ Чертай стени по пода'}
-                  </button>
-
-                  {isDrawingWalls && (
-                    <div
-                      style={{
-                        fontSize: '10.5px',
-                        color: '#94a3b8',
-                        backgroundColor: '#1e293b',
-                        padding: '6px 8px',
-                        borderRadius: '4px',
-                      }}
-                    >
-                      Съвет: Докато чертаеш, можеш да въведеш точна дължина от клавиатурата (напр. <b>3.6</b> + <b>Enter</b>).
-                    </div>
-                  )}
-
-                  {isDrawingWalls && draftPoints.length > 0 && (
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ fontSize: '11px' }}
-                      onClick={() => {
-                        setDraftPoints([]);
-                        setTypedWallLength('');
-                      }}
-                    >
-                      Прекъсни веригата (нова стена)
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    className={`btn ${isDrawingFloorZone ? 'btn-active' : ''}`}
-                    onClick={() => {
-                      setIsDrawingWalls(false);
-                      setDraftPoints([]);
-                      setIsCalibratingPlan(false);
-                      setCalibPoints([]);
-                      setIsDrawingFloorZone((prev) => {
-                        if (prev) setZoneDraftPoints([]);
-                        return !prev;
-                      });
-                    }}
-                  >
-                    {isDrawingFloorZone
-                      ? '■ Спри подовата зона (Esc)'
-                      : '⬡ Очертай подова зона (паркет/плочки)'}
-                  </button>
-
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ flex: 1, fontSize: '11px' }}
-                      onClick={() => handleAddStandaloneOpening('door')}
-                    >
-                      + Врата
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ flex: 1, fontSize: '11px' }}
-                      onClick={() => handleAddStandaloneOpening('window')}
-                    >
-                      + Прозорец
-                    </button>
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '10px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div className="section-label" style={{ marginBottom: 0 }}>
-                    Размери на помещението
-                  </div>
-                  <div className="axis-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-                    <div className="axis-field">
-                      <span>Височина таван (м)</span>
-                      <input
-                        type="number"
-                        step={0.05}
-                        min={1.8}
-                        max={6}
-                        className="input-control"
-                        value={room.ceilingHeightM}
-                        onChange={(e) =>
-                          pushHistory(
-                            {
-                              ...room,
-                              ceilingHeightM: Math.max(
-                                1.8,
-                                parseFloat(e.target.value) || 2.65
-                              ),
-                            },
-                            sceneObjects
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="axis-field">
-                      <span>Дебелина стена (м)</span>
-                      <input
-                        type="number"
-                        step={0.01}
-                        min={0.05}
-                        max={0.8}
-                        className="input-control"
-                        value={room.defaultThicknessM}
-                        onChange={(e) =>
-                          pushHistory(
-                            {
-                              ...room,
-                              defaultThicknessM: Math.max(
-                                0.05,
-                                parseFloat(e.target.value) || 0.15
-                              ),
-                            },
-                            sceneObjects
-                          )
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  style={{
-                    backgroundColor: '#0f172a',
-                    border: '1px solid #334155',
-                    borderRadius: '6px',
-                    padding: '10px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                  }}
-                >
-                  <div className="section-label" style={{ marginBottom: 0 }}>
-                    2D Архитектурна подложка
-                  </div>
-
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => fileInputPlanRef.current?.click()}
-                  >
-                    Качи снимка на план (PNG / JPG)
-                  </button>
-                  <input
-                    ref={fileInputPlanRef}
-                    type="file"
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) void handleUploadFloorplanImage(f);
-                      e.target.value = '';
-                    }}
-                  />
-
-                  {room.floorplan && (
-                    <>
-                      <button
-                        type="button"
-                        className={`btn ${isCalibratingPlan ? 'btn-active' : ''}`}
-                        style={{ fontSize: '11px' }}
-                        onClick={() => {
-                          setIsDrawingWalls(false);
-                          setIsDrawingFloorZone(false);
-                          setCalibPoints([]);
-                          setIsCalibratingPlan((prev) => !prev);
-                        }}
-                      >
-                        {isCalibratingPlan
-                          ? 'Кликни 2 точки с известен размер...'
-                          : '📏 Калибрирай мащаб по 2 точки'}
-                      </button>
-
-                      <div className="axis-field">
-                        <span>
-                          Прозрачност ({Math.round(room.floorplan.opacity * 100)}%)
-                        </span>
-                        <input
-                          type="range"
-                          min={0.1}
-                          max={1}
-                          step={0.05}
-                          value={room.floorplan.opacity}
-                          onChange={(e) =>
-                            pushHistory(
-                              {
-                                ...room,
-                                floorplan: room.floorplan
-                                  ? {
-                                      ...room.floorplan,
-                                      opacity: parseFloat(e.target.value),
-                                    }
-                                  : null,
-                              },
-                              sceneObjects
-                            )
-                          }
-                        />
-                      </div>
-
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button
-                          type="button"
-                          className="btn"
-                          style={{ flex: 1, fontSize: '11px' }}
-                          onClick={() =>
-                            pushHistory(
-                              {
-                                ...room,
-                                floorplan: room.floorplan
-                                  ? {
-                                      ...room.floorplan,
-                                      visible: !room.floorplan.visible,
-                                    }
-                                  : null,
-                              },
-                              sceneObjects
-                            )
-                          }
-                        >
-                          {room.floorplan.visible ? 'Скрий плана' : 'Покажи плана'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-danger"
-                          style={{ flex: 1, fontSize: '11px' }}
-                          onClick={() =>
-                            pushHistory({ ...room, floorplan: null }, sceneObjects)
-                          }
-                        >
-                          Премахни
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
+                  {room.floorplan.visible ? '👁 Скрий подложка' : '👁 Покажи подложка'}
+                </button>
               </>
             )}
           </div>
-        </aside>
+        </div>
+      )}
 
-        {/* ЦЕНТРАЛЕН 3D VIEWPORT */}
-        <main
-          className="viewport-container"
-          style={{
-            cursor: draggedTextureId ? 'copy' : undefined,
-          }}
-        >
-          {isDrawingWalls && typedWallLength.length > 0 && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '12px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                zIndex: 35,
-                backgroundColor: 'rgba(15, 23, 42, 0.95)',
-                border: '1.5px solid #38bdf8',
-                color: '#f8fafc',
-                padding: '6px 14px',
-                borderRadius: '8px',
-                fontSize: '13px',
-                fontWeight: 700,
-                pointerEvents: 'none',
-                boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
-              }}
-            >
-              Дължина на стената: <span style={{ color: '#38bdf8' }}>{typedWallLength}</span>{' '}
-              {overlaySettings.dimensionUnit === 'cm' ? 'см' : 'м'} (натисни Enter)
-            </div>
-          )}
+      <div className="workspace-main">
+        {catalogOpen && (
+          <CatalogDrawer
+            models={models}
+            textures={textures}
+            categoryLabels={categoryLabels}
+            textureCategoryLabels={textureCategoryLabels}
+            loading={catalogLoading}
+            error={catalogError}
+            currentUser={currentUser}
+            systemSettings={systemSettings}
+            onRefreshCatalog={refreshCatalogAndScenes}
+            onSelectModel={handleSelectCatalogModel}
+            onApplyTextureToSelected={(tex) =>
+              handleApplyTextureFromCatalog('selected', tex)
+            }
+            onApplyFloorTexture={(tex) =>
+              handleApplyTextureFromCatalog('floor', tex)
+            }
+            onApplyWallTexture={(tex) =>
+              handleApplyTextureFromCatalog('walls', tex)
+            }
+          />
+        )}
 
-          {draggedTextureId && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '12px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                zIndex: 30,
-                backgroundColor: 'rgba(6, 78, 59, 0.94)',
-                border: '1.5px solid #34d399',
-                color: '#ecfdf5',
-                padding: '6px 14px',
-                borderRadius: '999px',
-                fontSize: '12px',
-                fontWeight: 600,
-                pointerEvents: 'none',
-                boxShadow: '0 6px 20px rgba(0,0,0,0.45)',
-              }}
-            >
-              Пусни върху стена или подова зона, за да приложиш материала
-            </div>
-          )}
-
+        <main className="viewport-container">
           <Viewport3D
             room={room}
-            viewMode={viewMode}
-            overlaySettings={overlaySettings}
+            models={models}
+            textures={textures}
+            sceneObjects={sceneObjects}
+            selectedInstanceId={selectedInstanceId}
             selectedWallId={selectedWallId}
             selectedOpeningId={selectedOpeningId}
             selectedStandaloneOpeningId={selectedStandaloneOpeningId}
             selectedFloorZoneId={selectedFloorZoneId}
             selectedSurfaces={selectedSurfaces}
-            draggedTextureId={draggedTextureId}
             selectedWallVertex={selectedWallVertex}
             selectedFloorVertex={selectedFloorVertex}
             linkedVertexJoint={linkedVertexJoint}
             autoStraightenVertices={autoStraightenVertices}
+            transformTool={transformTool}
+            cameraMode={viewMode}
+            isDrawingWalls={isDrawingWalls}
+            draftPoints={draftPoints}
+            isDrawingFloorZone={isDrawingFloorZone}
+            zoneDraftPoints={zoneDraftPoints}
+            isCalibratingPlan={isCalibratingPlan}
+            calibPoints={calibPoints}
+            hoverPoint={hoverPoint}
+            onHoverPointChange={setHoverPoint}
+            onFloorDrawClick={handleFloorDrawClick}
+            onFloorZoneDrawClick={handleFloorZoneDrawClick}
+            onCalibFloorClick={handleCalibFloorClick}
+            onSelectInstance={(id) => {
+              setSelectedInstanceId(id);
+              if (id) {
+                setSelectedWallId(null);
+                setSelectedFloorZoneId(null);
+                setSelectedStandaloneOpeningId(null);
+                setSelectedSurfaces([]);
+              }
+            }}
             onSelectWall={(wallId) => {
               setSelectedWallId(wallId);
-              setSelectedOpeningId(null);
-              if (!wallId) setSelectedSurfaces([]);
+              if (wallId) {
+                setSelectedInstanceId(null);
+                setSelectedFloorZoneId(null);
+                setSelectedStandaloneOpeningId(null);
+              }
             }}
-            onInlineUpdateWallLength={handleInlineUpdateWallLength}
             onSelectSurface={handleSelectSurface}
-            onClearSurfaceSelection={handleClearSurfaceSelection}
-            onDropTextureOnSurface={handleDropTextureOnSurface}
+            onClearSurfaceSelection={() => setSelectedSurfaces([])}
+            onDropTextureOnSurface={(target, textureId) => {
+              handleSelectSurface(target, false);
+              setTimeout(() => {
+                handleApplySurfaceBatch({ textureId, color: '#ffffff' });
+              }, 0);
+            }}
+            onMaterializeAutoFloorZone={handleMaterializeAutoFloorZone}
             onSelectOpening={(wallId, openingId) => {
               setSelectedWallId(wallId);
               setSelectedOpeningId(openingId);
               setSelectedInstanceId(null);
-              setSelectedStandaloneOpeningId(null);
             }}
             onSelectStandaloneOpening={(openingId) => {
               setSelectedStandaloneOpeningId(openingId);
@@ -2500,76 +1281,69 @@ export function App() {
                 setSelectedInstanceId(null);
                 setSelectedWallId(null);
                 setSelectedFloorZoneId(null);
-                setSelectedSurfaces([]);
               }
             }}
             onSelectFloorZone={(zoneId) => {
               setSelectedFloorZoneId(zoneId);
               if (zoneId) {
-                setSelectedSurfaces([{ kind: 'floor', zoneId }]);
-              } else {
-                setSelectedFloorVertex(null);
+                setSelectedInstanceId(null);
+                setSelectedWallId(null);
+                setSelectedStandaloneOpeningId(null);
               }
             }}
             onSelectWallVertex={setSelectedWallVertex}
             onSelectFloorVertex={setSelectedFloorVertex}
             onUpdateStandaloneOpening={(openingId, patch) => {
-              const nextOpenings = (room.openings ?? []).map((o) =>
-                o.id === openingId ? { ...o, ...patch } : o
+              setSceneState(
+                (curr) => ({
+                  ...curr,
+                  room: {
+                    ...curr.room,
+                    openings: (curr.room.openings ?? []).map((o) =>
+                      o.id === openingId ? { ...o, ...patch } : o
+                    ),
+                  },
+                }),
+                true
               );
-              pushHistory({ ...room, openings: nextOpenings }, sceneObjects);
             }}
             onCommitWallsFromVertex={(nextWalls) => {
-              pushHistory({ ...room, walls: nextWalls }, sceneObjects);
+              setSceneState(
+                (curr) => ({
+                  ...curr,
+                  room: { ...curr.room, walls: nextWalls },
+                }),
+                true
+              );
             }}
             onCommitFloorZonesFromVertex={(nextZones) => {
-              pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
-            }}
-            isDrawingWalls={isDrawingWalls}
-            draftPoints={draftPoints}
-            hoverPoint={hoverPoint}
-            onHoverPointChange={setHoverPoint}
-            onFloorDrawClick={handleFloorDrawClick}
-            isDrawingFloorZone={isDrawingFloorZone}
-            zoneDraftPoints={zoneDraftPoints}
-            onFloorZoneDrawClick={handleFloorZoneDrawClick}
-            isCalibratingPlan={isCalibratingPlan}
-            calibPoints={calibPoints}
-            onCalibFloorClick={handleCalibFloorClick}
-            sceneObjects={sceneObjects}
-            models={models}
-            textures={textures}
-            selectedInstanceId={selectedInstanceId}
-            transformTool={transformTool}
-            onSelectObject={(id) => {
-              setSelectedInstanceId(id);
-              if (id) {
-                setSelectedWallId(null);
-                setSelectedOpeningId(null);
-                setSelectedStandaloneOpeningId(null);
-                setSelectedFloorZoneId(null);
-                setSelectedFloorVertex(null);
-                setSelectedSurfaces([]);
-              }
+              setSceneState(
+                (curr) => ({
+                  ...curr,
+                  room: { ...curr.room, floorZones: nextZones },
+                }),
+                true
+              );
             }}
             onMaterialsDiscovered={(instanceId, slots) => {
-              setDiscoveredSlotsByInstance((prev) => ({
+              setDiscoveredMaterialsMap((prev) => ({
                 ...prev,
                 [instanceId]: slots,
               }));
             }}
             onTransformChange={(instanceId, position, rotation, scale) => {
-              const nextObjects = sceneObjects.map((o) =>
-                o.instanceId === instanceId
-                  ? { ...o, position, rotation, scale }
-                  : o
-              );
-              pushHistory(room, nextObjects);
+              setSceneState((curr) => ({
+                ...curr,
+                objects: curr.objects.map((o) =>
+                  o.instanceId === instanceId
+                    ? { ...o, position, rotation, scale }
+                    : o
+                ),
+              }));
             }}
           />
         </main>
 
-        {/* ДЕСЕН ИНСПЕКТОР */}
         <RightInspector
           room={room}
           models={models}
@@ -2583,7 +1357,11 @@ export function App() {
           selectedFloorZone={selectedFloorZone}
           selectedObject={selectedObject}
           selectedModel={selectedModel}
-          discoveredMaterialSlots={discoveredSlotsForSelected}
+          discoveredMaterialSlots={
+            selectedObject
+              ? discoveredMaterialsMap[selectedObject.instanceId] ?? []
+              : []
+          }
           selectedWallVertex={selectedWallVertex}
           selectedFloorVertex={selectedFloorVertex}
           linkedVertexJoint={linkedVertexJoint}
@@ -2591,269 +1369,416 @@ export function App() {
           wallLengthInput={wallLengthInput}
           wallAngleInput={wallAngleInput}
           wallThicknessInput={wallThicknessInput}
-          onApplySurfaceBatch={(patch) =>
-            applyPatchToTargets(selectedSurfaces, patch)
-          }
-          onClearSurfaceSelection={handleClearSurfaceSelection}
+          onApplySurfaceBatch={handleApplySurfaceBatch}
+          onClearSurfaceSelection={() => setSelectedSurfaces([])}
           onSelectWallVertex={setSelectedWallVertex}
-          onToggleLinkedVertexJoint={() =>
-            setLinkedVertexJoint((prev) => !prev)
-          }
+          onToggleLinkedVertexJoint={() => setLinkedVertexJoint((p) => !p)}
           onToggleAutoStraightenVertices={() =>
-            setAutoStraightenVertices((prev) => !prev)
+            setAutoStraightenVertices((p) => !p)
           }
           onStraightenSelectedWall={() => {
             if (!selectedWall) return;
-            const nextWalls = room.walls.map((w) =>
-              w.id === selectedWall.id ? straightenWallOrthogonal(w) : w
+            const len = getWallLengthM(selectedWall);
+            const curAngle = getWallAngleDeg(selectedWall);
+            const snappedDeg = Math.round(curAngle / 90) * 90;
+            const rad = (snappedDeg * Math.PI) / 180;
+            const nextEnd: [number, number] = [
+              Number((selectedWall.start[0] + Math.cos(rad) * len).toFixed(3)),
+              Number((selectedWall.start[1] + Math.sin(rad) * len).toFixed(3)),
+            ];
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === selectedWall.id ? { ...w, end: nextEnd } : w
+                  ),
+                },
+              }),
+              true
             );
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
           }}
           onWallLengthInputChange={setWallLengthInput}
           onWallAngleInputChange={setWallAngleInput}
           onWallThicknessInputChange={setWallThicknessInput}
           onCommitSelectedWallChanges={() => {
             if (!selectedWall) return;
-            const len = parseFloat(wallLengthInput.replace(',', '.'));
-            const ang = parseFloat(wallAngleInput.replace(',', '.'));
-            const thk = parseFloat(wallThicknessInput.replace(',', '.'));
-            if (Number.isNaN(len) || Number.isNaN(ang) || Number.isNaN(thk)) {
-              return;
-            }
-            const nextWalls = room.walls.map((w) => {
-              if (w.id !== selectedWall.id) return w;
-              const geomUpdated = updateWallGeometry(w, len, ang);
-              return {
-                ...geomUpdated,
-                thicknessM: Math.max(0.05, Math.min(1, thk)),
-              };
-            });
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
+            const len = Math.max(0.1, parseFloat(wallLengthInput) || getWallLengthM(selectedWall));
+            const deg = parseFloat(wallAngleInput) ?? getWallAngleDeg(selectedWall);
+            const thick = Math.max(0.05, parseFloat(wallThicknessInput) || selectedWall.thicknessM);
+            const rad = (deg * Math.PI) / 180;
+            const nextEnd: [number, number] = [
+              Number((selectedWall.start[0] + Math.cos(rad) * len).toFixed(3)),
+              Number((selectedWall.start[1] + Math.sin(rad) * len).toFixed(3)),
+            ];
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === selectedWall.id
+                      ? { ...w, end: nextEnd, thicknessM: thick }
+                      : w
+                  ),
+                },
+              }),
+              true
+            );
           }}
           onUpdateWallSurface={(wallId, patch) => {
-            const nextWalls = room.walls.map((w) =>
-              w.id === wallId ? { ...w, ...patch } : w
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === wallId ? { ...w, ...patch } : w
+                  ),
+                },
+              }),
+              true
             );
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
           }}
           onDeleteSelectedWall={() => {
             if (!selectedWall) return;
-            pushHistory(
-              {
-                ...room,
-                walls: room.walls.filter((w) => w.id !== selectedWall.id),
-              },
-              sceneObjects
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.filter((w) => w.id !== selectedWall.id),
+                },
+              }),
+              true
             );
             setSelectedWallId(null);
             setSelectedSurfaces([]);
           }}
           onSelectOpening={setSelectedOpeningId}
-          onAddOpeningToSelectedWall={(type) => {
+          onAddOpeningToSelectedWall={(type: OpeningType) => {
             if (!selectedWall) return;
+            const wLen = getWallLengthM(selectedWall);
+            const opW = type === 'door' ? 0.9 : 1.2;
             const newOp: WallOpening = {
-              id: `wop-${Date.now()}`,
+              id: `op-${Date.now()}`,
               type,
-              offsetFromStartM: 0.4,
-              widthM: type === 'door' ? 0.9 : 1.2,
-              heightM: type === 'door' ? 2.05 : 1.3,
+              offsetFromStartM: Math.max(0.1, Number(((wLen - opW) / 2).toFixed(2))),
+              widthM: opW,
+              heightM: type === 'door' ? 2.05 : 1.35,
               sillHeightM: type === 'door' ? 0 : 0.9,
               swing: type === 'door' ? 'left-in' : undefined,
-              frameColor: '#f1f5f9',
             };
-            const nextWalls = room.walls.map((w) =>
-              w.id === selectedWall.id
-                ? { ...w, openings: [...(w.openings ?? []), newOp] }
-                : w
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === selectedWall.id
+                      ? { ...w, openings: [...(w.openings ?? []), newOp] }
+                      : w
+                  ),
+                },
+              }),
+              true
             );
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
             setSelectedOpeningId(newOp.id);
           }}
-          onUpdateOpening={(wallId, opId, patch) => {
-            const nextWalls = room.walls.map((w) => {
-              if (w.id !== wallId) return w;
-              return {
-                ...w,
-                openings: (w.openings ?? []).map((op) =>
-                  op.id === opId ? { ...op, ...patch } : op
-                ),
-              };
-            });
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
-          }}
-          onDeleteOpening={(wallId, opId) => {
-            const nextWalls = room.walls.map((w) => {
-              if (w.id !== wallId) return w;
-              return {
-                ...w,
-                openings: (w.openings ?? []).filter((op) => op.id !== opId),
-              };
-            });
-            pushHistory({ ...room, walls: nextWalls }, sceneObjects);
-            if (selectedOpeningId === opId) setSelectedOpeningId(null);
-          }}
-          onSelectStandaloneOpening={(id) => {
-            setSelectedStandaloneOpeningId(id);
-            if (id) {
-              setSelectedWallId(null);
-              setSelectedFloorZoneId(null);
-              setSelectedFloorVertex(null);
-              setSelectedInstanceId(null);
-              setSelectedSurfaces([]);
-            }
-          }}
-          onUpdateStandaloneOpening={(id, patch) => {
-            const nextOpenings = (room.openings ?? []).map((o) =>
-              o.id === id ? { ...o, ...patch } : o
+          onUpdateOpening={(wallId, openingId, patch) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === wallId
+                      ? {
+                          ...w,
+                          openings: (w.openings ?? []).map((op) =>
+                            op.id === openingId ? { ...op, ...patch } : op
+                          ),
+                        }
+                      : w
+                  ),
+                },
+              }),
+              true
             );
-            pushHistory({ ...room, openings: nextOpenings }, sceneObjects);
           }}
-          onDuplicateStandaloneOpening={(id) => {
-            const orig = (room.openings ?? []).find((o) => o.id === id);
+          onDeleteOpening={(wallId, openingId) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  walls: curr.room.walls.map((w) =>
+                    w.id === wallId
+                      ? {
+                          ...w,
+                          openings: (w.openings ?? []).filter(
+                            (op) => op.id !== openingId
+                          ),
+                        }
+                      : w
+                  ),
+                },
+              }),
+              true
+            );
+            if (selectedOpeningId === openingId) setSelectedOpeningId(null);
+          }}
+          onSelectStandaloneOpening={setSelectedStandaloneOpeningId}
+          onUpdateStandaloneOpening={(openingId, patch) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  openings: (curr.room.openings ?? []).map((o) =>
+                    o.id === openingId ? { ...o, ...patch } : o
+                  ),
+                },
+              }),
+              true
+            );
+          }}
+          onDuplicateStandaloneOpening={(openingId) => {
+            const orig = (room.openings ?? []).find((o) => o.id === openingId);
             if (!orig) return;
             const copy: StandaloneOpening = {
               ...orig,
-              id: `op-${Date.now()}`,
-              position: [orig.position[0] + 0.5, orig.position[1] + 0.5],
+              id: `sop-${Date.now()}`,
+              position: [orig.position[0] + 0.4, orig.position[1] + 0.4],
             };
-            pushHistory(
-              { ...room, openings: [...(room.openings ?? []), copy] },
-              sceneObjects
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  openings: [...(curr.room.openings ?? []), copy],
+                },
+              }),
+              true
             );
             setSelectedStandaloneOpeningId(copy.id);
           }}
-          onDeleteStandaloneOpening={(id) => {
-            pushHistory(
-              {
-                ...room,
-                openings: (room.openings ?? []).filter((o) => o.id !== id),
-              },
-              sceneObjects
+          onDeleteStandaloneOpening={(openingId) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  openings: (curr.room.openings ?? []).filter(
+                    (o) => o.id !== openingId
+                  ),
+                },
+              }),
+              true
             );
-            if (selectedStandaloneOpeningId === id) {
-              setSelectedStandaloneOpeningId(null);
-            }
+            setSelectedStandaloneOpeningId(null);
           }}
-          onSelectFloorZone={(id) => {
-            setSelectedFloorZoneId(id);
-            setSelectedFloorVertex(null);
-            if (id) {
-              setSelectedSurfaces([{ kind: 'floor', zoneId: id }]);
-              setSelectedWallId(null);
-              setSelectedInstanceId(null);
-              setSelectedStandaloneOpeningId(null);
-            }
-          }}
+          onSelectFloorZone={setSelectedFloorZoneId}
           onSelectFloorVertex={setSelectedFloorVertex}
-          onUpdateFloorZoneVertex={handleUpdateFloorZoneVertex}
-          onInsertFloorZoneVertexAfter={handleInsertFloorZoneVertexAfter}
-          onDeleteFloorZoneVertex={handleDeleteFloorZoneVertex}
-          onUpdateFloorZone={(id, patch) => {
-            const nextZones = (room.floorZones ?? []).map((z) =>
-              z.id === id ? { ...z, ...patch } : z
+          onUpdateFloorZoneVertex={(zoneId, pointIndex, nextPoint) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: (curr.room.floorZones ?? []).map((z) =>
+                    z.id === zoneId
+                      ? {
+                          ...z,
+                          points: z.points.map((pt, i) =>
+                            i === pointIndex ? nextPoint : pt
+                          ),
+                        }
+                      : z
+                  ),
+                },
+              }),
+              true
             );
-            pushHistory({ ...room, floorZones: nextZones }, sceneObjects);
           }}
-          onDuplicateFloorZone={(id) => {
-            const orig = (room.floorZones ?? []).find((z) => z.id === id);
+          onInsertFloorZoneVertexAfter={(zoneId, pointIndex) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: (curr.room.floorZones ?? []).map((z) => {
+                    if (z.id !== zoneId) return z;
+                    const p1 = z.points[pointIndex];
+                    const p2 = z.points[(pointIndex + 1) % z.points.length];
+                    const mid: [number, number] = [
+                      Number(((p1[0] + p2[0]) / 2).toFixed(3)),
+                      Number(((p1[1] + p2[1]) / 2).toFixed(3)),
+                    ];
+                    const nextPts = [...z.points];
+                    nextPts.splice(pointIndex + 1, 0, mid);
+                    return { ...z, points: nextPts };
+                  }),
+                },
+              }),
+              true
+            );
+          }}
+          onDeleteFloorZoneVertex={(zoneId, pointIndex) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: (curr.room.floorZones ?? []).map((z) =>
+                    z.id === zoneId && z.points.length > 3
+                      ? {
+                          ...z,
+                          points: z.points.filter((_, i) => i !== pointIndex),
+                        }
+                      : z
+                  ),
+                },
+              }),
+              true
+            );
+          }}
+          onUpdateFloorZone={(zoneId, patch) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: (curr.room.floorZones ?? []).map((z) =>
+                    z.id === zoneId ? { ...z, ...patch } : z
+                  ),
+                },
+              }),
+              true
+            );
+          }}
+          onDuplicateFloorZone={(zoneId) => {
+            const orig = (room.floorZones ?? []).find((z) => z.id === zoneId);
             if (!orig) return;
             const copy: FloorZone = {
               ...orig,
               id: `zone-${Date.now()}`,
               name: `${orig.name} (копие)`,
-              points: orig.points.map(([x, z]) => [x + 0.4, z + 0.4]),
+              points: orig.points.map(([x, z]) => [x + 0.3, z + 0.3]),
             };
-            pushHistory(
-              { ...room, floorZones: [...(room.floorZones ?? []), copy] },
-              sceneObjects
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: [...(curr.room.floorZones ?? []), copy],
+                },
+              }),
+              true
             );
             setSelectedFloorZoneId(copy.id);
-            setSelectedSurfaces([{ kind: 'floor', zoneId: copy.id }]);
           }}
-          onDeleteFloorZone={(id) => {
-            pushHistory(
-              {
-                ...room,
-                floorZones: (room.floorZones ?? []).filter((z) => z.id !== id),
-              },
-              sceneObjects
+          onDeleteFloorZone={(zoneId) => {
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: {
+                  ...curr.room,
+                  floorZones: (curr.room.floorZones ?? []).filter(
+                    (z) => z.id !== zoneId
+                  ),
+                },
+              }),
+              true
             );
-            if (selectedFloorZoneId === id) {
-              setSelectedFloorZoneId(null);
-              setSelectedFloorVertex(null);
-            }
-            setSelectedSurfaces((prev) =>
-              prev.filter((s) => !(s.kind === 'floor' && s.zoneId === id))
-            );
+            setSelectedFloorZoneId(null);
+            setSelectedSurfaces([]);
           }}
           onUpdateRoomCeiling={(patch) => {
-            pushHistory({ ...room, ...patch }, sceneObjects);
-          }}
-          onSelectInstance={(id) => {
-            setSelectedInstanceId(id);
-            if (id) {
-              setSelectedWallId(null);
-              setSelectedFloorZoneId(null);
-              setSelectedFloorVertex(null);
-              setSelectedStandaloneOpeningId(null);
-              setSelectedSurfaces([]);
-            }
-          }}
-          onTransformChange={(instanceId, position, rotation, scale) => {
-            const nextObjects = sceneObjects.map((o) =>
-              o.instanceId === instanceId
-                ? { ...o, position, rotation, scale }
-                : o
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                room: { ...curr.room, ...patch },
+              }),
+              true
             );
-            pushHistory(room, nextObjects);
+          }}
+          onSelectInstance={setSelectedInstanceId}
+          onTransformChange={(instanceId, position, rotation, scale) => {
+            setSceneState((curr) => ({
+              ...curr,
+              objects: curr.objects.map((o) =>
+                o.instanceId === instanceId
+                  ? { ...o, position, rotation, scale }
+                  : o
+              ),
+            }));
           }}
           onRotateYBy={(deg) => {
             if (!selectedObject) return;
-            const rad = (deg * Math.PI) / 180;
-            const nextObjects = sceneObjects.map((o) =>
-              o.instanceId === selectedObject.instanceId
-                ? {
-                    ...o,
-                    rotation: [
-                      o.rotation[0],
-                      o.rotation[1] + rad,
-                      o.rotation[2],
-                    ] as [number, number, number],
-                  }
-                : o
+            const deltaRad = (deg * Math.PI) / 180;
+            const nextRot: [number, number, number] = [
+              selectedObject.rotation[0],
+              selectedObject.rotation[1] + deltaRad,
+              selectedObject.rotation[2],
+            ];
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                objects: curr.objects.map((o) =>
+                  o.instanceId === selectedObject.instanceId
+                    ? { ...o, rotation: nextRot }
+                    : o
+                ),
+              }),
+              true
             );
-            pushHistory(room, nextObjects);
           }}
           onToggleMirrorSelected={() => {
             if (!selectedObject) return;
-            const nextObjects = sceneObjects.map((o) =>
-              o.instanceId === selectedObject.instanceId
-                ? { ...o, mirrored: !o.mirrored }
-                : o
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                objects: curr.objects.map((o) =>
+                  o.instanceId === selectedObject.instanceId
+                    ? { ...o, mirrored: !o.mirrored }
+                    : o
+                ),
+              }),
+              true
             );
-            pushHistory(room, nextObjects);
           }}
           onDuplicateSelected={() => {
             if (!selectedObject) return;
             const copy: SceneObject = {
               ...selectedObject,
-              instanceId: `obj-${Date.now()}`,
+              instanceId: `inst-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               position: [
-                selectedObject.position[0] + 0.35,
+                selectedObject.position[0] + 0.4,
                 selectedObject.position[1],
-                selectedObject.position[2] + 0.35,
+                selectedObject.position[2] + 0.4,
               ],
             };
-            pushHistory(room, [...sceneObjects, copy]);
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                objects: [...curr.objects, copy],
+              }),
+              true
+            );
             setSelectedInstanceId(copy.instanceId);
           }}
           onDeleteSelected={() => {
             if (!selectedObject) return;
-            pushHistory(
-              room,
-              sceneObjects.filter(
-                (o) => o.instanceId !== selectedObject.instanceId
-              )
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                objects: curr.objects.filter(
+                  (o) => o.instanceId !== selectedObject.instanceId
+                ),
+              }),
+              true
             );
             setSelectedInstanceId(null);
           }}
@@ -2862,117 +1787,71 @@ export function App() {
             slotKey: string,
             override: MaterialOverride | null
           ) => {
-            const nextObjects = sceneObjects.map((o) => {
-              if (o.instanceId !== instanceId) return o;
-              const nextOverrides = { ...(o.materialOverrides ?? {}) };
-              if (override === null) {
-                delete nextOverrides[slotKey];
-              } else {
-                nextOverrides[slotKey] = override;
-              }
-              return { ...o, materialOverrides: nextOverrides };
-            });
-            pushHistory(room, nextObjects);
+            setSceneState(
+              (curr) => ({
+                ...curr,
+                objects: curr.objects.map((o) => {
+                  if (o.instanceId !== instanceId) return o;
+                  const nextOverrides = { ...(o.materialOverrides ?? {}) };
+                  if (override === null) {
+                    delete nextOverrides[slotKey];
+                  } else {
+                    nextOverrides[slotKey] = override;
+                  }
+                  return { ...o, materialOverrides: nextOverrides };
+                }),
+              }),
+              true
+            );
           }}
-          onSaveObjectAsPreset={handleSaveObjectAsPreset}
+          onSaveObjectAsPreset={(obj) => {
+            showStatus(`Запазен вариант за „${obj.name || 'мебел'}“.`);
+          }}
           onEditParametricObject={(obj) => {
             if (!obj.parametric) return;
-            setParametricBuilderState({
-              isOpen: true,
-              editingInstanceId: obj.instanceId,
-              initialConfig: obj.parametric,
-              initialName: obj.name,
-            });
+            setEditingParametricObj(obj);
+            setParametricModalOpen(true);
           }}
         />
       </div>
 
-      {/* СПЕЦИФИКАЦИЯ И РАЗКРОЙ (BOM) */}
-      {isBomOpen && (
+      {/* МОДАЛ ЗА ПАРАМЕТРИЧНИ МЕБЕЛИ (ГАРДЕРОБ / КУХНЯ) */}
+      {parametricModalOpen && (
+        <ParametricBuilderModal
+          textures={textures}
+          initialConfig={editingParametricObj?.parametric}
+          initialName={editingParametricObj?.name}
+          isEditingExisting={Boolean(editingParametricObj)}
+          onClose={() => {
+            setParametricModalOpen(false);
+            setEditingParametricObj(null);
+          }}
+          onConfirm={handleConfirmParametric}
+        />
+      )}
+
+      {/* МОДАЛ ЗА СПЕЦИФИКАЦИЯ И РАЗКРОЙ (BOM) */}
+      {bomModalOpen && (
         <ProjectBomModal
-          projectTitle={currentSceneTitle}
+          projectTitle={sceneTitle}
           room={room}
           sceneObjects={sceneObjects}
           models={models}
           textures={textures}
-          onClose={() => setIsBomOpen(false)}
+          onClose={() => setBomModalOpen(false)}
         />
       )}
 
-      {/* АДМИН ПАНЕЛ ЗА КАТАЛОГА */}
-      {isAdminOpen && (
-        <AdminPanel
-          models={models}
-          currentRoom={room}
-          currentUser={authUser}
+      {/* МОДАЛ ЗА ВХОД / РЕГИСТРАЦИЯ */}
+      {authModalOpen && (
+        <AuthModal
           systemSettings={systemSettings}
-          onSettingsUpdated={(next) => setSystemSettings(next)}
-          onUserUpdated={(next) => setAuthUser(next)}
-          onClose={() => setIsAdminOpen(false)}
-          onModelsUpdated={() => {
-            void refreshServerCatalogs();
-          }}
-        />
-      )}
-
-      {/* ПАРАМЕТРИЧЕН ГЕНЕРАТОР ЗА КУХНЯ И ГАРДЕРОБ */}
-      {parametricBuilderState.isOpen && (
-        <ParametricBuilderModal
-          textures={textures}
-          initialConfig={parametricBuilderState.initialConfig}
-          initialName={parametricBuilderState.initialName}
-          isEditingExisting={Boolean(parametricBuilderState.editingInstanceId)}
-          onClose={() => setParametricBuilderState({ isOpen: false })}
-          onConfirm={(name, config) => {
-            if (parametricBuilderState.editingInstanceId) {
-              const nextObjects = sceneObjects.map((o) =>
-                o.instanceId === parametricBuilderState.editingInstanceId
-                  ? { ...o, name, parametric: config }
-                  : o
-              );
-              pushHistory(room, nextObjects);
-            } else {
-              const id = `param-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-              const offset = (sceneObjects.length % 5) * 0.25;
-              const newObj: SceneObject = {
-                instanceId: id,
-                modelId: `parametric-${config.kind}`,
-                name,
-                position: [offset, 0, offset],
-                rotation: [0, 0, 0],
-                scale: [1, 1, 1],
-                mirrored: false,
-                parametric: config,
-              };
-              pushHistory(room, [...sceneObjects, newObj]);
-              clearAllSelections();
-              setSelectedInstanceId(id);
-            }
-            setParametricBuilderState({ isOpen: false });
-          }}
-        />
-      )}
-
-      {/* ЕКРАН ЗА ВХОД / РЕГИСТРАЦИЯ / ОДОБРЕНИЕ */}
-      {!isCheckingAuth && !authUser && (
-        <AuthGateModal
-          pendingUser={pendingUser}
-          settings={systemSettings}
-          onAuthenticated={(user, settings) => {
-            setAuthUser(user);
-            setPendingUser(null);
+          onClose={() => setAuthModalOpen(false)}
+          onSuccess={(user, settings) => {
+            setCurrentUser(user);
             setSystemSettings(settings);
-            void refreshServerCatalogs();
-          }}
-          onPendingApproval={(user, settings) => {
-            setAuthUser(null);
-            setPendingUser(user);
-            setSystemSettings(settings);
-          }}
-          onRefreshStatus={refreshAuthSession}
-          onLoggedOut={() => {
-            setAuthUser(null);
-            setPendingUser(null);
+            setAuthModalOpen(false);
+            refreshCatalogAndScenes();
           }}
         />
       )}

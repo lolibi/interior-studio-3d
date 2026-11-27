@@ -101,9 +101,10 @@ export function SceneItemMesh({
   const materialsByKeyRef = useRef<MaterialSlotMap>(new Map());
   const originalBackupRef = useRef<MaterialBackupMap>(new Map());
 
-  const targetW = Math.max(0.01, model.dimensionsCm.width / 100);
-  const targetH = Math.max(0.01, model.dimensionsCm.height / 100);
-  const targetD = Math.max(0.01, model.dimensionsCm.depth / 100);
+  const safeDims = model.dimensionsCm ?? { width: 100, height: 100, depth: 100 };
+  const targetW = Math.max(0.01, (safeDims.width || 100) / 100);
+  const targetH = Math.max(0.01, (safeDims.height || 100) / 100);
+  const targetD = Math.max(0.01, (safeDims.depth || 100) / 100);
 
   const canSnapToWall = WALL_SNAP_CATEGORIES.includes(model.category);
 
@@ -298,17 +299,28 @@ export function SceneItemMesh({
 
     if (model.scaleMode === 'fixed') {
       groupObj.scale.set(1 * mirrorSign, 1, 1);
-    } else if (model.scaleMode === 'constrained') {
-      const baseW = Math.max(1, model.dimensionsCm.width);
-      const baseH = Math.max(1, model.dimensionsCm.height);
-      const baseD = Math.max(1, model.dimensionsCm.depth);
+    } else if (model.scaleMode === 'constrained' && model.scaleConstraints) {
+      const baseW = Math.max(1, safeDims.width || 100);
+      const baseH = Math.max(1, safeDims.height || 100);
+      const baseD = Math.max(1, safeDims.depth || 100);
 
-      const minSx = Math.max(0.05, model.scaleConstraints.minCm.width / baseW);
-      const maxSx = Math.max(minSx, model.scaleConstraints.maxCm.width / baseW);
-      const minSy = Math.max(0.05, model.scaleConstraints.minCm.height / baseH);
-      const maxSy = Math.max(minSy, model.scaleConstraints.maxCm.height / baseH);
-      const minSz = Math.max(0.05, model.scaleConstraints.minCm.depth / baseD);
-      const maxSz = Math.max(minSz, model.scaleConstraints.maxCm.depth / baseD);
+      const minCm = model.scaleConstraints.minCm ?? {
+        width: 10,
+        height: 10,
+        depth: 10,
+      };
+      const maxCm = model.scaleConstraints.maxCm ?? {
+        width: 1000,
+        height: 1000,
+        depth: 1000,
+      };
+
+      const minSx = Math.max(0.05, (minCm.width || 10) / baseW);
+      const maxSx = Math.max(minSx, (maxCm.width || 1000) / baseW);
+      const minSy = Math.max(0.05, (minCm.height || 10) / baseH);
+      const maxSy = Math.max(minSy, (maxCm.height || 1000) / baseH);
+      const minSz = Math.max(0.05, (minCm.depth || 10) / baseD);
+      const maxSz = Math.max(minSz, (maxCm.depth || 1000) / baseD);
 
       const sx = model.scaleConstraints.allowX
         ? Math.min(maxSx, Math.max(minSx, absSx))

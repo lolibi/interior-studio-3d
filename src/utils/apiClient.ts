@@ -1,397 +1,380 @@
 import type {
-  AdminDashboardStats,
-  AuditLogEntry,
-  AuthUser,
-  PlanLevel,
-  SystemSettings,
-  TeamDetails,
-  UserRole,
-  UserStatus,
-} from '../types/auth';
-import type {
+  CatalogCategoryItem,
   CatalogModel,
   CatalogTexture,
   CreateModelInput,
   CreateTextureInput,
   SavedScene,
-  SavedSceneSummary,
-  SceneObject,
 } from '../types/editor';
-import type { ApartmentTemplate, RoomConfig } from '../types/room';
+import type { RoomConfig } from '../types/room';
+import type {
+  AdminDashboardStats,
+  AdminTeam,
+  AuthUser,
+  PlanConfigMap,
+  SystemSettings,
+  UserRole,
+  UserStatus,
+} from '../types/auth';
 
-const API_BASE_URL = 'https://studio.glb3d.com/api.php';
-const AUTH_TOKEN_STORAGE_KEY = 'interior_studio_auth_token_v1';
+const envApiUrl =
+  typeof import.meta !== 'undefined' && import.meta.env
+    ? (import.meta.env.VITE_API_URL as string | undefined)
+    : undefined;
 
-export function getStoredAuthToken(): string {
+const API_BASE_URL =
+  envApiUrl && envApiUrl.trim() !== ''
+    ? envApiUrl.trim().replace(/\/+$/, '')
+    : 'https://studio.glb3d.com/api.php';
+
+const AUTH_TOKEN_KEY = 'studio3d_auth_token_v1';
+
+export function getAuthToken(): string | null {
   try {
-    return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) || '';
+    return localStorage.getItem(AUTH_TOKEN_KEY);
   } catch {
-    return '';
+    return null;
   }
 }
 
-export function setStoredAuthToken(token: string | null): void {
+export function setAuthToken(token: string | null): void {
   try {
-    if (token) {
-      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    if (token && token.trim() !== '') {
+      localStorage.setItem(AUTH_TOKEN_KEY, token.trim());
     } else {
-      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      localStorage.removeItem(AUTH_TOKEN_KEY);
     }
   } catch {
     // ignore storage errors
   }
 }
 
-interface RawApiResponse {
-  ok?: boolean;
-  error?: string;
-  data?: unknown;
-  token?: string | null;
-  authenticated?: boolean;
-  requiresApproval?: boolean;
-  user?: AuthUser | null;
-  users?: AuthUser[];
-  teams?: TeamDetails[];
-  teamId?: string;
-  sharedAiCredits?: number;
-  settings?: SystemSettings;
-  stats?: AdminDashboardStats;
-  recentLogs?: AuditLogEntry[];
-  models?: CatalogModel[];
-  model?: CatalogModel;
-  textures?: CatalogTexture[];
-  texture?: CatalogTexture;
-  scenes?: SavedSceneSummary[];
-  scene?: SavedScene;
-  templates?: ApartmentTemplate[];
-  template?: ApartmentTemplate;
-  url?: string;
-  fileName?: string;
-  id?: string;
-  title?: string;
-  deletedId?: string;
+function buildUrl(action: string, params?: Record<string, string>): string {
+  const sep = API_BASE_URL.includes('?') ? '&' : '?';
+  const query = new URLSearchParams({ action, ...(params ?? {}) }).toString();
+  return `${API_BASE_URL}${sep}${query}`;
 }
 
-const DEFAULT_SCALE_CONSTRAINTS = {
-  allowX: true,
-  allowY: false,
-  allowZ: true,
-  minCm: { width: 100, height: 50, depth: 50 },
-  maxCm: { width: 400, height: 250, depth: 250 },
-};
-
-function normalizeModel(raw: CatalogModel): CatalogModel {
-  return {
-    ...raw,
-    isActive: Boolean(raw.isActive),
-    isPremium: Boolean(raw.isPremium),
-    scaleConstraints: raw.scaleConstraints ?? DEFAULT_SCALE_CONSTRAINTS,
-  };
-}
-
-function normalizeTexture(raw: CatalogTexture): CatalogTexture {
-  return {
-    ...raw,
-    tileWidthM: Math.max(0.05, Number(raw.tileWidthM) || 0.6),
-    tileHeightM: Math.max(0.05, Number(raw.tileHeightM) || 0.6),
-    roughness:
-      typeof raw.roughness === 'number'
-        ? raw.roughness
-        : Number(raw.roughness ?? 0.5),
-    metalness:
-      typeof raw.metalness === 'number'
-        ? raw.metalness
-        : Number(raw.metalness ?? 0.05),
-    isActive: Boolean(raw.isActive),
-    isPremium: Boolean(raw.isPremium),
-  };
-}
-
-function buildAuthHeaders(
-  extraHeaders?: Record<string, string>,
-  adminPassword?: string
-): Record<string, string> {
-  const headers: Record<string, string> = { ...(extraHeaders || {}) };
-  const token = getStoredAuthToken();
+function buildHeaders(adminPassword?: string, json = true): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const token = getAuthToken();
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  if (adminPassword) {
-    headers['X-Admin-Password'] = adminPassword;
+  if (adminPassword && adminPassword.trim() !== '') {
+    headers['X-Admin-Password'] = adminPassword.trim();
   }
   return headers;
 }
 
-async function fetchApiRaw(
-  url: string,
-  init?: RequestInit,
-  adminPassword?: string
-): Promise<RawApiResponse> {
-  const existingHeaders =
-    init?.headers && !(init.headers instanceof Headers) && !Array.isArray(init.headers)
-      ? (init.headers as Record<string, string>)
-      : {};
-
-  const response = await fetch(url, {
-    ...init,
-    headers: buildAuthHeaders(existingHeaders, adminPassword),
-  });
-
-  let payload: RawApiResponse | null = null;
+async function parseJsonResponse<T>(res: Response, fallbackError: string): Promise<T> {
+  let data: any = null;
   try {
-    payload = (await response.json()) as RawApiResponse;
+    data = await res.json();
   } catch {
-    throw new Error(`Сървърът върна невалиден отговор (HTTP ${response.status}).`);
+    if (!res.ok) {
+      throw new Error(`${fallbackError} (HTTP ${res.status})`);
+    }
+    throw new Error('Невалиден JSON отговор от сървъра.');
   }
 
-  if (!response.ok || !payload || payload.ok === false) {
-    throw new Error(
-      payload?.error || `Сървърна грешка (HTTP ${response.status}).`
-    );
+  if (!res.ok || data?.ok === false) {
+    throw new Error(data?.error || `${fallbackError} (HTTP ${res.status})`);
   }
 
-  return payload;
+  return data as T;
 }
 
-// ============================================================================
-// AUTH & SESSION API
-// ============================================================================
+export interface AuthSessionResponse {
+  ok: boolean;
+  token?: string | null;
+  authenticated?: boolean;
+  requiresApproval?: boolean;
+  user: AuthUser | null;
+  settings: SystemSettings;
+}
 
-export async function registerUser(input: {
+export async function registerUser(payload: {
   name: string;
   email: string;
   password: string;
-}): Promise<{
-  token: string | null;
-  requiresApproval: boolean;
-  user: AuthUser;
-  settings: SystemSettings;
-}> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=register`, {
+}): Promise<AuthSessionResponse> {
+  const res = await fetch(buildUrl('register'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    headers: buildHeaders(undefined, true),
+    body: JSON.stringify(payload),
   });
-
-  if (payload.token) {
-    setStoredAuthToken(payload.token);
+  const data = await parseJsonResponse<AuthSessionResponse>(res, 'Грешка при регистрация.');
+  if (data.token) {
+    setAuthToken(data.token);
   }
-
-  return {
-    token: payload.token ?? null,
-    requiresApproval: Boolean(payload.requiresApproval),
-    user: payload.user as AuthUser,
-    settings: payload.settings as SystemSettings,
-  };
+  return data;
 }
 
-export async function loginUser(input: {
+export async function loginUser(payload: {
   email: string;
   password: string;
-}): Promise<{
-  token: string | null;
-  requiresApproval: boolean;
-  user: AuthUser;
-  settings: SystemSettings;
-}> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=login`, {
+}): Promise<AuthSessionResponse> {
+  const res = await fetch(buildUrl('login'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    headers: buildHeaders(undefined, true),
+    body: JSON.stringify(payload),
   });
-
-  if (payload.token) {
-    setStoredAuthToken(payload.token);
+  const data = await parseJsonResponse<AuthSessionResponse>(res, 'Грешка при вход.');
+  if (data.token) {
+    setAuthToken(data.token);
   }
-
-  return {
-    token: payload.token ?? null,
-    requiresApproval: Boolean(payload.requiresApproval),
-    user: payload.user as AuthUser,
-    settings: payload.settings as SystemSettings,
-  };
+  return data;
 }
 
-export async function fetchCurrentUser(): Promise<{
-  authenticated: boolean;
-  requiresApproval: boolean;
-  user: AuthUser | null;
-  settings: SystemSettings;
-}> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=me`, {
+export async function fetchMe(): Promise<AuthSessionResponse> {
+  const res = await fetch(buildUrl('me'), {
     method: 'GET',
-    cache: 'no-store',
+    headers: buildHeaders(undefined, false),
   });
-
-  return {
-    authenticated: Boolean(payload.authenticated),
-    requiresApproval: Boolean(payload.requiresApproval),
-    user: payload.user ?? null,
-    settings: payload.settings as SystemSettings,
-  };
+  return parseJsonResponse<AuthSessionResponse>(res, 'Грешка при проверка на сесията.');
 }
 
 export async function logoutUser(): Promise<void> {
   try {
-    await fetchApiRaw(`${API_BASE_URL}?action=logout`, { method: 'POST' });
+    await fetch(buildUrl('logout'), {
+      method: 'POST',
+      headers: buildHeaders(undefined, true),
+    });
+  } catch {
+    // ignore
   } finally {
-    setStoredAuthToken(null);
+    setAuthToken(null);
   }
 }
 
+export async function verifyAdminCredentials(adminPassword?: string): Promise<boolean> {
+  const res = await fetch(buildUrl('verify_admin'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({}),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; authenticated?: boolean }>(
+    res,
+    'Неуспешна администраторска проверка.'
+  );
+  return Boolean(data.ok && (data.authenticated ?? true));
+}
+
 // ============================================================================
-// ADMIN USERS, TEAMS, STATS & SETTINGS
+// ДИНАМИЧНИ КАТЕГОРИИ
 // ============================================================================
 
-export async function fetchAdminDashboardStats(adminPassword?: string): Promise<{
-  stats: AdminDashboardStats;
-  recentLogs: AuditLogEntry[];
-}> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_dashboard_stats`,
-    { method: 'GET', cache: 'no-store' },
-    adminPassword
+export async function fetchCategories(
+  scope?: 'model' | 'texture'
+): Promise<CatalogCategoryItem[]> {
+  const res = await fetch(
+    buildUrl('list_categories', scope ? { scope } : undefined),
+    {
+      method: 'GET',
+      headers: buildHeaders(undefined, false),
+    }
   );
-  return {
-    stats: payload.stats as AdminDashboardStats,
-    recentLogs: Array.isArray(payload.recentLogs) ? payload.recentLogs : [],
-  };
+  const data = await parseJsonResponse<{ ok: boolean; categories?: CatalogCategoryItem[] }>(
+    res,
+    'Неуспешно зареждане на категориите.'
+  );
+  return Array.isArray(data.categories) ? data.categories : [];
+}
+
+export async function saveCategory(
+  payload: {
+    id?: string;
+    slug?: string;
+    name: string;
+    scope: 'model' | 'texture';
+    sortOrder?: number;
+    snapToWall?: boolean;
+  },
+  adminPassword?: string
+): Promise<CatalogCategoryItem> {
+  const res = await fetch(buildUrl('save_category'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; category: CatalogCategoryItem }>(
+    res,
+    'Неуспешно запазване на категорията.'
+  );
+  return data.category;
+}
+
+export async function deleteCategory(id: string, adminPassword?: string): Promise<void> {
+  const res = await fetch(buildUrl('delete_category'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id }),
+  });
+  await parseJsonResponse(res, 'Неуспешно изтриване на категорията.');
+}
+
+// ============================================================================
+// АДМИН: СТАТИСТИКА, ПОТРЕБИТЕЛИ, ЕКИПИ, НАСТРОЙКИ
+// ============================================================================
+
+export async function fetchAdminDashboard(adminPassword?: string): Promise<AdminDashboardStats> {
+  const res = await fetch(buildUrl('admin_dashboard_stats'), {
+    method: 'GET',
+    headers: buildHeaders(adminPassword, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; stats: AdminDashboardStats }>(
+    res,
+    'Неуспешно зареждане на статистиката.'
+  );
+  return data.stats;
 }
 
 export async function fetchAdminUsers(adminPassword?: string): Promise<AuthUser[]> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_list_users`,
-    { method: 'GET', cache: 'no-store' },
-    adminPassword
+  const res = await fetch(buildUrl('admin_list_users'), {
+    method: 'GET',
+    headers: buildHeaders(adminPassword, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; users?: AuthUser[] }>(
+    res,
+    'Неуспешно зареждане на потребителите.'
   );
-  return Array.isArray(payload.users) ? payload.users : [];
+  return Array.isArray(data.users) ? data.users : [];
 }
 
-export async function createAdminUser(
-  input: {
+export async function adminCreateUser(
+  payload: {
     name: string;
     email: string;
     password: string;
     role: UserRole;
-    planLevel: PlanLevel;
-    aiCreditsBalance: number;
+    planLevel: AuthUser['planLevel'];
+    aiCreditsBalance?: number;
   },
   adminPassword?: string
 ): Promise<AuthUser> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_create_user`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+  const res = await fetch(buildUrl('admin_create_user'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; user: AuthUser }>(
+    res,
+    'Неуспешно създаване на потребител.'
   );
-  return payload.user as AuthUser;
+  return data.user;
 }
 
-export async function updateAdminUser(
-  input: {
+export async function adminUpdateUser(
+  payload: {
     id: string;
     name?: string;
     status?: UserStatus;
     role?: UserRole;
-    planLevel?: PlanLevel;
+    planLevel?: AuthUser['planLevel'];
     newPassword?: string;
   },
   adminPassword?: string
 ): Promise<AuthUser> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_update_user`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+  const res = await fetch(buildUrl('admin_update_user'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; user: AuthUser }>(
+    res,
+    'Неуспешно обновяване на потребител.'
   );
-  return payload.user as AuthUser;
+  return data.user;
 }
 
-export async function addAdminUserCredits(
-  input: { userId: string; delta: number; reason?: string },
+export async function adminAddUserCredits(
+  payload: {
+    userId: string;
+    delta: number;
+    reason?: string;
+  },
   adminPassword?: string
 ): Promise<AuthUser> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_add_credits`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+  const res = await fetch(buildUrl('admin_add_credits'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; user: AuthUser }>(
+    res,
+    'Неуспешно обновяване на кредитите.'
   );
-  return payload.user as AuthUser;
+  return data.user;
 }
 
-export async function deleteAdminUser(
-  id: string,
-  adminPassword?: string
-): Promise<void> {
-  await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_delete_user`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    },
-    adminPassword
-  );
+export async function adminDeleteUser(userId: string, adminPassword?: string): Promise<void> {
+  const res = await fetch(buildUrl('admin_delete_user'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id: userId }),
+  });
+  await parseJsonResponse(res, 'Неуспешно изтриване на потребител.');
 }
 
-export async function fetchTeams(adminPassword?: string): Promise<TeamDetails[]> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_list_teams`,
-    { method: 'GET', cache: 'no-store' },
-    adminPassword
+export async function fetchTeams(adminPassword?: string): Promise<AdminTeam[]> {
+  const res = await fetch(buildUrl('admin_list_teams'), {
+    method: 'GET',
+    headers: buildHeaders(adminPassword, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; teams?: AdminTeam[] }>(
+    res,
+    'Неуспешно зареждане на екипите.'
   );
-  return Array.isArray(payload.teams) ? payload.teams : [];
+  return Array.isArray(data.teams) ? data.teams : [];
 }
 
 export async function createTeam(
-  input: {
+  payload: {
     name: string;
     ownerUserId?: string;
     sharedAiCredits?: number;
     maxMembers?: number;
   },
   adminPassword?: string
-): Promise<{ teamId: string }> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_create_team`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+): Promise<string> {
+  const res = await fetch(buildUrl('admin_create_team'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; teamId: string }>(
+    res,
+    'Неуспешно създаване на екип.'
   );
-  return { teamId: payload.teamId || '' };
+  return data.teamId;
 }
 
 export async function addTeamCredits(
-  input: { teamId: string; delta: number; reason?: string },
+  payload: {
+    teamId: string;
+    delta: number;
+    reason?: string;
+  },
   adminPassword?: string
-): Promise<{ sharedAiCredits: number }> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_add_team_credits`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+): Promise<number> {
+  const res = await fetch(buildUrl('admin_add_team_credits'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; sharedAiCredits: number }>(
+    res,
+    'Неуспешно зареждане на екипни кредити.'
   );
-  return { sharedAiCredits: Number(payload.sharedAiCredits ?? 0) };
+  return data.sharedAiCredits;
 }
 
 export async function manageTeamMember(
-  input: {
+  payload: {
     teamId: string;
     email?: string;
     userId?: string;
@@ -400,179 +383,99 @@ export async function manageTeamMember(
   },
   adminPassword?: string
 ): Promise<void> {
-  await fetchApiRaw(
-    `${API_BASE_URL}?action=team_manage_member`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
-  );
+  const res = await fetch(buildUrl('team_manage_member'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
+  });
+  await parseJsonResponse(res, 'Неуспешно обновяване на член от екипа.');
 }
 
 export async function updateSystemSettings(
-  patch: Partial<SystemSettings>,
+  payload: {
+    requireAdminApproval?: boolean;
+    planConfigs?: Partial<PlanConfigMap>;
+  },
   adminPassword?: string
 ): Promise<SystemSettings> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_update_system_settings`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    },
-    adminPassword
-  );
-  return payload.settings as SystemSettings;
-}
-
-export async function deleteAdminScene(
-  id: string,
-  adminPassword?: string
-): Promise<void> {
-  await fetchApiRaw(
-    `${API_BASE_URL}?action=admin_delete_scene`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    },
-    adminPassword
-  );
-}
-
-// ============================================================================
-// 3D МОДЕЛИ
-// ============================================================================
-
-export async function fetchModels(): Promise<CatalogModel[]> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_models`, {
-    method: 'GET',
-    cache: 'no-store',
+  const res = await fetch(buildUrl('admin_update_system_settings'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(payload),
   });
-
-  const list = Array.isArray(payload.models)
-    ? payload.models
-    : Array.isArray(payload.data)
-      ? (payload.data as CatalogModel[])
-      : [];
-
-  return list.map(normalizeModel);
-}
-
-export async function createModelOnServer(
-  input: CreateModelInput,
-  adminPassword?: string
-): Promise<CatalogModel> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=create_model`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+  const data = await parseJsonResponse<{ ok: boolean; settings: SystemSettings }>(
+    res,
+    'Неуспешно запазване на системните настройки.'
   );
-
-  const model = payload.model ?? (payload.data as CatalogModel | undefined);
-  if (!model) {
-    throw new Error('Сървърът не върна създадения модел.');
-  }
-  return normalizeModel(model);
+  return data.settings;
 }
 
-export async function updateModelOnServer(
-  id: string,
-  patch: Partial<CatalogModel>,
-  adminPassword?: string
-): Promise<CatalogModel> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=update_model`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, ...patch }),
-    },
-    adminPassword
-  );
+// ============================================================================
+// КАЧВАНЕ НА ФАЙЛОВЕ
+// ============================================================================
 
-  const model = payload.model ?? (payload.data as CatalogModel | undefined);
-  if (!model) {
-    throw new Error('Сървърът не върна обновения модел.');
-  }
-  return normalizeModel(model);
-}
-
-export async function deleteModelOnServer(
-  id: string,
-  adminPassword?: string
-): Promise<{ deletedId: string }> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=delete_model`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    },
-    adminPassword
-  );
-
-  return { deletedId: payload.deletedId ?? id };
-}
-
-export async function uploadGlbFile(
-  file: File,
-  adminPassword?: string
-): Promise<{ url: string; fileName: string }> {
+export async function uploadGlbFile(file: File, adminPassword?: string): Promise<string> {
   const formData = new FormData();
   formData.append('file', file);
-
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=upload_glb`,
-    {
-      method: 'POST',
-      body: formData,
-    },
-    adminPassword
+  const res = await fetch(buildUrl('upload_glb'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, false),
+    body: formData,
+  });
+  const data = await parseJsonResponse<{ ok: boolean; url?: string }>(
+    res,
+    'Неуспешно качване на .glb файл.'
   );
-
-  const dataObj = payload.data as { url?: string; fileName?: string } | undefined;
-  const url = payload.url ?? dataObj?.url;
-  const fileName = payload.fileName ?? dataObj?.fileName ?? file.name;
-
-  if (!url) {
-    throw new Error('Сървърът не върна URL на качения .glb файл.');
-  }
-
-  return { url, fileName };
+  if (!data.url) throw new Error('Сървърът не върна URL за .glb файла.');
+  return data.url;
 }
 
-export async function uploadPreviewImage(
-  file: File,
-  adminPassword?: string
-): Promise<{ url: string; fileName: string }> {
+export async function uploadPreviewFile(file: File, adminPassword?: string): Promise<string> {
   const formData = new FormData();
   formData.append('file', file);
-
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=upload_preview`,
-    {
-      method: 'POST',
-      body: formData,
-    },
-    adminPassword
+  const res = await fetch(buildUrl('upload_preview'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, false),
+    body: formData,
+  });
+  const data = await parseJsonResponse<{ ok: boolean; url?: string }>(
+    res,
+    'Неуспешно качване на превю изображение.'
   );
+  if (!data.url) throw new Error('Сървърът не върна URL за превюто.');
+  return data.url;
+}
 
-  const dataObj = payload.data as { url?: string; fileName?: string } | undefined;
-  const url = payload.url ?? dataObj?.url;
-  const fileName = payload.fileName ?? dataObj?.fileName ?? file.name;
+export async function uploadTextureFile(file: File, adminPassword?: string): Promise<string> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(buildUrl('upload_texture'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, false),
+    body: formData,
+  });
+  const data = await parseJsonResponse<{ ok: boolean; url?: string }>(
+    res,
+    'Неуспешно качване на текстура.'
+  );
+  if (!data.url) throw new Error('Сървърът не върна URL за текстурата.');
+  return data.url;
+}
 
-  if (!url) {
-    throw new Error('Сървърът не върна URL на каченото превю.');
-  }
-
-  return { url, fileName };
+export async function uploadFloorplanFile(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(buildUrl('upload_floorplan'), {
+    method: 'POST',
+    headers: buildHeaders(undefined, false),
+    body: formData,
+  });
+  const data = await parseJsonResponse<{ ok: boolean; url?: string }>(
+    res,
+    'Неуспешно качване на снимката на плана.'
+  );
+  if (!data.url) throw new Error('Сървърът не върна URL за снимката на плана.');
+  return data.url;
 }
 
 // ============================================================================
@@ -580,232 +483,178 @@ export async function uploadPreviewImage(
 // ============================================================================
 
 export async function fetchTextures(): Promise<CatalogTexture[]> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_textures`, {
+  const res = await fetch(buildUrl('list_textures'), {
     method: 'GET',
-    cache: 'no-store',
+    headers: buildHeaders(undefined, false),
   });
-
-  const list = Array.isArray(payload.textures)
-    ? payload.textures
-    : Array.isArray(payload.data)
-      ? (payload.data as CatalogTexture[])
-      : [];
-
-  return list.map(normalizeTexture);
-}
-
-export async function uploadTextureImage(
-  file: File,
-  adminPassword?: string
-): Promise<{ url: string; fileName: string }> {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=upload_texture`,
-    {
-      method: 'POST',
-      body: formData,
-    },
-    adminPassword
+  const data = await parseJsonResponse<{ ok: boolean; textures?: CatalogTexture[] }>(
+    res,
+    'Неуспешно зареждане на текстурите.'
   );
-
-  const dataObj = payload.data as { url?: string; fileName?: string } | undefined;
-  const url = payload.url ?? dataObj?.url;
-  const fileName = payload.fileName ?? dataObj?.fileName ?? file.name;
-
-  if (!url) {
-    throw new Error('Сървърът не върна URL на качената текстура.');
-  }
-
-  return { url, fileName };
+  return Array.isArray(data.textures) ? data.textures : [];
 }
 
-export async function createTextureOnServer(
+export async function createTexture(
   input: CreateTextureInput,
   adminPassword?: string
 ): Promise<CatalogTexture> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=create_texture`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    },
-    adminPassword
+  const res = await fetch(buildUrl('create_texture'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(input),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; texture: CatalogTexture }>(
+    res,
+    'Неуспешно създаване на текстура.'
   );
-
-  const tex = payload.texture ?? (payload.data as CatalogTexture | undefined);
-  if (!tex) {
-    throw new Error('Сървърът не върна създадената текстура.');
-  }
-  return normalizeTexture(tex);
+  return data.texture;
 }
 
-export async function updateTextureOnServer(
+export async function updateTexture(
   id: string,
-  patch: Partial<CatalogTexture>,
+  input: Partial<CreateTextureInput>,
   adminPassword?: string
 ): Promise<CatalogTexture> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=update_texture`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, ...patch }),
-    },
-    adminPassword
-  );
-
-  const tex = payload.texture ?? (payload.data as CatalogTexture | undefined);
-  if (!tex) {
-    throw new Error('Сървърът не върна обновената текстура.');
-  }
-  return normalizeTexture(tex);
-}
-
-export async function deleteTextureOnServer(
-  id: string,
-  adminPassword?: string
-): Promise<{ deletedId: string }> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=delete_texture`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    },
-    adminPassword
-  );
-
-  return { deletedId: payload.deletedId ?? id };
-}
-
-// ============================================================================
-// ПОДЛОЖКА ПЛАН, СЦЕНИ И ШАБЛОНИ
-// ============================================================================
-
-export async function uploadFloorplanImage(
-  file: File
-): Promise<{ url: string; fileName: string }> {
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=upload_floorplan`, {
+  const res = await fetch(buildUrl('update_texture'), {
     method: 'POST',
-    body: formData,
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id, ...input }),
   });
-
-  const dataObj = payload.data as { url?: string; fileName?: string } | undefined;
-  const url = payload.url ?? dataObj?.url;
-  const fileName = payload.fileName ?? dataObj?.fileName ?? file.name;
-
-  if (!url) {
-    throw new Error('Сървърът не върна URL на качения план.');
-  }
-
-  return { url, fileName };
-}
-
-export async function fetchScenes(): Promise<SavedSceneSummary[]> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_scenes`, {
-    method: 'GET',
-    cache: 'no-store',
-  });
-
-  if (Array.isArray(payload.scenes)) {
-    return payload.scenes;
-  }
-  if (Array.isArray(payload.data)) {
-    return payload.data as SavedSceneSummary[];
-  }
-  return [];
-}
-
-export async function fetchSceneById(id: string): Promise<SavedScene> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=get_scene&id=${encodeURIComponent(id)}`,
-    {
-      method: 'GET',
-      cache: 'no-store',
-    }
+  const data = await parseJsonResponse<{ ok: boolean; texture: CatalogTexture }>(
+    res,
+    'Неуспешно обновяване на текстура.'
   );
-
-  const scene = payload.scene ?? (payload.data as SavedScene | undefined);
-  if (!scene) {
-    throw new Error('Сървърът не върна данни за избрания проект.');
-  }
-  return scene;
+  return data.texture;
 }
 
-export async function saveSceneToServer(payload: {
+export async function deleteTexture(id: string, adminPassword?: string): Promise<void> {
+  const res = await fetch(buildUrl('delete_texture'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id }),
+  });
+  await parseJsonResponse(res, 'Неуспешно изтриване на текстура.');
+}
+
+// ============================================================================
+// 3D МОДЕЛИ
+// ============================================================================
+
+export async function fetchModels(): Promise<CatalogModel[]> {
+  const res = await fetch(buildUrl('list_models'), {
+    method: 'GET',
+    headers: buildHeaders(undefined, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; models?: CatalogModel[] }>(
+    res,
+    'Неуспешно зареждане на 3D моделите.'
+  );
+  return Array.isArray(data.models) ? data.models : [];
+}
+
+export async function createModel(
+  input: CreateModelInput,
+  adminPassword?: string
+): Promise<CatalogModel> {
+  const res = await fetch(buildUrl('create_model'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify(input),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; model: CatalogModel }>(
+    res,
+    'Неуспешно създаване на 3D модел.'
+  );
+  return data.model;
+}
+
+export async function updateModel(
+  id: string,
+  input: Partial<CreateModelInput>,
+  adminPassword?: string
+): Promise<CatalogModel> {
+  const res = await fetch(buildUrl('update_model'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id, ...input }),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; model: CatalogModel }>(
+    res,
+    'Неуспешно обновяване на 3D модел.'
+  );
+  return data.model;
+}
+
+export async function deleteModel(id: string, adminPassword?: string): Promise<void> {
+  const res = await fetch(buildUrl('delete_model'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id }),
+  });
+  await parseJsonResponse(res, 'Неуспешно изтриване на 3D модел.');
+}
+
+// ============================================================================
+// СЦЕНИ / ПРОЕКТИ
+// ============================================================================
+
+export interface CloudSceneListItem {
+  id: string;
+  title: string;
+  userId?: string | null;
+  ownerName?: string | null;
+  ownerEmail?: string | null;
+  updatedAt?: string;
+}
+
+export async function listScenes(): Promise<CloudSceneListItem[]> {
+  const res = await fetch(buildUrl('list_scenes'), {
+    method: 'GET',
+    headers: buildHeaders(undefined, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; scenes?: CloudSceneListItem[] }>(
+    res,
+    'Неуспешно зареждане на списъка с проекти.'
+  );
+  return Array.isArray(data.scenes) ? data.scenes : [];
+}
+
+export async function loadScene(id: string): Promise<SavedScene> {
+  const res = await fetch(buildUrl('get_scene', { id }), {
+    method: 'GET',
+    headers: buildHeaders(undefined, false),
+  });
+  const data = await parseJsonResponse<{ ok: boolean; scene?: SavedScene }>(
+    res,
+    'Неуспешно зареждане на проект.'
+  );
+  if (!data.scene) throw new Error('Проектът липсва в отговора.');
+  return data.scene;
+}
+
+export async function saveScene(payload: {
   id?: string;
   title: string;
-  objects: SceneObject[];
+  objects: SavedScene['objects'];
   room?: RoomConfig;
 }): Promise<{ id: string; title: string }> {
-  const res = await fetchApiRaw(`${API_BASE_URL}?action=save_scene`, {
+  const res = await fetch(buildUrl('save_scene'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders(undefined, true),
     body: JSON.stringify(payload),
   });
-
-  const dataObj = res.data as { id?: string; title?: string } | undefined;
-  const savedId = res.id ?? res.scene?.id ?? dataObj?.id ?? payload.id ?? '';
-  const savedTitle = res.title ?? res.scene?.title ?? dataObj?.title ?? payload.title;
-
-  return { id: savedId, title: savedTitle };
+  const data = await parseJsonResponse<{ ok: boolean; id: string; title: string }>(
+    res,
+    'Неуспешно запазване на проекта.'
+  );
+  return { id: data.id, title: data.title };
 }
 
-export async function fetchApartmentTemplates(): Promise<ApartmentTemplate[]> {
-  const payload = await fetchApiRaw(`${API_BASE_URL}?action=list_templates`, {
-    method: 'GET',
-    cache: 'no-store',
+export async function adminDeleteScene(id: string, adminPassword?: string): Promise<void> {
+  const res = await fetch(buildUrl('admin_delete_scene'), {
+    method: 'POST',
+    headers: buildHeaders(adminPassword, true),
+    body: JSON.stringify({ id }),
   });
-
-  if (Array.isArray(payload.templates)) {
-    return payload.templates;
-  }
-  if (Array.isArray(payload.data)) {
-    return payload.data as ApartmentTemplate[];
-  }
-  return [];
-}
-
-export async function saveApartmentTemplateToServer(
-  template: ApartmentTemplate,
-  adminPassword?: string
-): Promise<ApartmentTemplate> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=save_template`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(template),
-    },
-    adminPassword
-  );
-
-  const saved = payload.template ?? (payload.data as ApartmentTemplate | undefined);
-  if (!saved) {
-    throw new Error('Сървърът не върна запазения шаблон.');
-  }
-  return saved;
-}
-
-export async function deleteApartmentTemplateOnServer(
-  id: string,
-  adminPassword?: string
-): Promise<{ deletedId: string }> {
-  const payload = await fetchApiRaw(
-    `${API_BASE_URL}?action=delete_template`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    },
-    adminPassword
-  );
-
-  return { deletedId: payload.deletedId ?? id };
+  await parseJsonResponse(res, 'Неуспешно изтриване на проект.');
 }

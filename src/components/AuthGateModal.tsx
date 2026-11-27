@@ -61,8 +61,15 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const switchMode = (nextMode: 'login' | 'register') => {
+    setMode(nextMode);
+    setError(null);
+    setConfirmPassword('');
+  };
 
   if (pendingUser) {
     return (
@@ -138,23 +145,28 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (mode === 'register' && password !== confirmPassword) {
+      setError('Паролите не съвпадат. Провери и опитай отново.');
+      return;
+    }
+
     setLoading(true);
 
     try {
-      if (mode === 'login') {
-        const res = await loginUser({ email, password });
-        if (res.requiresApproval) {
-          onPendingApproval(res.user, res.settings);
-        } else {
-          onAuthenticated(res.user, res.settings);
-        }
+      const res =
+        mode === 'login'
+          ? await loginUser({ email, password })
+          : await registerUser({ name, email, password });
+
+      if (!res.user) {
+        throw new Error('Сървърът не върна потребителски профил.');
+      }
+
+      if (res.requiresApproval) {
+        onPendingApproval(res.user, res.settings);
       } else {
-        const res = await registerUser({ name, email, password });
-        if (res.requiresApproval) {
-          onPendingApproval(res.user, res.settings);
-        } else {
-          onAuthenticated(res.user, res.settings);
-        }
+        onAuthenticated(res.user, res.settings);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Възникна грешка.');
@@ -191,10 +203,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             type="button"
             className={`btn ${mode === 'login' ? 'btn-active' : ''}`}
             style={{ fontSize: '12px', padding: '7px' }}
-            onClick={() => {
-              setMode('login');
-              setError(null);
-            }}
+            onClick={() => switchMode('login')}
           >
             Вход в профил
           </button>
@@ -202,10 +211,7 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
             type="button"
             className={`btn ${mode === 'register' ? 'btn-active' : ''}`}
             style={{ fontSize: '12px', padding: '7px' }}
-            onClick={() => {
-              setMode('register');
-              setError(null);
-            }}
+            onClick={() => switchMode('register')}
           >
             Нова регистрация
           </button>
@@ -283,6 +289,21 @@ export const AuthGateModal: React.FC<AuthGateModalProps> = ({
               placeholder="Минимум 6 символа"
             />
           </div>
+
+          {mode === 'register' && (
+            <div style={fieldWrapStyle}>
+              <label style={labelStyle}>Потвърди паролата</label>
+              <input
+                type="password"
+                required
+                minLength={6}
+                className="input-control"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Въведи паролата отново"
+              />
+            </div>
+          )}
 
           <button
             type="submit"
