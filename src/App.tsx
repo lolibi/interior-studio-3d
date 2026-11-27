@@ -44,6 +44,9 @@ import type { DiscoveredMaterialSlot } from './components/SceneItemMesh';
 import { AdminPanel } from './components/AdminPanel';
 import { ParametricBuilderModal } from './components/ParametricBuilderModal';
 import { ProjectBomModal } from './components/ProjectBomModal';
+import { AuthGateModal } from './components/AuthGateModal';
+import type { AuthUser, SystemSettings } from './types/auth';
+import { getEffectivePermissions } from './utils/permissions';
 import {
   DEFAULT_CATALOG_MODELS,
   loadCatalog,
@@ -57,10 +60,12 @@ import {
 import type { UserFurniturePreset } from './utils/userPresetsStorage';
 import {
   fetchApartmentTemplates,
+  fetchCurrentUser,
   fetchModels,
   fetchSceneById,
   fetchScenes,
   fetchTextures,
+  logoutUser,
   saveSceneToServer,
   uploadFloorplanImage,
 } from './utils/apiClient';
@@ -87,6 +92,44 @@ export function App() {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [isBomOpen, setIsBomOpen] = useState(false);
   const [isSyncingServer, setIsSyncingServer] = useState(false);
+
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [pendingUser, setPendingUser] = useState<AuthUser | null>(null);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(
+    null
+  );
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+
+  const permissions = useMemo(
+    () => getEffectivePermissions(authUser, systemSettings),
+    [authUser, systemSettings]
+  );
+
+  const refreshAuthSession = useCallback(async () => {
+    try {
+      const res = await fetchCurrentUser();
+      setSystemSettings(res.settings);
+      if (res.authenticated && res.user) {
+        setAuthUser(res.user);
+        setPendingUser(null);
+      } else if (res.requiresApproval && res.user) {
+        setAuthUser(null);
+        setPendingUser(res.user);
+      } else {
+        setAuthUser(null);
+        setPendingUser(null);
+      }
+    } catch {
+      // keep state if transient network issue
+    } finally {
+      setIsCheckingAuth(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAuthSession();
+  }, [refreshAuthSession]);
+
   const [parametricBuilderState, setParametricBuilderState] = useState<{
     isOpen: boolean;
     editingInstanceId?: string;
@@ -498,6 +541,16 @@ export function App() {
 
   const applyPatchToTargets = useCallback(
     (targets: SurfaceTarget[], patch: SurfaceBatchPatch) => {
+      if (patch.textureId) {
+        const tex = textures.find((t) => t.id === patch.textureId);
+        if (tex?.isPremium && !permissions.canUsePremiumCatalog) {
+          window.alert(
+            `Текстурата „${tex.name}“ е налична за платените планове. Текущ план: ${permissions.planLabel}.`
+          );
+          return;
+        }
+      }
+
       if (targets.length === 0) return;
 
       const nextWalls = room.walls.map((w) => {
@@ -598,7 +651,7 @@ export function App() {
 
       pushHistory({ ...room, walls: nextWalls, floorZones: nextZones }, sceneObjects);
     },
-    [room, sceneObjects, pushHistory]
+    [room, sceneObjects, pushHistory, textures, permissions]
   );
 
   const handleDropTextureOnSurface = useCallback(
@@ -781,6 +834,13 @@ export function App() {
 
   const handleAddModelToScene = useCallback(
     (model: CatalogModel) => {
+      if (model.isPremium && !permissions.canUsePremiumCatalog) {
+        window.alert(
+          `Моделът „${model.name}“ е наличен за платените планове. Текущ план: ${permissions.planLabel}.`
+        );
+        return;
+      }
+
       const id = `obj-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const offset = (sceneObjects.length % 5) * 0.25;
       const newObj: SceneObject = {
@@ -799,7 +859,7 @@ export function App() {
       clearAllSelections();
       setSelectedInstanceId(id);
     },
-    [room, sceneObjects, pushHistory, clearAllSelections]
+    [room, sceneObjects, pushHistory, clearAllSelections, permissions]
   );
 
   const handleAddPresetToScene = useCallback(
@@ -840,7 +900,9 @@ export function App() {
         baseModelId: baseModel.id,
         scale: [...obj.scale],
         mirrored: Boolean(obj.mirrored),
-        materialOverrides: obj.materialOverrides ? { ...obj.materialOverrides } : {},
+        materialOverrides: obj.materialOverrides
+          ? { ...obj.materialOverrides }
+          : {},
       });
       setUserPresets(updated);
     },
@@ -1497,12 +1559,22 @@ export function App() {
             type="button"
             className={`btn ${isBomOpen ? 'btn-active' : ''}`}
             onClick={() => {
+              if (!permissions.canExportBom) {
+                window.alert(
+                  `Спецификацията и разкроят (BOM) са достъпни в платените планове. Текущ план: ${permissions.planLabel}.`
+                );
+                return;
+              }
               setOpenTopPopover(null);
               setIsBomOpen(true);
             }}
-            title="Автоматична спецификация, квадратури и разкрой (CSV / PDF)"
+            title={
+              permissions.canExportBom
+                ? 'Автоматична спецификация, квадратури и разкрой (CSV / PDF)'
+                : 'Изисква платен план'
+            }
           >
-            📋 Спецификация
+            {permissions.canExportBom ? '📋 Спецификация' : '🔒 Спецификация'}
           </button>
 
           {/* ПАДАЩО МЕНЮ: ПРОЕКТ (всички контроли за проекта събрани тук) */}
@@ -1669,13 +1741,70 @@ export function App() {
             )}
           </div>
 
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setIsAdminOpen(true)}
-          >
-            ⚙ Админ каталог
-          </button>
+          {permissions.canAccessAdminPanel && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setIsAdminOpen(true)}
+            >
+              ⚙ Админ панел
+            </button>
+          )}
+
+          {authUser && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '3px 8px',
+                borderRadius: '6px',
+                backgroundColor: '#0f172a',
+                border: '1px solid #334155',
+                fontSize: '11px',
+                color: '#e2e8f0',
+              }}
+              title={`${authUser.name} (${authUser.email}) • ${permissions.planLabel}`}
+            >
+              <span style={{ fontWeight: 600 }}>{authUser.name}</span>
+              <span
+                style={{
+                  padding: '1px 6px',
+                  borderRadius: '999px',
+                  backgroundColor: '#1e293b',
+                  color: '#38bdf8',
+                  fontSize: '10px',
+                }}
+              >
+                {permissions.planLabel}
+              </span>
+              <span
+                style={{
+                  padding: '1px 6px',
+                  borderRadius: '999px',
+                  backgroundColor: '#1e293b',
+                  color: '#fbbf24',
+                  fontSize: '10px',
+                }}
+                title="Налични AI кредити"
+              >
+                ⚡ {authUser.totalAvailableCredits}
+              </span>
+              <button
+                type="button"
+                className="btn"
+                style={{ padding: '2px 6px', fontSize: '10px' }}
+                onClick={async () => {
+                  await logoutUser();
+                  setAuthUser(null);
+                  setPendingUser(null);
+                }}
+                title="Изход от профила"
+              >
+                Изход
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -1722,9 +1851,19 @@ export function App() {
                     fontWeight: 700,
                     fontSize: '12px',
                   }}
-                  onClick={() => setParametricBuilderState({ isOpen: true })}
+                  onClick={() => {
+                    if (!permissions.canUseParametricGenerators) {
+                      window.alert(
+                        `Параметричният генератор за кухня и гардероб е достъпен в платените планове. Текущ план: ${permissions.planLabel}.`
+                      );
+                      return;
+                    }
+                    setParametricBuilderState({ isOpen: true });
+                  }}
                 >
-                  ✨ Генератор: Кухня / Гардероб
+                  {permissions.canUseParametricGenerators
+                    ? '✨ Генератор: Кухня / Гардероб'
+                    : '🔒 Генератор: Кухня / Гардероб'}
                 </button>
 
                 <input
@@ -1840,7 +1979,12 @@ export function App() {
                           />
                         )}
                         <div style={{ fontWeight: 600, fontSize: '12px', color: '#f8fafc' }}>
-                          {model.name}
+                          {model.name}{' '}
+                          {model.isPremium && (
+                            <span style={{ color: '#fbbf24', fontSize: '10px' }}>
+                              ★ PRO
+                            </span>
+                          )}
                         </div>
                         <div style={{ fontSize: '10px', color: '#94a3b8' }}>
                           {model.dimensionsCm.width} × {model.dimensionsCm.depth} ×{' '}
@@ -1900,7 +2044,7 @@ export function App() {
                   <div className="empty-state-box">
                     {isSyncingServer
                       ? 'Зареждане на PBR текстури от сървъра...'
-                      : 'Няма намерени текстури. Можете да качите нови през „⚙ Админ каталог“.'}
+                      : 'Няма намерени текстури. Можете да качите нови през „⚙ Админ панел“.'}
                   </div>
                 ) : (
                   <div
@@ -2760,6 +2904,10 @@ export function App() {
         <AdminPanel
           models={models}
           currentRoom={room}
+          currentUser={authUser}
+          systemSettings={systemSettings}
+          onSettingsUpdated={(next) => setSystemSettings(next)}
+          onUserUpdated={(next) => setAuthUser(next)}
           onClose={() => setIsAdminOpen(false)}
           onModelsUpdated={() => {
             void refreshServerCatalogs();
@@ -2801,6 +2949,30 @@ export function App() {
               setSelectedInstanceId(id);
             }
             setParametricBuilderState({ isOpen: false });
+          }}
+        />
+      )}
+
+      {/* ЕКРАН ЗА ВХОД / РЕГИСТРАЦИЯ / ОДОБРЕНИЕ */}
+      {!isCheckingAuth && !authUser && (
+        <AuthGateModal
+          pendingUser={pendingUser}
+          settings={systemSettings}
+          onAuthenticated={(user, settings) => {
+            setAuthUser(user);
+            setPendingUser(null);
+            setSystemSettings(settings);
+            void refreshServerCatalogs();
+          }}
+          onPendingApproval={(user, settings) => {
+            setAuthUser(null);
+            setPendingUser(user);
+            setSystemSettings(settings);
+          }}
+          onRefreshStatus={refreshAuthSession}
+          onLoggedOut={() => {
+            setAuthUser(null);
+            setPendingUser(null);
           }}
         />
       )}

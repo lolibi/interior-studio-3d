@@ -78,6 +78,7 @@ export interface CatalogModel {
   isActive: boolean;
   isBuiltIn?: boolean;
   isCustomPreset?: boolean;
+  isPremium?: boolean;
   defaultMaterialOverrides?: Record<string, MaterialOverride>;
 }
 
@@ -91,6 +92,7 @@ export interface CreateModelInput {
   scaleConstraints: ScaleConstraints;
   colorHex?: string;
   isActive: boolean;
+  isPremium?: boolean;
 }
 
 export type TextureCategory = 'wall' | 'floor' | 'tiles' | 'furniture';
@@ -114,6 +116,7 @@ export interface CatalogTexture {
   roughness?: number;
   metalness?: number;
   isActive?: boolean;
+  isPremium?: boolean;
 }
 
 export interface CreateTextureInput {
@@ -127,6 +130,7 @@ export interface CreateTextureInput {
   roughness?: number;
   metalness?: number;
   isActive?: boolean;
+  isPremium?: boolean;
 }
 
 /* ============================================================================
