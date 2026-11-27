@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { TransformControls } from '@react-three/drei';
+import { MeshReflectorMaterial, TransformControls } from '@react-three/drei';
 import type {
   CatalogTexture,
   FrontStyleType,
@@ -14,6 +14,7 @@ import type {
 } from '../types/editor';
 import type { WallSegment } from '../types/room';
 import { snapFurnitureToWalls } from '../utils/furnitureSnap';
+import { KitchenSinkAssembly } from './KitchenSinkAssembly';
 
 export interface ParametricFurnitureMeshProps {
   item: SceneObject;
@@ -193,14 +194,15 @@ function DoorOrDrawerLeaf({
     );
   }, [frontStyle, handleStyle, hingeSide, isDrawer, w, h, thickness, handleColor]);
 
-  // Огледално крило за гардероб (подложка + огледално стъкло с фаска)
   if (isMirror && !isDrawer) {
     const mirrorInset = 0.014;
+    const mirrorW = Math.max(0.04, w - mirrorInset);
+    const mirrorH = Math.max(0.04, h - mirrorInset);
+
     return (
       <group position={[x, y, z]}>
-        {/* Носеща плоскост на вратата */}
         <mesh castShadow receiveShadow>
-          <boxGeometry args={[w, h, thickness * 0.78]} />
+          <boxGeometry args={[w, h, thickness * 0.85]} />
           <meshStandardMaterial
             key={`mir-base-${frontMap?.uuid ?? 'none'}`}
             color={frontColor}
@@ -209,20 +211,17 @@ function DoorOrDrawerLeaf({
             metalness={frontMetalness}
           />
         </mesh>
-        {/* Огледален панел отпред */}
-        <mesh position={[0, 0, thickness * 0.42]} castShadow>
-          <boxGeometry
-            args={[
-              Math.max(0.04, w - mirrorInset),
-              Math.max(0.04, h - mirrorInset),
-              0.005,
-            ]}
-          />
-          <meshStandardMaterial
-            color="#e2e8f0"
+        <mesh position={[0, 0, thickness * 0.45 + 0.002]}>
+          <planeGeometry args={[mirrorW, mirrorH]} />
+          <MeshReflectorMaterial
+            mirror={0.92}
+            resolution={512}
+            mixBlur={0}
+            mixStrength={1.2}
             roughness={0.04}
-            metalness={0.96}
-            envMapIntensity={1.6}
+            metalness={0.15}
+            color="#eef2f6"
+            depthScale={0}
           />
         </mesh>
         {handleNode}
@@ -360,7 +359,6 @@ function WardrobeGeometry({
 
   return (
     <group>
-      {/* Цокъл */}
       {plinthH > 0.005 && (
         <mesh position={[0, plinthH / 2, -0.015]} castShadow receiveShadow>
           <boxGeometry args={[W - 0.01, plinthH, D - 0.03]} />
@@ -368,7 +366,6 @@ function WardrobeGeometry({
         </mesh>
       )}
 
-      {/* Основен корпус */}
       <group position={[0, plinthH, 0]}>
         <mesh position={[0, panelT / 2, 0]} castShadow receiveShadow>
           <boxGeometry args={[W, panelT, D]} />
@@ -420,7 +417,6 @@ function WardrobeGeometry({
           <meshStandardMaterial color={spec.corpusColor} roughness={0.85} />
         </mesh>
 
-        {/* Врати и чекмеджета */}
         {Array.from({ length: doors }).map((_, idx) => {
           const cx = -W / 2 + doorW * (idx + 0.5);
           const isSliding = spec.doorType === 'sliding';
@@ -472,7 +468,6 @@ function WardrobeGeometry({
         })}
       </group>
 
-      {/* Надстройка (Bridge) */}
       {spec.hasTopBridge && bridgeH > 0.1 && (
         <group position={[0, plinthH + mainBodyH, 0]}>
           <mesh position={[0, bridgeH / 2, 0]} castShadow receiveShadow>
@@ -509,7 +504,6 @@ function WardrobeGeometry({
   );
 }
 
-/** Помощен компонент за рендиране на един кухненски ред (основен или Г-крило) */
 function KitchenRunSegment({
   widthM,
   baseD,
@@ -529,6 +523,7 @@ function KitchenRunSegment({
   topMat,
   backMat,
   isCornerWing = false,
+  cornerSide,
 }: {
   widthM: number;
   baseD: number;
@@ -548,6 +543,7 @@ function KitchenRunSegment({
   topMat: ReturnType<typeof useSimpleTexturedMaterial>;
   backMat: ReturnType<typeof useSimpleTexturedMaterial>;
   isCornerWing?: boolean;
+  cornerSide?: 'l-left' | 'l-right';
 }) {
   const W = Math.max(0.4, widthM);
   const count = Math.max(1, Math.min(8, Math.round(modCount)));
@@ -555,7 +551,6 @@ function KitchenRunSegment({
 
   const getModType = (idx: number): KitchenModuleType => {
     if (isCornerWing) {
-      // В Г-крилото по подразбиране слагаме врати и чекмеджета (без втора мивка/фурна)
       return idx % 2 === 0 ? 'doors' : 'drawers';
     }
     return spec.modulePattern[idx % spec.modulePattern.length] ?? 'doors';
@@ -570,6 +565,19 @@ function KitchenRunSegment({
     spec.layoutMode === 'wall-only' ? 1.45 : baseTotalH + backsplashH;
   const wallZOffset = -baseD / 2 + wallCabD / 2;
 
+  const cornerDir = cornerSide === 'l-left' ? 1 : -1;
+  const upperCornerBridge = isCornerWing ? Math.max(0, baseD - wallCabD) : 0;
+  const wallTotalW = W + upperCornerBridge;
+  const wallShiftX = isCornerWing ? cornerDir * (upperCornerBridge / 2) : 0;
+
+  const wallModCount = isCornerWing
+    ? Math.max(1, Math.round(wallTotalW / Math.max(0.35, modW)))
+    : count;
+  const wallModW = wallTotalW / wallModCount;
+
+  const totalTopD = baseD + overhang;
+  const topCenterZ = overhang / 2;
+
   return (
     <group>
       {showBase && (
@@ -581,15 +589,61 @@ function KitchenRunSegment({
             </mesh>
           )}
 
-          <mesh position={[0, plinthH + baseBoxH / 2, 0]} castShadow receiveShadow>
-            <boxGeometry args={[W, baseBoxH, baseD]} />
-            <meshStandardMaterial
-              key={`kc-base-${corpusMat.map?.uuid ?? 'none'}`}
-              color={corpusMat.color}
-              map={corpusMat.map}
-              roughness={corpusMat.roughness}
-            />
-          </mesh>
+          {Array.from({ length: count }).map((_, idx) => {
+            const cx = -W / 2 + modW * (idx + 0.5);
+            const mType = getModType(idx + moduleOffsetIdx);
+
+            if (mType === 'sink') {
+              return (
+                <group key={`k-box-${idx}`} position={[cx, plinthH, 0]}>
+                  <mesh position={[0, 0.009, 0]} castShadow receiveShadow>
+                    <boxGeometry args={[modW, 0.018, baseD]} />
+                    <meshStandardMaterial
+                      key={`kc-sb-${corpusMat.map?.uuid ?? 'none'}`}
+                      color={corpusMat.color}
+                      map={corpusMat.map}
+                      roughness={corpusMat.roughness}
+                    />
+                  </mesh>
+                  <mesh position={[-modW / 2 + 0.009, baseBoxH / 2, 0]} castShadow receiveShadow>
+                    <boxGeometry args={[0.018, baseBoxH, baseD]} />
+                    <meshStandardMaterial
+                      key={`kc-sl-${corpusMat.map?.uuid ?? 'none'}`}
+                      color={corpusMat.color}
+                      map={corpusMat.map}
+                      roughness={corpusMat.roughness}
+                    />
+                  </mesh>
+                  <mesh position={[modW / 2 - 0.009, baseBoxH / 2, 0]} castShadow receiveShadow>
+                    <boxGeometry args={[0.018, baseBoxH, baseD]} />
+                    <meshStandardMaterial
+                      key={`kc-sr-${corpusMat.map?.uuid ?? 'none'}`}
+                      color={corpusMat.color}
+                      map={corpusMat.map}
+                      roughness={corpusMat.roughness}
+                    />
+                  </mesh>
+                </group>
+              );
+            }
+
+            return (
+              <mesh
+                key={`k-box-${idx}`}
+                position={[cx, plinthH + baseBoxH / 2, 0]}
+                castShadow
+                receiveShadow
+              >
+                <boxGeometry args={[modW, baseBoxH, baseD]} />
+                <meshStandardMaterial
+                  key={`kc-base-${corpusMat.map?.uuid ?? 'none'}`}
+                  color={corpusMat.color}
+                  map={corpusMat.map}
+                  roughness={corpusMat.roughness}
+                />
+              </mesh>
+            );
+          })}
 
           {spec.frontStyle === 'gola' && (
             <mesh position={[0, plinthH + baseBoxH - 0.015, baseD / 2 + 0.002]}>
@@ -606,11 +660,104 @@ function KitchenRunSegment({
             const cx = -W / 2 + modW * (idx + 0.5);
             const mType = getModType(idx + moduleOffsetIdx);
 
+            const countertopNode =
+              mType === 'sink' ? (() => {
+                const outerW = Math.min(0.76, Math.max(0.42, modW - 0.05));
+                const outerD = Math.min(0.48, baseD - 0.12);
+                const rim = 0.024;
+                const holeW = outerW - rim;
+                const holeD = outerD - rim;
+                const holeZ = 0.015;
+                const sideW = Math.max(0.01, (modW - holeW) / 2);
+                const backD = Math.max(0.01, holeZ - holeD / 2 - -baseD / 2);
+                const frontD = Math.max(
+                  0.01,
+                  baseD / 2 + overhang - (holeZ + holeD / 2)
+                );
+
+                return (
+                  <group position={[cx, baseTotalH - topT / 2, 0]}>
+                    <mesh
+                      position={[0, 0, -baseD / 2 + backD / 2]}
+                      castShadow
+                      receiveShadow
+                    >
+                      <boxGeometry args={[modW + 0.002, topT, backD]} />
+                      <meshStandardMaterial
+                        key={`ktop-sb-${topMat.map?.uuid ?? 'none'}`}
+                        color={topMat.color}
+                        map={topMat.map}
+                        roughness={topMat.roughness}
+                        metalness={topMat.metalness}
+                      />
+                    </mesh>
+                    <mesh
+                      position={[0, 0, baseD / 2 + overhang - frontD / 2]}
+                      castShadow
+                      receiveShadow
+                    >
+                      <boxGeometry args={[modW + 0.002, topT, frontD]} />
+                      <meshStandardMaterial
+                        key={`ktop-sf-${topMat.map?.uuid ?? 'none'}`}
+                        color={topMat.color}
+                        map={topMat.map}
+                        roughness={topMat.roughness}
+                        metalness={topMat.metalness}
+                      />
+                    </mesh>
+                    <mesh
+                      position={[-modW / 2 + sideW / 2, 0, holeZ]}
+                      castShadow
+                      receiveShadow
+                    >
+                      <boxGeometry args={[sideW + 0.001, topT, holeD]} />
+                      <meshStandardMaterial
+                        key={`ktop-sl-${topMat.map?.uuid ?? 'none'}`}
+                        color={topMat.color}
+                        map={topMat.map}
+                        roughness={topMat.roughness}
+                        metalness={topMat.metalness}
+                      />
+                    </mesh>
+                    <mesh
+                      position={[modW / 2 - sideW / 2, 0, holeZ]}
+                      castShadow
+                      receiveShadow
+                    >
+                      <boxGeometry args={[sideW + 0.001, topT, holeD]} />
+                      <meshStandardMaterial
+                        key={`ktop-sr-${topMat.map?.uuid ?? 'none'}`}
+                        color={topMat.color}
+                        map={topMat.map}
+                        roughness={topMat.roughness}
+                        metalness={topMat.metalness}
+                      />
+                    </mesh>
+                  </group>
+                );
+              })() : (
+                <mesh
+                  position={[cx, baseTotalH - topT / 2, topCenterZ]}
+                  castShadow
+                  receiveShadow
+                >
+                  <boxGeometry args={[modW + 0.002, topT, totalTopD]} />
+                  <meshStandardMaterial
+                    key={`ktop-${idx}-${topMat.map?.uuid ?? 'none'}`}
+                    color={topMat.color}
+                    map={topMat.map}
+                    roughness={topMat.roughness}
+                    metalness={topMat.metalness}
+                  />
+                </mesh>
+              );
+
             if (mType === 'drawers') {
               const h1 = baseBoxH * 0.24;
               const h2 = baseBoxH * 0.38;
               return (
                 <group key={`k-mod-${idx}`}>
+                  {countertopNode}
                   <DoorOrDrawerLeaf
                     x={cx}
                     y={plinthH + h2 / 2}
@@ -665,6 +812,7 @@ function KitchenRunSegment({
               const ovenH = Math.max(0.45, baseBoxH - drawerH - 0.02);
               return (
                 <group key={`k-mod-${idx}`}>
+                  {countertopNode}
                   <DoorOrDrawerLeaf
                     x={cx}
                     y={plinthH + drawerH / 2}
@@ -724,6 +872,7 @@ function KitchenRunSegment({
             if (mType === 'sink') {
               return (
                 <group key={`k-mod-${idx}`}>
+                  {countertopNode}
                   <DoorOrDrawerLeaf
                     x={cx}
                     y={plinthH + baseBoxH / 2}
@@ -739,24 +888,12 @@ function KitchenRunSegment({
                     frontMetalness={frontMat.metalness}
                     handleColor={spec.handleColor}
                   />
-                  <mesh position={[cx, baseTotalH + 0.003, 0.01]}>
-                    <boxGeometry
-                      args={[Math.min(0.56, modW - 0.06), 0.008, baseD - 0.14]}
-                    />
-                    <meshStandardMaterial color="#94a3b8" roughness={0.25} metalness={0.85} />
-                  </mesh>
-                  <mesh position={[cx, baseTotalH + 0.14, -baseD / 2 + 0.09]} castShadow>
-                    <cylinderGeometry args={[0.012, 0.016, 0.28, 12]} />
-                    <meshStandardMaterial color="#cbd5e1" roughness={0.2} metalness={0.9} />
-                  </mesh>
-                  <mesh
-                    position={[cx, baseTotalH + 0.27, -baseD / 2 + 0.15]}
-                    rotation={[Math.PI / 2.4, 0, 0]}
-                    castShadow
-                  >
-                    <cylinderGeometry args={[0.009, 0.009, 0.15, 12]} />
-                    <meshStandardMaterial color="#cbd5e1" roughness={0.2} metalness={0.9} />
-                  </mesh>
+                  <KitchenSinkAssembly
+                    cx={cx}
+                    topY={baseTotalH}
+                    baseD={baseD}
+                    modW={modW}
+                  />
                 </group>
               );
             }
@@ -765,6 +902,7 @@ function KitchenRunSegment({
               const halfW = modW / 2;
               return (
                 <group key={`k-mod-${idx}`}>
+                  {countertopNode}
                   <DoorOrDrawerLeaf
                     x={cx - halfW / 2}
                     y={plinthH + baseBoxH / 2}
@@ -800,50 +938,39 @@ function KitchenRunSegment({
             }
 
             return (
-              <DoorOrDrawerLeaf
-                key={`k-mod-${idx}`}
-                x={cx}
-                y={plinthH + baseBoxH / 2}
-                z={baseD / 2 + 0.011}
-                width={modW}
-                height={baseBoxH}
-                frontStyle={spec.frontStyle}
-                handleStyle={spec.handleStyle}
-                hingeSide={idx % 2 === 0 ? 'left' : 'right'}
-                frontColor={frontMat.color}
-                frontMap={frontMat.map}
-                frontRoughness={frontMat.roughness}
-                frontMetalness={frontMat.metalness}
-                handleColor={spec.handleColor}
-              />
+              <group key={`k-mod-${idx}`}>
+                {countertopNode}
+                <DoorOrDrawerLeaf
+                  x={cx}
+                  y={plinthH + baseBoxH / 2}
+                  z={baseD / 2 + 0.011}
+                  width={modW}
+                  height={baseBoxH}
+                  frontStyle={spec.frontStyle}
+                  handleStyle={spec.handleStyle}
+                  hingeSide={idx % 2 === 0 ? 'left' : 'right'}
+                  frontColor={frontMat.color}
+                  frontMap={frontMat.map}
+                  frontRoughness={frontMat.roughness}
+                  frontMetalness={frontMat.metalness}
+                  handleColor={spec.handleColor}
+                />
+              </group>
             );
           })}
-
-          {/* Термоплот */}
-          <mesh
-            position={[0, baseTotalH - topT / 2, overhang / 2]}
-            castShadow
-            receiveShadow
-          >
-            <boxGeometry args={[W + 0.002, topT, baseD + overhang]} />
-            <meshStandardMaterial
-              key={`ktop-${topMat.map?.uuid ?? 'none'}`}
-              color={topMat.color}
-              map={topMat.map}
-              roughness={topMat.roughness}
-              metalness={topMat.metalness}
-            />
-          </mesh>
         </group>
       )}
 
-      {/* Термогръб */}
       {spec.layoutMode === 'base-and-wall' && spec.hasBacksplash && (
         <mesh
-          position={[0, baseTotalH + backsplashH / 2, -baseD / 2 + 0.008]}
+          position={[
+            isCornerWing ? cornerDir * (baseD / 2) : 0,
+            baseTotalH + backsplashH / 2,
+            -baseD / 2 + 0.008,
+          ]}
           receiveShadow
         >
-          <boxGeometry args={[W, backsplashH, 0.014]} />
+          <boxGeometry args={[isCornerWing ? W + baseD : W, backsplashH, 0.014]} />
           <meshStandardMaterial
             key={`kback-${backMat.map?.uuid ?? 'none'}`}
             color={backMat.color}
@@ -854,11 +981,10 @@ function KitchenRunSegment({
         </mesh>
       )}
 
-      {/* Горен ред шкафове */}
       {showWall && (
-        <group position={[0, wallStartY, wallZOffset]}>
+        <group position={[wallShiftX, wallStartY, wallZOffset]}>
           <mesh position={[0, wallCabH / 2, 0]} castShadow receiveShadow>
-            <boxGeometry args={[W, wallCabH, wallCabD]} />
+            <boxGeometry args={[wallTotalW, wallCabH, wallCabD]} />
             <meshStandardMaterial
               key={`kc-wall-${corpusMat.map?.uuid ?? 'none'}`}
               color={corpusMat.color}
@@ -867,10 +993,10 @@ function KitchenRunSegment({
             />
           </mesh>
 
-          {Array.from({ length: count }).map((_, idx) => {
-            const cx = -W / 2 + modW * (idx + 0.5);
-            if (modW >= 0.78) {
-              const halfW = modW / 2;
+          {Array.from({ length: wallModCount }).map((_, idx) => {
+            const cx = -wallTotalW / 2 + wallModW * (idx + 0.5);
+            if (wallModW >= 0.78) {
+              const halfW = wallModW / 2;
               return (
                 <group key={`k-wall-${idx}`}>
                   <DoorOrDrawerLeaf
@@ -913,7 +1039,7 @@ function KitchenRunSegment({
                 x={cx}
                 y={wallCabH / 2}
                 z={wallCabD / 2 + 0.011}
-                width={modW}
+                width={wallModW}
                 height={wallCabH}
                 frontStyle={spec.frontStyle}
                 handleStyle={spec.handleStyle}
@@ -1049,13 +1175,11 @@ function KitchenGeometry({
   const shape = spec.shape ?? 'straight';
   const hasLWing = shape === 'l-left' || shape === 'l-right';
   const wingTotalW = Math.max(baseD + 0.4, (spec.wingWidthCm ?? 160) / 100);
-  // Вътрешната дължина на крилото започва след дълбочината на основния плот (baseD), за да няма застъпване в ъгъла
   const netWingLen = Math.max(0.4, wingTotalW - baseD);
   const wingMods = Math.max(1, Math.min(6, spec.wingModuleCount ?? 2));
 
   return (
     <group>
-      {/* Основен кухненски ред по ос X */}
       <KitchenRunSegment
         widthM={W}
         baseD={baseD}
@@ -1076,7 +1200,6 @@ function KitchenGeometry({
         backMat={backMat}
       />
 
-      {/* Г-образно крило отляво (гърбът му ляга по лявата стена -W/2, лицето гледа към +X) */}
       {hasLWing && shape === 'l-left' && (
         <group
           position={[-W / 2 + baseD / 2, 0, baseD / 2 + netWingLen / 2]}
@@ -1101,11 +1224,11 @@ function KitchenGeometry({
             topMat={topMat}
             backMat={backMat}
             isCornerWing
+            cornerSide="l-left"
           />
         </group>
       )}
 
-      {/* Г-образно крило отдясно (гърбът му ляга по дясната стена +W/2, лицето гледа към -X) */}
       {hasLWing && shape === 'l-right' && (
         <group
           position={[W / 2 - baseD / 2, 0, baseD / 2 + netWingLen / 2]}
@@ -1130,6 +1253,7 @@ function KitchenGeometry({
             topMat={topMat}
             backMat={backMat}
             isCornerWing
+            cornerSide="l-right"
           />
         </group>
       )}
@@ -1151,7 +1275,6 @@ export function ParametricFurnitureMesh({
   const [targetObj, setTargetObj] = useState<THREE.Object3D | null>(null);
   const isDraggingRef = useRef(false);
 
-  // Изчисляваме габаритите за магнитно снапване към стените и ъглите
   const snapDims = useMemo(() => {
     const sx = Math.abs(item.scale[0] || 1);
     const sz = Math.abs(item.scale[2] || 1);

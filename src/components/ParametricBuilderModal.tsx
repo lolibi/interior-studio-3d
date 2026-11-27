@@ -11,6 +11,7 @@ import type {
   HandleStyleType,
   KitchenLayoutMode,
   KitchenModuleType,
+  KitchenShapeType,
   KitchenSpec,
   ParametricFurnitureConfig,
   ParametricFurnitureKind,
@@ -27,6 +28,67 @@ interface ParametricBuilderModalProps {
   isEditingExisting?: boolean;
   onClose: () => void;
   onConfirm: (name: string, config: ParametricFurnitureConfig) => void;
+}
+
+/** Числово поле, което позволява свободно триене и писане и валидира при Enter / onBlur */
+function NumericInput({
+  value,
+  min,
+  max,
+  step = 1,
+  disabled = false,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  disabled?: boolean;
+  onChange: (val: number) => void;
+}) {
+  const [raw, setRaw] = useState<string>(String(value));
+
+  useEffect(() => {
+    setRaw(String(value));
+  }, [value]);
+
+  const commit = (text: string) => {
+    const parsed = Number(text.replace(',', '.'));
+    if (!Number.isFinite(parsed) || text.trim() === '') {
+      setRaw(String(value));
+      return;
+    }
+    const clamped = Math.max(min, Math.min(max, Math.round(parsed)));
+    setRaw(String(clamped));
+    onChange(clamped);
+  };
+
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      disabled={disabled}
+      className="input-control"
+      value={raw}
+      onChange={(e) => {
+        const nextText = e.target.value;
+        setRaw(nextText);
+        const parsed = Number(nextText);
+        if (nextText.trim() !== '' && Number.isFinite(parsed) && parsed >= min && parsed <= max) {
+          onChange(Math.round(parsed));
+        }
+      }}
+      onBlur={(e) => commit(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          commit((e.target as HTMLInputElement).value);
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+    />
+  );
 }
 
 const QUICK_COLORS = [
@@ -86,17 +148,20 @@ export function ParametricBuilderModal({
         `Гардероб ${wardrobe.widthCm}×${wardrobe.heightCm} см (${wardrobe.doorCount} крила)`
       );
     } else {
-      setCustomName(
-        `Кухня ${kitchen.widthCm} см (${kitchen.moduleCount} модула)`
-      );
+      const shapeSuffix =
+        kitchen.shape === 'l-left' || kitchen.shape === 'l-right'
+          ? ` Г-образна (${kitchen.widthCm}×${kitchen.wingWidthCm ?? 160} см)`
+          : ` ${kitchen.widthCm} см`;
+      setCustomName(`Кухня${shapeSuffix}`);
     }
   }, [
     kind,
     wardrobe.widthCm,
     wardrobe.heightCm,
     wardrobe.doorCount,
+    kitchen.shape,
     kitchen.widthCm,
-    kitchen.moduleCount,
+    kitchen.wingWidthCm,
     nameTouched,
   ]);
 
@@ -123,6 +188,24 @@ export function ParametricBuilderModal({
       return { ...prev, modulePattern: nextPattern };
     });
   };
+
+  const toggleMirrorDoor = (doorIdx: number) => {
+    setWardrobe((prev) => {
+      const current = new Set(prev.mirrorDoorIndices ?? []);
+      if (current.has(doorIdx)) {
+        current.delete(doorIdx);
+      } else {
+        current.add(doorIdx);
+      }
+      return {
+        ...prev,
+        mirrorDoorIndices: Array.from(current).sort((a, b) => a - b),
+      };
+    });
+  };
+
+  const isLShape = kitchen.shape === 'l-left' || kitchen.shape === 'l-right';
+  const minWingCm = Math.max(100, kitchen.depthCm + 40);
 
   return (
     <div
@@ -267,11 +350,13 @@ export function ParametricBuilderModal({
               >
                 {kind === 'wardrobe'
                   ? `${wardrobe.widthCm} × ${wardrobe.heightCm} × ${wardrobe.depthCm} см`
-                  : `${kitchen.widthCm} × ${
-                      kitchen.layoutMode === 'tall-column'
-                        ? kitchen.tallCabinetHeightCm
-                        : kitchen.baseHeightCm
-                    } × ${kitchen.depthCm} см`}
+                  : isLShape
+                    ? `${kitchen.widthCm} × ${kitchen.wingWidthCm ?? 160} см (Г-образна)`
+                    : `${kitchen.widthCm} × ${
+                        kitchen.layoutMode === 'tall-column'
+                          ? kitchen.tallCabinetHeightCm
+                          : kitchen.baseHeightCm
+                      } × ${kitchen.depthCm} см`}
               </span>
             </div>
           </div>
@@ -286,7 +371,6 @@ export function ParametricBuilderModal({
               gap: '12px',
             }}
           >
-            {/* Име на изделието */}
             <div className="axis-field">
               <span>Име в проекта</span>
               <input
@@ -302,7 +386,6 @@ export function ParametricBuilderModal({
 
             {kind === 'wardrobe' ? (
               <>
-                {/* Бързи шаблони гардероб */}
                 <div>
                   <div className="section-label">Бързи шаблони гардероб</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
@@ -318,6 +401,7 @@ export function ParametricBuilderModal({
                           depthCm: 58,
                           doorCount: 2,
                           doorType: 'hinged',
+                          mirrorDoorIndices: [],
                           hasTopBridge: false,
                           bottomDrawersCount: 0,
                         }))
@@ -337,12 +421,13 @@ export function ParametricBuilderModal({
                           depthCm: 60,
                           doorCount: 3,
                           doorType: 'hinged',
+                          mirrorDoorIndices: [1],
                           hasTopBridge: false,
                           bottomDrawersCount: 2,
                         }))
                       }
                     >
-                      Трикрилен + чекмеджета 180 см
+                      Трикрилен с огледало 180 см
                     </button>
                     <button
                       type="button"
@@ -356,6 +441,7 @@ export function ParametricBuilderModal({
                           depthCm: 62,
                           doorCount: 2,
                           doorType: 'sliding',
+                          mirrorDoorIndices: [0],
                           hasTopBridge: true,
                           topBridgeHeightCm: 45,
                           bottomDrawersCount: 0,
@@ -367,7 +453,6 @@ export function ParametricBuilderModal({
                   </div>
                 </div>
 
-                {/* Габаритни размери */}
                 <div>
                   <div className="section-label">Размери (см)</div>
                   <div
@@ -376,59 +461,37 @@ export function ParametricBuilderModal({
                   >
                     <div className="axis-field">
                       <span>Ширина</span>
-                      <input
-                        type="number"
-                        min={50}
+                      <NumericInput
+                        value={wardrobe.widthCm}
+                        min={45}
                         max={450}
                         step={5}
-                        className="input-control"
-                        value={wardrobe.widthCm}
-                        onChange={(e) =>
-                          setWardrobe((p) => ({
-                            ...p,
-                            widthCm: Math.max(45, Number(e.target.value) || 120),
-                          }))
-                        }
+                        onChange={(v) => setWardrobe((p) => ({ ...p, widthCm: v }))}
                       />
                     </div>
                     <div className="axis-field">
                       <span>Височина</span>
-                      <input
-                        type="number"
-                        min={120}
+                      <NumericInput
+                        value={wardrobe.heightCm}
+                        min={100}
                         max={320}
                         step={5}
-                        className="input-control"
-                        value={wardrobe.heightCm}
-                        onChange={(e) =>
-                          setWardrobe((p) => ({
-                            ...p,
-                            heightCm: Math.max(100, Number(e.target.value) || 220),
-                          }))
-                        }
+                        onChange={(v) => setWardrobe((p) => ({ ...p, heightCm: v }))}
                       />
                     </div>
                     <div className="axis-field">
                       <span>Дълбочина</span>
-                      <input
-                        type="number"
-                        min={35}
-                        max={80}
-                        step={2}
-                        className="input-control"
+                      <NumericInput
                         value={wardrobe.depthCm}
-                        onChange={(e) =>
-                          setWardrobe((p) => ({
-                            ...p,
-                            depthCm: Math.max(35, Number(e.target.value) || 60),
-                          }))
-                        }
+                        min={35}
+                        max={85}
+                        step={2}
+                        onChange={(v) => setWardrobe((p) => ({ ...p, depthCm: v }))}
                       />
                     </div>
                   </div>
                 </div>
 
-                {/* Крила, врати и секции */}
                 <div
                   className="axis-grid"
                   style={{ gridTemplateColumns: '1fr 1fr' }}
@@ -441,12 +504,16 @@ export function ParametricBuilderModal({
                       max={6}
                       step={1}
                       value={wardrobe.doorCount}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const count = Number(e.target.value);
                         setWardrobe((p) => ({
                           ...p,
-                          doorCount: Number(e.target.value),
-                        }))
-                      }
+                          doorCount: count,
+                          mirrorDoorIndices: (p.mirrorDoorIndices ?? []).filter(
+                            (idx) => idx < count
+                          ),
+                        }));
+                      }}
                     />
                   </div>
                   <div className="axis-field">
@@ -468,42 +535,91 @@ export function ParametricBuilderModal({
                 </div>
 
                 <div
+                  style={{
+                    backgroundColor: '#1e293b',
+                    padding: '8px 10px',
+                    borderRadius: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span className="section-label" style={{ marginBottom: 0 }}>
+                      🪞 Огледало на избрани врати
+                    </span>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '10px', padding: '2px 6px' }}
+                      onClick={() => {
+                        const allSelected =
+                          (wardrobe.mirrorDoorIndices ?? []).length ===
+                          wardrobe.doorCount;
+                        setWardrobe((p) => ({
+                          ...p,
+                          mirrorDoorIndices: allSelected
+                            ? []
+                            : Array.from({ length: p.doorCount }, (_, i) => i),
+                        }));
+                      }}
+                    >
+                      {(wardrobe.mirrorDoorIndices ?? []).length ===
+                      wardrobe.doorCount
+                        ? 'Премахни всички'
+                        : 'Всички огледални'}
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {Array.from({ length: wardrobe.doorCount }).map((_, idx) => {
+                      const active = (wardrobe.mirrorDoorIndices ?? []).includes(
+                        idx
+                      );
+                      return (
+                        <button
+                          key={`mir-door-${idx}`}
+                          type="button"
+                          className={`btn ${active ? 'btn-active' : ''}`}
+                          style={{ fontSize: '11px', padding: '4px 9px' }}
+                          onClick={() => toggleMirrorDoor(idx)}
+                        >
+                          {active ? '🪞' : '🚪'} Крило {idx + 1}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div
                   className="axis-grid"
                   style={{ gridTemplateColumns: '1fr 1fr' }}
                 >
                   <div className="axis-field">
                     <span>Външни чекмеджета долу (0–4)</span>
-                    <input
-                      type="number"
+                    <NumericInput
+                      value={wardrobe.bottomDrawersCount}
                       min={0}
                       max={4}
                       disabled={wardrobe.doorType === 'sliding'}
-                      className="input-control"
-                      value={wardrobe.bottomDrawersCount}
-                      onChange={(e) =>
-                        setWardrobe((p) => ({
-                          ...p,
-                          bottomDrawersCount: Math.max(
-                            0,
-                            Math.min(4, Number(e.target.value) || 0)
-                          ),
-                        }))
+                      onChange={(v) =>
+                        setWardrobe((p) => ({ ...p, bottomDrawersCount: v }))
                       }
                     />
                   </div>
                   <div className="axis-field">
                     <span>Цокъл (см)</span>
-                    <input
-                      type="number"
+                    <NumericInput
+                      value={wardrobe.plinthHeightCm}
                       min={0}
                       max={15}
-                      className="input-control"
-                      value={wardrobe.plinthHeightCm}
-                      onChange={(e) =>
-                        setWardrobe((p) => ({
-                          ...p,
-                          plinthHeightCm: Math.max(0, Number(e.target.value) || 0),
-                        }))
+                      onChange={(v) =>
+                        setWardrobe((p) => ({ ...p, plinthHeightCm: v }))
                       }
                     />
                   </div>
@@ -532,7 +648,6 @@ export function ParametricBuilderModal({
                   <span>Горна надстройка (антресол {wardrobe.topBridgeHeightCm} см)</span>
                 </label>
 
-                {/* Стил на фронтовете и дръжките */}
                 <div
                   className="axis-grid"
                   style={{ gridTemplateColumns: '1fr 1fr' }}
@@ -574,7 +689,6 @@ export function ParametricBuilderModal({
                   </div>
                 </div>
 
-                {/* Цветове и текстури */}
                 <div
                   style={{
                     backgroundColor: '#1e293b',
@@ -589,7 +703,6 @@ export function ParametricBuilderModal({
                     Цветове и материали
                   </div>
 
-                  {/* Врати */}
                   <div className="axis-field">
                     <span>Вратички / Чела</span>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
@@ -640,7 +753,6 @@ export function ParametricBuilderModal({
                     )}
                   </div>
 
-                  {/* Корпус */}
                   <div className="axis-field">
                     <span>Корпус (страници и вътрешност)</span>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
@@ -672,7 +784,6 @@ export function ParametricBuilderModal({
                     </div>
                   </div>
 
-                  {/* Дръжки */}
                   <div className="axis-field">
                     <span>Цвят на дръжките</span>
                     <div style={{ display: 'flex', gap: '6px' }}>
@@ -700,7 +811,6 @@ export function ParametricBuilderModal({
               </>
             ) : (
               <>
-                {/* КУХНЕНСКИ КОНФИГУРАТОР */}
                 <div>
                   <div className="section-label">Бързи конфигурации кухня</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
@@ -711,6 +821,7 @@ export function ParametricBuilderModal({
                       onClick={() =>
                         setKitchen((p) => ({
                           ...p,
+                          shape: 'straight',
                           layoutMode: 'base-and-wall',
                           widthCm: 240,
                           moduleCount: 4,
@@ -727,20 +838,17 @@ export function ParametricBuilderModal({
                       onClick={() =>
                         setKitchen((p) => ({
                           ...p,
+                          shape: 'l-left',
                           layoutMode: 'base-and-wall',
-                          widthCm: 300,
-                          moduleCount: 5,
-                          modulePattern: [
-                            'drawers',
-                            'oven',
-                            'doors',
-                            'sink',
-                            'doors',
-                          ],
+                          widthCm: 240,
+                          wingWidthCm: 160,
+                          wingModuleCount: 2,
+                          moduleCount: 4,
+                          modulePattern: ['doors', 'drawers', 'oven', 'sink'],
                         }))
                       }
                     >
-                      Голяма кухня 300 см
+                      Г-образна (ляво крило) 240×160
                     </button>
                     <button
                       type="button"
@@ -749,6 +857,26 @@ export function ParametricBuilderModal({
                       onClick={() =>
                         setKitchen((p) => ({
                           ...p,
+                          shape: 'l-right',
+                          layoutMode: 'base-and-wall',
+                          widthCm: 240,
+                          wingWidthCm: 160,
+                          wingModuleCount: 2,
+                          moduleCount: 4,
+                          modulePattern: ['sink', 'oven', 'drawers', 'doors'],
+                        }))
+                      }
+                    >
+                      Г-образна (дясно крило) 240×160
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '11px', padding: '4px 8px' }}
+                      onClick={() =>
+                        setKitchen((p) => ({
+                          ...p,
+                          shape: 'straight',
                           layoutMode: 'base-only',
                           widthCm: 180,
                           depthCm: 80,
@@ -759,25 +887,102 @@ export function ParametricBuilderModal({
                     >
                       Кухненски остров 180 см
                     </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      style={{ fontSize: '11px', padding: '4px 8px' }}
-                      onClick={() =>
-                        setKitchen((p) => ({
-                          ...p,
-                          layoutMode: 'tall-column',
-                          widthCm: 120,
-                          moduleCount: 2,
-                        }))
-                      }
-                    >
-                      Колонни шкафове 120 см
-                    </button>
                   </div>
                 </div>
 
-                {/* Тип ред и размери */}
+                {/* Форма на кухнята (Права / Г-образна) */}
+                {kitchen.layoutMode !== 'tall-column' && (
+                  <div
+                    style={{
+                      backgroundColor: '#1e293b',
+                      padding: '8px 10px',
+                      borderRadius: '8px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                    }}
+                  >
+                    <div className="axis-field">
+                      <span>Форма на кухнята</span>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        {[
+                          { id: 'straight', label: '▬ Права (I)' },
+                          { id: 'l-left', label: '┗ Г-образна (Ляво крило)' },
+                          { id: 'l-right', label: '┛ Г-образна (Дясно крило)' },
+                        ].map((s) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            className={`btn ${
+                              (kitchen.shape ?? 'straight') === s.id
+                                ? 'btn-active'
+                                : ''
+                            }`}
+                            style={{ flex: 1, fontSize: '10.5px', padding: '5px 6px' }}
+                            onClick={() =>
+                              setKitchen((p) => ({
+                                ...p,
+                                shape: s.id as KitchenShapeType,
+                              }))
+                            }
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {isLShape && (
+                      <div
+                        className="axis-grid"
+                        style={{ gridTemplateColumns: '1.2fr 0.8fr' }}
+                      >
+                        <div className="axis-field">
+                          <span>Дължина Г-крило ({kitchen.wingWidthCm ?? 160} см)</span>
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            <input
+                              type="range"
+                              min={minWingCm}
+                              max={450}
+                              step={5}
+                              style={{ flex: 1 }}
+                              value={Math.max(minWingCm, kitchen.wingWidthCm ?? 160)}
+                              onChange={(e) =>
+                                setKitchen((p) => ({
+                                  ...p,
+                                  wingWidthCm: Number(e.target.value),
+                                }))
+                              }
+                            />
+                            <div style={{ width: '74px' }}>
+                              <NumericInput
+                                value={kitchen.wingWidthCm ?? 160}
+                                min={minWingCm}
+                                max={450}
+                                step={5}
+                                onChange={(v) =>
+                                  setKitchen((p) => ({ ...p, wingWidthCm: v }))
+                                }
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="axis-field">
+                          <span>Модули в Г-крилото</span>
+                          <NumericInput
+                            value={kitchen.wingModuleCount ?? 2}
+                            min={1}
+                            max={6}
+                            onChange={(v) =>
+                              setKitchen((p) => ({ ...p, wingModuleCount: v }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div
                   className="axis-grid"
                   style={{ gridTemplateColumns: '1fr 1fr' }}
@@ -801,7 +1006,7 @@ export function ParametricBuilderModal({
                     </select>
                   </div>
                   <div className="axis-field">
-                    <span>Брой модули ({kitchen.moduleCount})</span>
+                    <span>Брой модули основен ред ({kitchen.moduleCount})</span>
                     <input
                       type="range"
                       min={1}
@@ -823,59 +1028,38 @@ export function ParametricBuilderModal({
                   style={{ gridTemplateColumns: '1fr 1fr 1fr' }}
                 >
                   <div className="axis-field">
-                    <span>Обща ширина (см)</span>
-                    <input
-                      type="number"
+                    <span>Ширина основен ред (см)</span>
+                    <NumericInput
+                      value={kitchen.widthCm}
                       min={40}
                       max={600}
                       step={5}
-                      className="input-control"
-                      value={kitchen.widthCm}
-                      onChange={(e) =>
-                        setKitchen((p) => ({
-                          ...p,
-                          widthCm: Math.max(40, Number(e.target.value) || 240),
-                        }))
-                      }
+                      onChange={(v) => setKitchen((p) => ({ ...p, widthCm: v }))}
                     />
                   </div>
                   <div className="axis-field">
                     <span>Височина плот (см)</span>
-                    <input
-                      type="number"
+                    <NumericInput
+                      value={kitchen.baseHeightCm}
                       min={70}
                       max={105}
-                      step={1}
-                      className="input-control"
-                      value={kitchen.baseHeightCm}
-                      onChange={(e) =>
-                        setKitchen((p) => ({
-                          ...p,
-                          baseHeightCm: Math.max(70, Number(e.target.value) || 86),
-                        }))
+                      onChange={(v) =>
+                        setKitchen((p) => ({ ...p, baseHeightCm: v }))
                       }
                     />
                   </div>
                   <div className="axis-field">
                     <span>Дълбочина (см)</span>
-                    <input
-                      type="number"
+                    <NumericInput
+                      value={kitchen.depthCm}
                       min={45}
                       max={120}
                       step={2}
-                      className="input-control"
-                      value={kitchen.depthCm}
-                      onChange={(e) =>
-                        setKitchen((p) => ({
-                          ...p,
-                          depthCm: Math.max(45, Number(e.target.value) || 60),
-                        }))
-                      }
+                      onChange={(v) => setKitchen((p) => ({ ...p, depthCm: v }))}
                     />
                   </div>
                 </div>
 
-                {/* Разпределение по модули */}
                 {(kitchen.layoutMode === 'base-and-wall' ||
                   kitchen.layoutMode === 'base-only') && (
                   <div
@@ -944,7 +1128,6 @@ export function ParametricBuilderModal({
                   </div>
                 )}
 
-                {/* Стил на фронтове и дръжки */}
                 <div
                   className="axis-grid"
                   style={{ gridTemplateColumns: '1fr 1fr' }}
@@ -986,7 +1169,6 @@ export function ParametricBuilderModal({
                   </div>
                 </div>
 
-                {/* Цветове на кухнята: Вратички, Плот, Термогръб, Дръжки */}
                 <div
                   style={{
                     backgroundColor: '#1e293b',
@@ -1001,7 +1183,6 @@ export function ParametricBuilderModal({
                     Цветове и материали на кухнята
                   </div>
 
-                  {/* Вратички */}
                   <div className="axis-field">
                     <span>Вратички / Чела</span>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
@@ -1052,7 +1233,6 @@ export function ParametricBuilderModal({
                     )}
                   </div>
 
-                  {/* Термоплот */}
                   <div className="axis-field">
                     <span>Термоплот</span>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
@@ -1104,7 +1284,6 @@ export function ParametricBuilderModal({
                     )}
                   </div>
 
-                  {/* Термогръб */}
                   <div className="axis-field">
                     <span>Термогръб (между долни и горни шкафове)</span>
                     <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
@@ -1156,7 +1335,6 @@ export function ParametricBuilderModal({
                     )}
                   </div>
 
-                  {/* Дръжки / Gola профил */}
                   <div className="axis-field">
                     <span>Цвят на дръжки / Gola профил</span>
                     <div style={{ display: 'flex', gap: '6px' }}>
@@ -1186,7 +1364,6 @@ export function ParametricBuilderModal({
           </div>
         </div>
 
-        {/* ДОЛНА ЛЕНТА С БУТОН ЗА ДОБАВЯНЕ */}
         <div
           style={{
             padding: '12px 16px',
