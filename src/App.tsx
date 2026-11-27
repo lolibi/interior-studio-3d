@@ -43,6 +43,7 @@ import type { SurfaceBatchPatch } from './components/RightInspector';
 import type { DiscoveredMaterialSlot } from './components/SceneItemMesh';
 import { AdminPanel } from './components/AdminPanel';
 import { ParametricBuilderModal } from './components/ParametricBuilderModal';
+import { ProjectBomModal } from './components/ProjectBomModal';
 import {
   DEFAULT_CATALOG_MODELS,
   loadCatalog,
@@ -84,6 +85,7 @@ export function App() {
     loadUserFurniturePresets()
   );
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isBomOpen, setIsBomOpen] = useState(false);
   const [isSyncingServer, setIsSyncingServer] = useState(false);
   const [parametricBuilderState, setParametricBuilderState] = useState<{
     isOpen: boolean;
@@ -914,6 +916,7 @@ export function App() {
 
       if (e.key === 'Escape') {
         setOpenTopPopover(null);
+        setIsBomOpen(false);
         setParametricBuilderState({ isOpen: false });
         setIsDrawingWalls(false);
         setDraftPoints([]);
@@ -1488,6 +1491,18 @@ export function App() {
             onClick={() => setUnit((u) => (u === 'cm' ? 'm' : 'cm'))}
           >
             {unit === 'cm' ? 'СМ' : 'М'}
+          </button>
+
+          <button
+            type="button"
+            className={`btn ${isBomOpen ? 'btn-active' : ''}`}
+            onClick={() => {
+              setOpenTopPopover(null);
+              setIsBomOpen(true);
+            }}
+            title="Автоматична спецификация, квадратури и разкрой (CSV / PDF)"
+          >
+            📋 Спецификация
           </button>
 
           {/* ПАДАЩО МЕНЮ: ПРОЕКТ (всички контроли за проекта събрани тук) */}
@@ -2727,6 +2742,18 @@ export function App() {
           }}
         />
       </div>
+
+      {/* СПЕЦИФИКАЦИЯ И РАЗКРОЙ (BOM) */}
+      {isBomOpen && (
+        <ProjectBomModal
+          projectTitle={currentSceneTitle}
+          room={room}
+          sceneObjects={sceneObjects}
+          models={models}
+          textures={textures}
+          onClose={() => setIsBomOpen(false)}
+        />
+      )}
 
       {/* АДМИН ПАНЕЛ ЗА КАТАЛОГА */}
       {isAdminOpen && (
